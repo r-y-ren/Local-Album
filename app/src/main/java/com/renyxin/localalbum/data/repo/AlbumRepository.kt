@@ -329,8 +329,10 @@ class AlbumRepository(
         scanMutex.withLock {
             Log.i(TAG, "rescan: 获得 scanMutex，设置 Scanning 状态")
             _scanState.value = ScanState.Scanning("准备扫描…")
-            // Phase 0: 扫描期间持有前台服务引用，防杀后台。AI 分析侧由 HybridIndexer 独立 acquire。
-            appContext?.let { ScanServiceController.acquire(it, "正在扫描媒体…") }
+            // 标记是否已启动前台服务。仅在确有扫描任务（roots 非空）时 acquire，
+            // 避免 roots 为空时启动又立即停止服务，导致服务未及时 startForeground
+            // 触发 ForegroundServiceDidNotStartInTimeException 崩溃（清除数据后复现）。
+            var serviceAcquired = false
             try {
             runCatching {
             // 诊断：settingsRepository.state 为 combine(vararg) 冷 Flow，若任一源 Flow 不发射则 .first() 永久阻塞。
@@ -353,6 +355,10 @@ class AlbumRepository(
                 _scanState.value = ScanState.Idle
                 return@runCatching
             }
+
+            // Phase 0: 确认有扫描任务后才启动前台服务，防杀后台。AI 分析侧由 HybridIndexer 独立 acquire。
+            appContext?.let { ScanServiceController.acquire(it, "正在扫描媒体…") }
+            serviceAcquired = true
 
             if (hybridIndexer != null) {
                 // ---- 混合索引路径：优先使用 HybridIndexer ----
@@ -415,8 +421,10 @@ class AlbumRepository(
             _scanState.value = ScanState.Failed(e.message ?: "扫描失败")
         }
             } finally {
-                // Phase 0: 释放扫描侧前台服务引用（分析侧引用独立计数，未完成则服务继续存活）
-                appContext?.let { ScanServiceController.release(it) }
+                // Phase 0: 仅在已 acquire 时释放，避免误减引用计数影响 AI 分析侧服务
+                if (serviceAcquired) {
+                    appContext?.let { ScanServiceController.release(it) }
+                }
                 // 修复：确保 scanState 永远不会卡在 Scanning 状态（如协程被取消时）
                 if (_scanState.value is ScanState.Scanning) {
                     _scanState.value = ScanState.Done
