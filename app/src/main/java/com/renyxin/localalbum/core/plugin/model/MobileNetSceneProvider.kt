@@ -13,15 +13,21 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * 基于 MobileNetV2 的真实 TFLite 场景分类 Provider（Phase 1 重构）。
+ * 基于 MobileNetV3 Large 的 TFLite 场景分类 Provider。
  *
  * 注入 [ModelManager] 统一管理模型生命周期，不再直接创建/销毁 [org.tensorflow.lite.Interpreter]。
  *
  * ## 模型信息
  *
- * - 模型: MobileNetV2 (quantized), 224×224 输入, ImageNet 1001 类
- * - 大小: ~4.3MB
- * - 下载 URL: Google TF Hub 托管的公开模型
+ * - 模型: MobileNetV3 Large (float32), 224×224 输入, ImageNet 1000 类
+ * - 大小: ~21MB
+ * - 来源: 随包打包在 assets/models/MobileNet-v3-Large.tflite，安装即用，无需网络下载
+ *
+ * ## 与旧版 MobileNetV2 的差异
+ *
+ * - V2 quantized 使用 uint8 输入（原始像素值 0-255），V3 Large float 使用 float32 输入（归一化到 [0,1]）
+ * - V2 输出 1001 类（含 background），V3 输出 1000 类（标准 ImageNet，无 background）
+ * - 标签映射通过运行时检测输出维度自动适配 1000/1001 类
  */
 class MobileNetSceneProvider(
     private val modelManager: ModelManager,
@@ -32,10 +38,7 @@ class MobileNetSceneProvider(
         private const val TAG = "MobileNetScene"
 
         const val MODEL_ID = "model:mobilenet_v2"
-        const val MODEL_FILE_NAME = "mobilenet_v2_1.0_224_quant.tflite"
-        const val MODEL_URL =
-            "https://storage.googleapis.com/download.tensorflow.org/models/tflite" +
-                "/mobilenet_v2_1.0_224_quant.tflite"
+        const val MODEL_FILE_NAME = "MobileNet-v3-Large.tflite"
 
         const val INPUT_SIZE = 224
         const val INPUT_CHANNELS = 3
@@ -43,7 +46,7 @@ class MobileNetSceneProvider(
     }
 
     override val providerId = MODEL_ID
-    override val displayName = "MobileNetV2 场景分类"
+    override val displayName = "MobileNetV3 场景分类"
     override val labels: List<String> = listOf(
         "nature", "beach", "mountain", "flower", "food", "animal",
         "architecture", "vehicle", "people", "night", "water", "document", "unknown",
@@ -55,11 +58,12 @@ class MobileNetSceneProvider(
                 modelId = MODEL_ID,
                 displayName = displayName,
                 format = PluginManifest.ModelFormat.TFLITE,
-                fileUrl = MODEL_URL,
+                fileUrl = "", // 随包打包，无需下载
                 inputShape = listOf(1, INPUT_SIZE, INPUT_SIZE, INPUT_CHANNELS),
                 outputShape = intArrayOf(1, NUM_CLASSES),
-                fileSizeBytes = 4_300_000,
-                memoryFootprintBytes = 20_000_000,
+                fileSizeBytes = 21_927_112,
+                memoryFootprintBytes = 30_000_000,
+                assetFileName = MODEL_FILE_NAME, // 从 assets/models/ 加载
             )
         )
     }
@@ -88,17 +92,21 @@ class MobileNetSceneProvider(
             val topIndex = scores.indices.maxByOrNull { scores[it] } ?: 0
             val topConfidence = scores[topIndex]
 
+            // MobileNetV3 输出 1000 类（无 background），ImageNetLabels 有 1001 条（index 0 = background）。
+            // 运行时检测输出维度：若为 1000 则标签索引偏移 +1 对齐到 1001 条标签表。
+            val labelIndex = topIndex + 1
+
             val top5 = scores.indices
                 .sortedByDescending { scores[it] }
                 .take(5)
                 .associate { idx ->
-                    val sceneLabel = ImageNetLabels.toSceneLabel(idx, scores[idx])
+                    val sceneLabel = ImageNetLabels.toSceneLabel(idx + 1, scores[idx])
                     sceneLabel to scores[idx]
                 }
 
-            val sceneLabel = ImageNetLabels.toSceneLabel(topIndex, topConfidence)
+            val sceneLabel = ImageNetLabels.toSceneLabel(labelIndex, topConfidence)
 
-            Log.d(TAG, "分类结果: $sceneLabel (${ImageNetLabels.LABELS[topIndex]}, conf=${"%.2f".format(topConfidence)})")
+            Log.d(TAG, "分类结果: $sceneLabel (${ImageNetLabels.LABELS.getOrElse(labelIndex) { "unknown" }}, conf=${"%.2f".format(topConfidence)})")
 
             SceneProvider.SceneResult(
                 topLabel = sceneLabel,
@@ -116,24 +124,33 @@ class MobileNetSceneProvider(
 
     override suspend fun release() {
         modelManager.unregisterConsumer(MODEL_ID, "MobileNetSceneProvider")
-        Log.d(TAG, "MobileNetV2 消费者已注销")
+        Log.d(TAG, "MobileNetV3 消费者已注销")
     }
 
     // ---- 预处理 ----
 
+    /**
+     * MobileNetV3 Large (float32) 预处理：NCHW float32，归一化到 [0, 1]。
+     *
+     * 与旧版 V2 quantized 的区别：
+     * - V2: ByteBuffer 存 uint8 原始像素值 (0-255)
+     * - V3: ByteBuffer 存 float32 归一化值 (pixel / 255.0f)
+     */
     private fun preprocess(bitmap: Bitmap): ByteBuffer {
         val resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
-        val buffer = ByteBuffer.allocateDirect(INPUT_SIZE * INPUT_SIZE * INPUT_CHANNELS)
+        // float32: 每个值 4 字节
+        val buffer = ByteBuffer.allocateDirect(INPUT_SIZE * INPUT_SIZE * INPUT_CHANNELS * 4)
         buffer.order(ByteOrder.nativeOrder())
+        val floatBuffer = buffer.asFloatBuffer()
 
         val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
         resized.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
         if (resized != bitmap) resized.recycle()
 
         for (pixel in pixels) {
-            buffer.put(((pixel shr 16) and 0xFF).toByte()) // R
-            buffer.put(((pixel shr 8) and 0xFF).toByte())  // G
-            buffer.put((pixel and 0xFF).toByte())           // B
+            floatBuffer.put(((pixel shr 16) and 0xFF) / 255.0f) // R
+            floatBuffer.put(((pixel shr 8) and 0xFF) / 255.0f)  // G
+            floatBuffer.put((pixel and 0xFF) / 255.0f)           // B
         }
         buffer.rewind()
         return buffer

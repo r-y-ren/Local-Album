@@ -238,6 +238,35 @@ class AppContainer(context: Context) {
      */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * 核心分析管道（Phase 2 重构 + 修复：单例化，保证进度 UI 与运行管线共用同一 ProgressManager）。
+     *
+     * 仅包含核心分析阶段（人脸/场景/语义/质量/OCR/地理/相似度），
+     * 各阶段从 [capabilityRegistry] 获取当前激活的 Provider。
+     * 扩展 AI 插件（换脸、风格迁移等）不再参与批处理管道。
+     *
+     * 修复说明：原实现使用 `get()` 计算属性，每次访问都新建实例，导致
+     * HybridIndexer 持有的运行管线、ViewModel 注入的 progressManager、
+     * GlobalProgressIndicator 观察的 progressManager 分属不同实例，进度 UI 永不更新。
+     * 现改为 `by lazy` 单例，确保全应用共用同一管线与 [ProgressManager]。
+     *
+     * 注意：单例在首次访问时快照当时的激活 Provider；运行时切换 Provider 后
+     * 需调用方显式重建管线（或改为在 execute 时实时取 Provider）。
+     *
+     * 修复 NPE：必须在 init 块之前声明 by lazy 委托。Kotlin 属性初始化按声明顺序
+     * 执行，init 块中的 startScanProgressNotification/startAnalysisResumeFlagTracking
+     * 通过 appScope.launch 异步访问此属性，若委托在 init 之后声明则可能为 null。
+     */
+    val pluginAnalysisPipeline: PluginAnalysisPipeline by lazy {
+        PluginAnalysisPipeline.create(
+            mediaDao = database.mediaDao(),
+            faceDao = database.faceDao(),
+            embeddingDao = database.embeddingDao(),
+            capabilityRegistry = capabilityRegistry,
+            analysisStateDao = database.analysisStateDao(),
+        )
+    }
+
     // ---- Demo 插件初始化 ----
 
     init {
@@ -445,31 +474,6 @@ class AppContainer(context: Context) {
                 android.util.Log.e("AppContainer", "内置扩展插件注册失败", e)
             }
         }
-    }
-
-    /**
-     * 核心分析管道（Phase 2 重构 + 修复：单例化，保证进度 UI 与运行管线共用同一 ProgressManager）。
-     *
-     * 仅包含核心分析阶段（人脸/场景/语义/质量/OCR/地理/相似度），
-     * 各阶段从 [capabilityRegistry] 获取当前激活的 Provider。
-     * 扩展 AI 插件（换脸、风格迁移等）不再参与批处理管道。
-     *
-     * 修复说明：原实现使用 `get()` 计算属性，每次访问都新建实例，导致
-     * HybridIndexer 持有的运行管线、ViewModel 注入的 progressManager、
-     * GlobalProgressIndicator 观察的 progressManager 分属不同实例，进度 UI 永不更新。
-     * 现改为 `by lazy` 单例，确保全应用共用同一管线与 [ProgressManager]。
-     *
-     * 注意：单例在首次访问时快照当时的激活 Provider；运行时切换 Provider 后
-     * 需调用方显式重建管线（或改为在 execute 时实时取 Provider）。
-     */
-    val pluginAnalysisPipeline: PluginAnalysisPipeline by lazy {
-        PluginAnalysisPipeline.create(
-            mediaDao = database.mediaDao(),
-            faceDao = database.faceDao(),
-            embeddingDao = database.embeddingDao(),
-            capabilityRegistry = capabilityRegistry,
-            analysisStateDao = database.analysisStateDao(),
-        )
     }
 
     /**

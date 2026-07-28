@@ -47,15 +47,12 @@ class BuiltinOcrStage(
         val total = filePaths.size
 
         // 文件级并行 OCR 识别
+        // 修复：使用 setOcrText 仅写入 ocrText 字段，避免覆盖同层并行执行的
+        // SceneStage/QualityStage 已写入的 sceneType/qualityScore（DAG Layer 0 竞态）。
         val results = ParallelFileProcessor.mapParallel(filePaths, enhancedCallback) { path ->
             val result = ocrProvider.recognize(File(path), preferChinese = true)
             val ocrText = if (result != null && result.fullText.isNotBlank()) result.fullText.take(500) else null
-            mediaDao.setAnalysisFields(
-                path = path,
-                0.0f,
-                sceneType = "",
-                ocrText = ocrText,
-            )
+            mediaDao.setOcrText(path, ocrText)
             ocrText != null
         }
         val success = results.count { it.success }

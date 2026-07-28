@@ -2619,5 +2619,7 @@ private fun com.renyxin.localalbum.data.db.entity.MediaEntity.toMediaItem(): Med
         sceneType = sceneType,
         thumbnailPath = thumbnailPath,
         faceClusterId = faceClusterId,
+        ocrText = ocrText,
+        qualityScore = qualityScore,
     )
 }

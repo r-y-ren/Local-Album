@@ -21,9 +21,9 @@ import java.nio.ByteOrder
  *
  * 双模型串联：
  * 1. PP-OCRv6_small_det_infer/inference.onnx → DB 检测文字区域（概率图阈值 + 连通域外接框）
- * 2. PP-OCRv5_mobile_rec_infer/inference.onnx → CTC 识别文字内容（ppocr_keys_v1.txt 字典）
+ * 2. PP-OCRv5_mobile_rec_infer/inference.onnx → CTC 识别文字内容（ppocrv5_dict.txt 字典）
  *
- * 字典位于 assets/ppocr_keys_v1.txt（每行一个字符），CTC blank 位于 index 0（PaddleOCR CTCLabelDecode 约定）。
+ * 字典位于 assets/ppocrv5_dict.txt（每行一个字符，18383 条），CTC blank 位于 index 0（PaddleOCR CTCLabelDecode 约定）。
  */
 class PaddleOCRProvider(
     private val modelManager: ModelManager,
@@ -35,7 +35,9 @@ class PaddleOCRProvider(
         const val DET_MODEL_ID = "model:paddleocr_det"
         const val REC_MODEL_ID = "model:paddleocr_rec"
         private const val DET_INPUT_SIZE = 640
-        private const val REC_IMG_H = 32
+        // 修复：PP-OCRv5_mobile_rec 模型要求输入高度为 48（见 inference.yml RecResizeImg.image_shape: [3, 48, 320]），
+        // 原值 32 导致 ONNX Runtime 报错 ORT_INVALID_ARGUMENT (Got: 32 Expected: 48)。
+        private const val REC_IMG_H = 48
         private const val REC_IMG_W = 320
         private const val DET_THRESH = 0.3f
         private const val MIN_BOX_AREA = 100
@@ -43,7 +45,10 @@ class PaddleOCRProvider(
         // 检测使用 ImageNet 归一化
         private val DET_MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
         private val DET_STD = floatArrayOf(0.229f, 0.224f, 0.225f)
-        private const val DICT_PATH = "ppocr_keys_v1.txt"
+        // PP-OCRv5 多语言字典（18383 字符），配合 PP-OCRv5_mobile_rec 模型（输出 18385 类 = 18384 字符 + 1 blank）。
+        // 原 ppocr_keys_v1.txt 仅 6623 字符（PP-OCRv4），与 PP-OCRv5 模型输出维度不匹配，
+        // 导致 CTC 解码时大部分 argmax 索引超出字典范围，输出空文本。
+        private const val DICT_PATH = "ppocrv5_dict.txt"
     }
 
     override val providerId = "model:paddleocr"

@@ -125,20 +125,28 @@ class ModelManagerImpl(
      * 创建配置好的 ONNX SessionOptions：intra/inter op 线程设为 1（配合文件级并行，
      * 避免 oversubscription），启用 XNNPACK（ARM NEON 优化）。
      *
-     * 例外：InsightFace SCRFD det_10g.onnx 的 createSession 在 XNNPACK EP 下会
-     * abort（SIGABRT / libc++abi terminating），对该系列模型禁用 XNNPACK，
-     * 其他模型（含 EVA02-CLIP）保留 XNNPACK 加速。
+     * 例外（XNNPACK EP 下会触发原生崩溃 SIGABRT/SIGSEGV，需禁用）：
+     * - model:insightface_det — SCRFD det_10g createSession 在 XNNPACK 下 abort
+     * - model:paddleocr_det / model:paddleocr_rec — PP-OCRv5/v6 rec session.run 在
+     *   XNNPACK 下 SIGSEGV（det 正常但 rec 崩溃，输入形状已验证匹配，排除形状问题）。
+     *   禁用 XNNPACK 后回退到默认 CPU EP，OCR 推理仍可正常完成。
      */
     private fun createOnnxSessionOptions(modelId: String = ""): OrtSession.SessionOptions =
         OrtSession.SessionOptions().apply {
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             setIntraOpNumThreads(1)
             setInterOpNumThreads(1)
-            if (modelId != "model:insightface_det") {
+            // XNNPACK 不兼容模型黑名单：禁用 XNNPACK 以避免原生层崩溃
+            val xnnpackBlocklist = setOf(
+                "model:insightface_det",   // SCRFD det_10g createSession abort
+                "model:paddleocr_det",     // PP-OCRv6 det（预防性禁用，与 rec 保持一致）
+                "model:paddleocr_rec",     // PP-OCRv5 rec session.run SIGSEGV（已通过诊断日志确认）
+            )
+            if (modelId !in xnnpackBlocklist) {
                 runCatching { addXnnpack(emptyMap()) }
                     .onFailure { Log.w(TAG, "XNNPACK 启用失败，回退默认 EP: ${it.message}") }
             } else {
-                Log.i(TAG, "模型 $modelId 禁用 XNNPACK（SCRFD det_10g createSession 兼容性）")
+                Log.i(TAG, "模型 $modelId 禁用 XNNPACK（XNNPACK EP 兼容性，回退默认 CPU EP）")
             }
         }
 

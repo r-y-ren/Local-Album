@@ -254,14 +254,26 @@ interface MediaDao {
     suspend fun setSceneType(path: String, sceneType: String)
 
     // ---- 综合分析字段更新 ----
+    // 修复：qualityScore 和 sceneType 使用 COALESCE 保护，避免调用方传入零值/空串时
+    // 覆盖其他并行 Stage 已写入的有效结果（如 OcrStage 调用时不应清零 SceneStage/QualityStage 的结果）。
     @Query("""
-        UPDATE media_items SET 
-            qualityScore = :score,
-            sceneType = :sceneType,
+        UPDATE media_items SET
+            qualityScore = CASE WHEN :score > 0 THEN :score ELSE qualityScore END,
+            sceneType = COALESCE(NULLIF(:sceneType, ''), sceneType),
             ocrText = COALESCE(:ocrText, ocrText)
         WHERE filePath = :path
     """)
     suspend fun setAnalysisFields(path: String, score: Float, sceneType: String, ocrText: String?)
+
+    /**
+     * 仅更新 OCR 文本字段，不影响 qualityScore 和 sceneType。
+     *
+     * 供 [com.renyxin.localalbum.core.pipeline.stages.OcrStage] 使用，
+     * 避免与同层并行的 SceneStage/QualityStage 产生竞态覆盖。
+     * 当 [ocrText] 为 null 时保留已有值（COALESCE 语义）。
+     */
+    @Query("UPDATE media_items SET ocrText = COALESCE(:ocrText, ocrText) WHERE filePath = :path")
+    suspend fun setOcrText(path: String, ocrText: String?)
 
     // ---- 相似组 (v2) ----
     @Query("UPDATE media_items SET similarGroupId = :groupId WHERE filePath = :path")
