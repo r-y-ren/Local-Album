@@ -13,6 +13,7 @@ import com.renyxin.localalbum.core.model.DirectoryNode
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.core.recommendation.Recommendation
+import com.renyxin.localalbum.core.recommendation.RecommendationDiversifier
 import com.renyxin.localalbum.core.recommendation.RecommendationEngine
 import com.renyxin.localalbum.core.search.SemanticSearcher
 import com.renyxin.localalbum.data.backup.DatabaseExporter
@@ -164,7 +165,12 @@ class AlbumRepository(
     private val embeddingDao: EmbeddingDao? = null,
     private val mediaSource: MediaSource = MediaSource(),
     private val albumBuilder: AlbumBuilder = AlbumBuilder(),
-    private val recommendationEngine: RecommendationEngine = RecommendationEngine(),
+    private val recommendationEngine: RecommendationEngine = RecommendationEngine(
+        semanticClusterRecommender = embeddingDao?.let {
+            com.renyxin.localalbum.core.recommendation.SemanticClusterRecommender(embeddingDao = it)
+        },
+    ),
+    private val recommendationDiversifier: RecommendationDiversifier = RecommendationDiversifier(),
     private val hybridIndexer: HybridIndexer? = null,
     private val semanticProviderFactory: (() -> com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider?)? = null,
     context: android.content.Context? = null,
@@ -220,8 +226,8 @@ class AlbumRepository(
     /** 每批展示的推荐数量 */
     private val recommendationBatchSize: Int = 10
 
-    /** 全量打乱后的推荐池 */
-    private var shuffledRecommendationPool: List<Recommendation> = emptyList()
+    /** 全量多样性有序推荐池（Phase 5: 替换原 shuffled 随机打乱） */
+    private var diversifiedRecommendationPool: List<Recommendation> = emptyList()
 
     /** 当前批次指针 */
     private var recommendationCursor: Int = 0
@@ -1098,14 +1104,14 @@ class AlbumRepository(
     private suspend fun refreshRecommendations(leafs: List<Album>) {
         // P3-1: 加锁保护共享的推荐池/游标，避免并发刷新导致状态错乱
         recommendationMutex.withLock {
-            // 若池为空或已循环完毕，重新生成全量推荐并随机打乱
-            if (shuffledRecommendationPool.isEmpty() || recommendationCursor >= shuffledRecommendationPool.size) {
+            // Phase 5: 若池为空或已循环完毕，重新生成全量推荐并用多样性有序选择替换随机打乱
+            if (diversifiedRecommendationPool.isEmpty() || recommendationCursor >= diversifiedRecommendationPool.size) {
                 val allRecs = recommendationEngine.generateAll(leafs)
-                shuffledRecommendationPool = allRecs.shuffled()
+                diversifiedRecommendationPool = recommendationDiversifier.selectAll(allRecs)
                 recommendationCursor = 0
             }
 
-            val nextBatch = shuffledRecommendationPool
+            val nextBatch = diversifiedRecommendationPool
                 .drop(recommendationCursor)
                 .take(recommendationBatchSize)
 

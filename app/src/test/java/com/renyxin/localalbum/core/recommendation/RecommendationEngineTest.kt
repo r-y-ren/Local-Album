@@ -3,6 +3,7 @@ package com.renyxin.localalbum.core.recommendation
 import com.renyxin.localalbum.core.model.Album
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -17,7 +18,7 @@ class RecommendationEngineTest {
     private val fixedClock = Clock.fixed(fixedNow, ZoneOffset.UTC)
 
     @Test
-    fun `large album returns at least one recommendation`() {
+    fun `large album returns at least one recommendation`() = runBlocking {
         val media = (0 until 700).map { index ->
             MediaItem(
                 id = "$index",
@@ -43,7 +44,7 @@ class RecommendationEngineTest {
     }
 
     @Test
-    fun `recommendations are deterministic - no random factor`() {
+    fun `recommendations are deterministic - no random factor`() = runBlocking {
         val media = (0 until 50).map { index ->
             MediaItem(
                 id = "$index",
@@ -72,7 +73,7 @@ class RecommendationEngineTest {
     }
 
     @Test
-    fun `higher quality score yields higher recommendation score`() {
+    fun `higher quality score yields higher recommendation score`() = runBlocking {
         val baseTime = fixedNow.minus(10, ChronoUnit.DAYS)
         val lowQualityMedia = (0 until 10).map { index ->
             MediaItem(
@@ -119,7 +120,7 @@ class RecommendationEngineTest {
     }
 
     @Test
-    fun `cross-directory event aggregation produces event recommendations`() {
+    fun `cross-directory event aggregation produces event recommendations`() = runBlocking {
         // 两个不同目录，但时间和地点相近的照片 → 应聚合为事件
         val baseTime = fixedNow.minus(5, ChronoUnit.DAYS)
         val album1Media = (0 until 5).map { index ->
@@ -159,5 +160,179 @@ class RecommendationEngineTest {
         val eventPaths = eventRecs.flatMap { it.mediaItems.map { item -> item.filePath } }
         assertTrue("事件应包含 camera1 的照片", eventPaths.any { it.contains("camera1") })
         assertTrue("事件应包含 camera2 的照片", eventPaths.any { it.contains("camera2") })
+    }
+
+    // ---- Phase 5 新增测试 ----
+
+    @Test
+    fun `Phase5 - favorite items boost recommendation score`() = runBlocking {
+        val baseTime = fixedNow.minus(10, ChronoUnit.DAYS)
+        val noFavoriteMedia = (0 until 10).map { index ->
+            MediaItem(
+                id = "nofav-$index",
+                filePath = "/dcim/nofav/$index.jpg",
+                fileName = "$index.jpg",
+                type = MediaType.IMAGE,
+                capturedAt = baseTime.plus(index.toLong(), ChronoUnit.HOURS),
+                modifiedAt = baseTime.plus(index.toLong(), ChronoUnit.HOURS),
+                qualityScore = 0.5f,
+                isFavorite = false,
+            )
+        }
+        val withFavoriteMedia = (0 until 10).map { index ->
+            MediaItem(
+                id = "fav-$index",
+                filePath = "/dcim/fav/$index.jpg",
+                fileName = "$index.jpg",
+                type = MediaType.IMAGE,
+                capturedAt = baseTime.plus(index.toLong(), ChronoUnit.HOURS),
+                modifiedAt = baseTime.plus(index.toLong(), ChronoUnit.HOURS),
+                qualityScore = 0.5f,
+                isFavorite = true,
+            )
+        }
+        val noFavAlbum = Album(id = "nofav", name = "NoFavorite", directoryPath = "/dcim/nofav", mediaItems = noFavoriteMedia)
+        val favAlbum = Album(id = "fav", name = "WithFavorite", directoryPath = "/dcim/fav", mediaItems = withFavoriteMedia)
+
+        val engine = RecommendationEngine(clock = fixedClock)
+        val output = engine.generate(listOf(noFavAlbum, favAlbum), maxResults = 10)
+
+        val favScore = output.filter { it.albumId == "fav" }.maxOfOrNull { it.score } ?: 0.0
+        val noFavScore = output.filter { it.albumId == "nofav" }.maxOfOrNull { it.score } ?: 0.0
+        assertTrue("含收藏的相册评分 ($favScore) 应高于无收藏 ($noFavScore)", favScore > noFavScore)
+    }
+
+    @Test
+    fun `Phase5 - scene theme recommendations are generated`() = runBlocking {
+        val media = (0 until 20).map { index ->
+            MediaItem(
+                id = "$index",
+                filePath = "/dcim/camera/$index.jpg",
+                fileName = "$index.jpg",
+                type = MediaType.IMAGE,
+                capturedAt = fixedNow.minus(index.toLong(), ChronoUnit.DAYS),
+                modifiedAt = fixedNow.minus(index.toLong(), ChronoUnit.DAYS),
+                qualityScore = 0.7f,
+                sceneType = "landscape",
+            )
+        }
+        val album = Album(id = "a1", name = "Camera", directoryPath = "/dcim/camera", mediaItems = media)
+
+        val engine = RecommendationEngine(clock = fixedClock)
+        val output = engine.generateAll(listOf(album))
+
+        val sceneRecs = output.filter { it.category == RecommendationCategory.SCENE_THEME }
+        assertTrue("应产生场景主题推荐", sceneRecs.isNotEmpty())
+        assertTrue("场景推荐名称应为风景精选", sceneRecs.any { it.albumName == "风景精选" })
+    }
+
+    @Test
+    fun `Phase5 - event aggregation works without GPS`() = runBlocking {
+        // 无 GPS 的照片，时间相近 → 应聚合为事件（不阻断）
+        val baseTime = fixedNow.minus(5, ChronoUnit.DAYS)
+        val album1Media = (0 until 5).map { index ->
+            MediaItem(
+                id = "a1-$index",
+                filePath = "/dcim/camera1/$index.jpg",
+                fileName = "$index.jpg",
+                type = MediaType.IMAGE,
+                capturedAt = baseTime.plus(index.toLong(), ChronoUnit.HOURS),
+                modifiedAt = baseTime.plus(index.toLong(), ChronoUnit.HOURS),
+                // 无 latitude/longitude
+            )
+        }
+        val album2Media = (0 until 5).map { index ->
+            MediaItem(
+                id = "a2-$index",
+                filePath = "/dcim/camera2/$index.jpg",
+                fileName = "$index.jpg",
+                type = MediaType.IMAGE,
+                capturedAt = baseTime.plus(index.toLong(), ChronoUnit.HOURS),
+                modifiedAt = baseTime.plus(index.toLong(), ChronoUnit.HOURS),
+                // 无 latitude/longitude
+            )
+        }
+        val album1 = Album(id = "a1", name = "Camera1", directoryPath = "/dcim/camera1", mediaItems = album1Media)
+        val album2 = Album(id = "a2", name = "Camera2", directoryPath = "/dcim/camera2", mediaItems = album2Media)
+
+        val engine = RecommendationEngine(clock = fixedClock)
+        val output = engine.generateAll(listOf(album1, album2))
+
+        val eventRecs = output.filter { it.albumId.startsWith("event-") }
+        assertTrue("无 GPS 时也应产生事件推荐", eventRecs.isNotEmpty())
+    }
+
+    @Test
+    fun `Phase5 - recommendations have category labels`() = runBlocking {
+        val media = (0 until 10).map { index ->
+            MediaItem(
+                id = "$index",
+                filePath = "/dcim/camera/$index.jpg",
+                fileName = "$index.jpg",
+                type = MediaType.IMAGE,
+                capturedAt = fixedNow.minus(index.toLong(), ChronoUnit.DAYS),
+                modifiedAt = fixedNow.minus(index.toLong(), ChronoUnit.DAYS),
+                qualityScore = 0.5f,
+            )
+        }
+        val album = Album(id = "a1", name = "Camera", directoryPath = "/dcim/camera", mediaItems = media)
+
+        val engine = RecommendationEngine(clock = fixedClock)
+        val output = engine.generateAll(listOf(album))
+
+        assertTrue("所有推荐应有类别标签", output.all { it.category != null })
+        assertTrue("应存在 WHOLE_ALBUM 类别", output.any { it.category == RecommendationCategory.WHOLE_ALBUM })
+    }
+
+    @Test
+    fun `Phase5 - thumbnailPaths selects highest quality items`() = runBlocking {
+        val media = (0 until 10).map { index ->
+            MediaItem(
+                id = "$index",
+                filePath = "/dcim/camera/$index.jpg",
+                fileName = "$index.jpg",
+                type = MediaType.IMAGE,
+                capturedAt = fixedNow.minus(index.toLong(), ChronoUnit.DAYS),
+                modifiedAt = fixedNow.minus(index.toLong(), ChronoUnit.DAYS),
+                qualityScore = index * 0.1f, // 索引越大质量越高
+            )
+        }
+        val album = Album(id = "a1", name = "Camera", directoryPath = "/dcim/camera", mediaItems = media)
+
+        val engine = RecommendationEngine(clock = fixedClock)
+        val output = engine.generate(listOf(album), maxResults = 1)
+
+        assertTrue(output.isNotEmpty())
+        val rec = output.first()
+        // thumbnailPaths 应取质量最高的 4 张（索引 9,8,7,6）
+        assertEquals(4, rec.thumbnailPaths.size)
+        // 验证取的是高质量图片的路径
+        assertTrue(rec.thumbnailPaths.any { it.contains("9") })
+        assertTrue(rec.thumbnailPaths.any { it.contains("8") })
+    }
+
+    @Test
+    fun `Phase5 - favoriteCount and avgQualityScore are populated`() = runBlocking {
+        val media = (0 until 10).map { index ->
+            MediaItem(
+                id = "$index",
+                filePath = "/dcim/camera/$index.jpg",
+                fileName = "$index.jpg",
+                type = MediaType.IMAGE,
+                capturedAt = fixedNow.minus(index.toLong(), ChronoUnit.DAYS),
+                modifiedAt = fixedNow.minus(index.toLong(), ChronoUnit.DAYS),
+                qualityScore = 0.5f,
+                isFavorite = index < 3, // 前 3 张收藏
+            )
+        }
+        val album = Album(id = "a1", name = "Camera", directoryPath = "/dcim/camera", mediaItems = media)
+
+        val engine = RecommendationEngine(clock = fixedClock)
+        val output = engine.generate(listOf(album), maxResults = 1)
+
+        assertTrue(output.isNotEmpty())
+        val rec = output.first()
+        assertEquals(3, rec.favoriteCount)
+        assertTrue(rec.avgQualityScore > 0f)
     }
 }

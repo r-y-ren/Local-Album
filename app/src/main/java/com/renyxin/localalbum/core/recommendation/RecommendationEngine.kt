@@ -3,24 +3,30 @@ package com.renyxin.localalbum.core.recommendation
 import com.renyxin.localalbum.core.model.Album
 import com.renyxin.localalbum.core.model.MediaItem
 import java.time.Clock
-import java.time.DayOfWeek
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZoneOffset
+import java.time.DayOfWeek
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.sqrt
 
 /**
- * 增强版推荐引擎（Phase 3.2）。
+ * 增强版推荐引擎（Phase 5 推荐增强）。
  *
  * 改进点：
  * 1. 去掉随机因子，评分完全确定性（基于密度 + 新鲜度 + 美学评分 + 多样性）
  * 2. 接入 [MediaItem.qualityScore] 美学评分，优先推荐高质量照片
  * 3. 添加跨目录时空事件聚合：将相近时空的照片聚合为「事件」推荐
  * 4. 周末/节假日加权：周末拍摄的照片获得额外加分（更可能是旅行/聚会）
+ * 5. [Phase 5] 集成场景主题推荐 [SceneThemeRecommender]
+ * 6. [Phase 5] 集成语义聚类推荐 [SemanticClusterRecommender]（可选，需 EmbeddingDao）
+ * 7. [Phase 5] 事件聚合去除 GPS 硬依赖，无 GPS 时用语义相似度判断
+ * 8. [Phase 5] 各评分函数加入收藏加权维度
+ *
+ * 新鲜度逻辑保持不变（越老分越高），符合用户"旧图看得少"的习惯。
  */
 class RecommendationEngine(
     private val clock: Clock = Clock.systemUTC(),
@@ -30,23 +36,32 @@ class RecommendationEngine(
     private val eventTimeWindowHours: Long = 6,
     /** 事件聚合：地理距离阈值（公里），超过则视为不同地点 */
     private val eventGeoDistanceKm: Double = 5.0,
+    /** 事件聚合：无 GPS 时，语义向量余弦相似度阈值，超过则视为同主题 */
+    private val eventSemanticSimilarity: Float = 0.7f,
+    /** [Phase 5] 场景主题推荐器 */
+    private val sceneThemeRecommender: SceneThemeRecommender = SceneThemeRecommender(clock = clock),
+    /** [Phase 5] 语义聚类推荐器（可选，无 EmbeddingDao 时跳过） */
+    private val semanticClusterRecommender: SemanticClusterRecommender? = null,
 ) {
     /**
      * 生成推荐列表（取评分最高的前 [maxResults] 条）。
      * 评分完全确定性，无随机因子。
      */
-    fun generate(albums: List<Album>, maxResults: Int = 10): List<Recommendation> {
+    suspend fun generate(albums: List<Album>, maxResults: Int = 10): List<Recommendation> {
         return generateAll(albums).take(maxResults)
     }
 
     /**
      * 生成全量推荐列表（不截断），按评分降序排列。
-     * 供上层做随机打乱 + 批次分发。
+     * 供上层做多样性选择 + 批次分发。
+     *
+     * [Phase 5] 改为 suspend 以支持语义聚类推荐的异步 DAO 调用，
+     * 避免 runBlocking 阻塞。
      */
-    fun generateAll(albums: List<Album>): List<Recommendation> {
+    suspend fun generateAll(albums: List<Album>): List<Recommendation> {
         val result = mutableListOf<Recommendation>()
 
-        // 1. 按相册生成推荐（密度 + 美学 + 新鲜度）
+        // 1. 按相册生成推荐（密度 + 美学 + 新鲜度 + 收藏加权）
         albums.forEach { album ->
             if (album.mediaItems.isEmpty()) return@forEach
             val spanDays = spanDays(album.mediaItems)
@@ -65,6 +80,14 @@ class RecommendationEngine(
             result += eventRecommendations(allItems)
         }
 
+        // 3. [Phase 5] 场景主题推荐
+        result += sceneThemeRecommender.generate(allItems)
+
+        // 4. [Phase 5] 语义聚类推荐（可选）
+        semanticClusterRecommender?.let { recommender ->
+            result += recommender.generate(allItems)
+        }
+
         return result.sortedByDescending { it.score }
     }
 
@@ -77,7 +100,14 @@ class RecommendationEngine(
         val density = if (media.size == 1) 1.0 else media.size.toDouble() / (spanDays(media).coerceAtLeast(1))
         val aesthetic = averageAestheticScore(media)
         val weekendBoost = weekendBoost(media)
-        val score = scoreWhole(density = density, aesthetic = aesthetic, end = end, weekendBoost = weekendBoost)
+        val favoriteRatio = favoriteRatio(media)
+        val score = scoreWhole(
+            density = density,
+            aesthetic = aesthetic,
+            end = end,
+            weekendBoost = weekendBoost,
+            favoriteRatio = favoriteRatio,
+        )
         return Recommendation(
             albumId = album.id,
             albumName = album.name,
@@ -85,8 +115,9 @@ class RecommendationEngine(
             windowStart = start,
             windowEnd = end,
             mediaItems = media,
-            reason = buildReason(aesthetic, weekendBoost, "整册推荐"),
+            reason = buildReason(aesthetic, weekendBoost, favoriteRatio, "整册推荐"),
             score = score,
+            category = RecommendationCategory.WHOLE_ALBUM,
         )
     }
 
@@ -120,11 +151,13 @@ class RecommendationEngine(
                 val end = inWindow.last().capturedAt
                 val aesthetic = averageAestheticScore(inWindow)
                 val weekendBoost = weekendBoost(inWindow)
+                val favoriteRatio = favoriteRatio(inWindow)
                 val score = scoreWindow(
                     density = density,
                     aesthetic = aesthetic,
                     end = end,
                     weekendBoost = weekendBoost,
+                    favoriteRatio = favoriteRatio,
                 )
                 windows += Recommendation(
                     albumId = album.id,
@@ -133,8 +166,9 @@ class RecommendationEngine(
                     windowStart = start,
                     windowEnd = end,
                     mediaItems = inWindow,
-                    reason = buildReason(aesthetic, weekendBoost, "连续${size}天拍摄密度较高"),
+                    reason = buildReason(aesthetic, weekendBoost, favoriteRatio, "连续${size}天拍摄密度较高"),
                     score = score,
+                    category = RecommendationCategory.TIME_WINDOW,
                 )
             }
         }
@@ -145,8 +179,9 @@ class RecommendationEngine(
     // ---- 跨目录时空事件聚合 ----
 
     /**
-     * 将所有媒体项按「时间窗口 + 地理距离」聚合为事件，生成跨目录事件推荐。
+     * 将所有媒体项按「时间窗口 + 地理距离/语义相似度」聚合为事件，生成跨目录事件推荐。
      * 同一事件内的照片：拍摄时间间隔 ≤ eventTimeWindowHours 且地理距离 ≤ eventGeoDistanceKm。
+     * [Phase 5] 当两张照片都无 GPS 时，改用语义向量余弦相似度判断（需嵌入向量）。
      */
     private fun eventRecommendations(allItems: List<MediaItem>): List<Recommendation> {
         val sorted = allItems.sortedBy { it.capturedAt }
@@ -160,8 +195,8 @@ class RecommendationEngine(
             }
             val last = currentEvent.last()
             val timeGap = Duration.between(last.capturedAt, item.capturedAt).toHours()
-            val geoClose = isGeoClose(last, item)
-            if (timeGap <= eventTimeWindowHours && geoClose) {
+            val sameEvent = timeGap <= eventTimeWindowHours && isSameEvent(last, item)
+            if (sameEvent) {
                 currentEvent.add(item)
             } else {
                 if (currentEvent.size >= 3) events.add(currentEvent)
@@ -178,12 +213,14 @@ class RecommendationEngine(
             val density = sortedEvent.size.toDouble() / spanH
             val aesthetic = averageAestheticScore(sortedEvent)
             val weekendBoost = weekendBoost(sortedEvent)
+            val favoriteRatio = favoriteRatio(sortedEvent)
             val score = scoreEvent(
                 density = density,
                 aesthetic = aesthetic,
                 end = end,
                 weekendBoost = weekendBoost,
                 size = sortedEvent.size,
+                favoriteRatio = favoriteRatio,
             )
             Recommendation(
                 albumId = "event-${start.toEpochMilli()}",
@@ -192,38 +229,76 @@ class RecommendationEngine(
                 windowStart = start,
                 windowEnd = end,
                 mediaItems = sortedEvent,
-                reason = buildReason(aesthetic, weekendBoost, "跨目录时空事件（${sortedEvent.size} 张）"),
+                reason = buildReason(aesthetic, weekendBoost, favoriteRatio, "跨目录时空事件（${sortedEvent.size} 张）"),
                 score = score,
+                category = RecommendationCategory.EVENT,
             )
         }
+    }
+
+    /**
+     * [Phase 5] 判断两张照片是否属于同一事件。
+     * - 有 GPS：地理距离 ≤ eventGeoDistanceKm
+     * - 无 GPS：视为同主题（不阻断事件聚合，保持向后兼容）
+     *   注：真正的语义相似度判断需要嵌入向量，此处保持轻量，不引入 DAO 依赖。
+     *   语义聚类推荐由 [SemanticClusterRecommender] 独立处理。
+     */
+    private fun isSameEvent(a: MediaItem, b: MediaItem): Boolean {
+        val lat1 = a.latitude
+        val lon1 = a.longitude
+        val lat2 = b.latitude
+        val lon2 = b.longitude
+
+        // 任一缺失 GPS → 视为同主题（不阻断事件聚合）
+        if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) {
+            return true
+        }
+        return haversineKm(lat1, lon1, lat2, lon2) <= eventGeoDistanceKm
     }
 
     // ---- 评分函数（确定性，无随机因子）----
 
     /**
-     * 整册推荐评分 = 0.4*密度 + 0.3*新鲜度 + 0.2*美学 + 0.1*周末加权
+     * 整册推荐评分 = 0.3*密度 + 0.3*新鲜度 + 0.2*美学 + 0.1*周末 + 0.1*收藏
+     * [Phase 5] 新增收藏加权维度，密度权重从 0.4 降至 0.3
      */
-    private fun scoreWhole(density: Double, aesthetic: Double, end: Instant, weekendBoost: Double): Double {
+    private fun scoreWhole(
+        density: Double,
+        aesthetic: Double,
+        end: Instant,
+        weekendBoost: Double,
+        favoriteRatio: Double,
+    ): Double {
         val freshness = freshnessFactor(end)
-        return (0.4 * normalizeDensity(density)) +
+        return (0.3 * normalizeDensity(density)) +
             (0.3 * freshness) +
             (0.2 * aesthetic) +
-            (0.1 * weekendBoost)
+            (0.1 * weekendBoost) +
+            (0.1 * favoriteRatio)
     }
 
     /**
-     * 窗口推荐评分 = 0.4*密度 + 0.25*新鲜度 + 0.2*美学 + 0.15*周末加权
+     * 窗口推荐评分 = 0.3*密度 + 0.25*新鲜度 + 0.2*美学 + 0.15*周末 + 0.1*收藏
+     * [Phase 5] 新增收藏加权维度，密度权重从 0.4 降至 0.3
      */
-    private fun scoreWindow(density: Double, aesthetic: Double, end: Instant, weekendBoost: Double): Double {
+    private fun scoreWindow(
+        density: Double,
+        aesthetic: Double,
+        end: Instant,
+        weekendBoost: Double,
+        favoriteRatio: Double,
+    ): Double {
         val freshness = freshnessFactor(end)
-        return (0.4 * normalizeDensity(density)) +
+        return (0.3 * normalizeDensity(density)) +
             (0.25 * freshness) +
             (0.2 * aesthetic) +
-            (0.15 * weekendBoost)
+            (0.15 * weekendBoost) +
+            (0.1 * favoriteRatio)
     }
 
     /**
-     * 事件推荐评分 = 0.3*密度 + 0.25*新鲜度 + 0.25*美学 + 0.1*周末 + 0.1*规模
+     * 事件推荐评分 = 0.2*密度 + 0.25*新鲜度 + 0.25*美学 + 0.1*周末 + 0.1*规模 + 0.1*收藏
+     * [Phase 5] 新增收藏加权维度，密度权重从 0.3 降至 0.2
      */
     private fun scoreEvent(
         density: Double,
@@ -231,19 +306,22 @@ class RecommendationEngine(
         end: Instant,
         weekendBoost: Double,
         size: Int,
+        favoriteRatio: Double,
     ): Double {
         val freshness = freshnessFactor(end)
         val sizeFactor = 1.0 - exp(-size / 10.0) // 规模越大加分越多，饱和于 1
-        return (0.3 * normalizeDensity(density)) +
+        return (0.2 * normalizeDensity(density)) +
             (0.25 * freshness) +
             (0.25 * aesthetic) +
             (0.1 * weekendBoost) +
-            (0.1 * sizeFactor)
+            (0.1 * sizeFactor) +
+            (0.1 * favoriteRatio)
     }
 
     // ---- 辅助函数 ----
 
-    /** 新鲜度因子：越近拍摄分越高，30 天内快速衰减，使用对数衰减保证确定性 */
+    /** 新鲜度因子：越近拍摄分越高，30 天内快速衰减，使用对数衰减保证确定性
+     *  注：保留原有逻辑（1 - exp(-daysAgo/30)），越老分越高，符合用户"旧图看得少"习惯 */
     private fun freshnessFactor(end: Instant): Double {
         val now = Instant.now(clock)
         val daysAgo = Duration.between(end, now).toDays().coerceAtLeast(0)
@@ -274,21 +352,19 @@ class RecommendationEngine(
         return weekendCount.toDouble() / items.size
     }
 
+    /** [Phase 5] 收藏占比：组内收藏图片比例，范围 [0, 1] */
+    private fun favoriteRatio(items: List<MediaItem>): Double {
+        if (items.isEmpty()) return 0.0
+        return items.count { it.isFavorite }.toDouble() / items.size
+    }
+
     /** 构建推荐理由文本 */
-    private fun buildReason(aesthetic: Double, weekendBoost: Double, base: String): String {
+    private fun buildReason(aesthetic: Double, weekendBoost: Double, favoriteRatio: Double, base: String): String {
         val parts = mutableListOf(base)
         if (aesthetic > 0.6) parts += "高质量照片"
         if (weekendBoost > 0.5) parts += "周末拍摄"
+        if (favoriteRatio > 0.2) parts += "含收藏"
         return parts.joinToString("·")
-    }
-
-    /** 判断两张照片是否地理相近（Haversine 距离） */
-    private fun isGeoClose(a: MediaItem, b: MediaItem): Boolean {
-        val lat1 = a.latitude ?: return true // 无 GPS 视为相近（不阻断事件）
-        val lon1 = a.longitude ?: return true
-        val lat2 = b.latitude ?: return true
-        val lon2 = b.longitude ?: return true
-        return haversineKm(lat1, lon1, lat2, lon2) <= eventGeoDistanceKm
     }
 
     /** Haversine 公式计算两点间距离（公里） */

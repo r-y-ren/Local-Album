@@ -515,7 +515,12 @@ class AppContainer(context: Context) {
         embeddingDao = database.embeddingDao(),
         mediaSource = mediaSource,
         albumBuilder = AlbumBuilder(),
-        recommendationEngine = RecommendationEngine(),
+        // Phase 5: 注入 SemanticClusterRecommender，启用语义聚类推荐
+        recommendationEngine = RecommendationEngine(
+            semanticClusterRecommender = com.renyxin.localalbum.core.recommendation.SemanticClusterRecommender(
+                embeddingDao = database.embeddingDao(),
+            ),
+        ),
         hybridIndexer = hybridIndexer,
         // 语义搜索使用当前激活的 SemanticEmbedProvider（CLIP / 概念向量…），
         // 保证搜索侧与索引侧向量空间一致
