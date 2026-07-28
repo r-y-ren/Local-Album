@@ -241,7 +241,7 @@ class AppContainer(context: Context) {
     /**
      * 核心分析管道（Phase 2 重构 + 修复：单例化，保证进度 UI 与运行管线共用同一 ProgressManager）。
      *
-     * 仅包含核心分析阶段（人脸/场景/语义/质量/OCR/地理/相似度），
+     * 仅包含核心分析阶段（人脸/场景/语义/质量/OCR/地理），
      * 各阶段从 [capabilityRegistry] 获取当前激活的 Provider。
      * 扩展 AI 插件（换脸、风格迁移等）不再参与批处理管道。
      *

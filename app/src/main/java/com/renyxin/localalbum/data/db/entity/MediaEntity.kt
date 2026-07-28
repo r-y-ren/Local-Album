@@ -56,8 +56,6 @@ data class MediaEntity(
     val geoClusterId: String? = null,
     // ---- v2 新增: 质量评分 ----
     @androidx.room.ColumnInfo(defaultValue = "0.0") val qualityScore: Float = 0f,
-    // ---- v2 新增: 相似组 ID ----
-    val similarGroupId: String? = null,
     // ---- v2 新增: 回收站时间戳 ----
     val deletedAtMs: Long = 0L,
     // ---- v3 新增: 损坏文件标记 ----

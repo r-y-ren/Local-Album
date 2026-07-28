@@ -30,7 +30,7 @@ import com.renyxin.localalbum.data.db.entity.PluginManifestEntity
         PluginManifestEntity::class,
         AnalysisStateEntity::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -170,6 +170,90 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migration 12 → 13：移除 media_items.similarGroupId 列。
+         *
+         * 相似照片功能已移除，仅保留基于 SHA-256 的完全重复检测（运行时计算，不持久化）。
+         * SQLite 不支持 ALTER TABLE DROP COLUMN（Android API < 35），需重建表。
+         */
+        private val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. 创建不含 similarGroupId 的新表
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS media_items_new (
+                        filePath TEXT NOT NULL PRIMARY KEY,
+                        fileName TEXT NOT NULL,
+                        mediaType TEXT NOT NULL,
+                        capturedAtMs INTEGER NOT NULL,
+                        modifiedAtMs INTEGER NOT NULL,
+                        indexedAtMs INTEGER NOT NULL,
+                        parentPath TEXT NOT NULL,
+                        fileSize INTEGER NOT NULL,
+                        isFavorite INTEGER NOT NULL DEFAULT 0,
+                        isTrashed INTEGER NOT NULL DEFAULT 0,
+                        width INTEGER NOT NULL,
+                        height INTEGER NOT NULL,
+                        mimeType TEXT NOT NULL,
+                        durationMs INTEGER NOT NULL,
+                        latitude REAL,
+                        longitude REAL,
+                        make TEXT,
+                        model TEXT,
+                        aperture TEXT,
+                        focalLength TEXT,
+                        iso TEXT,
+                        exposureTime TEXT,
+                        orientation INTEGER NOT NULL,
+                        sceneType TEXT,
+                        thumbnailPath TEXT,
+                        fingerprintHead TEXT,
+                        perceptualHash INTEGER NOT NULL DEFAULT 0,
+                        ocrText TEXT,
+                        geoClusterId TEXT,
+                        qualityScore REAL NOT NULL DEFAULT 0.0,
+                        deletedAtMs INTEGER NOT NULL DEFAULT 0,
+                        isCorrupted INTEGER NOT NULL DEFAULT 0,
+                        faceClusterId TEXT
+                    )
+                """.trimIndent())
+                // 2. 复制数据（排除 similarGroupId）
+                db.execSQL("""
+                    INSERT INTO media_items_new (
+                        filePath, fileName, mediaType, capturedAtMs, modifiedAtMs, indexedAtMs,
+                        parentPath, fileSize, isFavorite, isTrashed, width, height, mimeType,
+                        durationMs, latitude, longitude, make, model, aperture, focalLength,
+                        iso, exposureTime, orientation, sceneType, thumbnailPath, fingerprintHead,
+                        perceptualHash, ocrText, geoClusterId, qualityScore, deletedAtMs,
+                        isCorrupted, faceClusterId
+                    )
+                    SELECT
+                        filePath, fileName, mediaType, capturedAtMs, modifiedAtMs, indexedAtMs,
+                        parentPath, fileSize, isFavorite, isTrashed, width, height, mimeType,
+                        durationMs, latitude, longitude, make, model, aperture, focalLength,
+                        iso, exposureTime, orientation, sceneType, thumbnailPath, fingerprintHead,
+                        perceptualHash, ocrText, geoClusterId, qualityScore, deletedAtMs,
+                        isCorrupted, faceClusterId
+                    FROM media_items
+                """.trimIndent())
+                // 3. 删除旧表
+                db.execSQL("DROP TABLE media_items")
+                // 4. 重命名新表
+                db.execSQL("ALTER TABLE media_items_new RENAME TO media_items")
+                // 5. 重建索引
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_capturedAtMs ON media_items(capturedAtMs)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_parentPath ON media_items(parentPath)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_isFavorite ON media_items(isFavorite)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_isTrashed ON media_items(isTrashed)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_mediaType ON media_items(mediaType)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_sceneType ON media_items(sceneType)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_geoClusterId ON media_items(geoClusterId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_fileSize ON media_items(fileSize)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_modifiedAtMs ON media_items(modifiedAtMs)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_isCorrupted ON media_items(isCorrupted)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_faceClusterId ON media_items(faceClusterId)")
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -177,7 +261,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "local_album_db"
                 )
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
                     // 1.2: 仅在降级时销毁数据；升级缺失迁移时抛异常而非静默清库
                     .fallbackToDestructiveMigrationOnDowngrade()
                     .build()

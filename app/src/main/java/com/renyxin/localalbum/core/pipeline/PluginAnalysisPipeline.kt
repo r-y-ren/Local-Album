@@ -133,9 +133,6 @@ class PluginAnalysisPipeline(
             // 地理信息 — 固定实现
             stages.add(com.renyxin.localalbum.core.pipeline.stages.BuiltinGeoStage(mediaDao))
 
-            // 相似度 — 固定实现
-            stages.add(com.renyxin.localalbum.core.pipeline.stages.BuiltinSimilarityStage(mediaDao))
-
             return PluginAnalysisPipeline(
                 stages = stages,
                 analysisStateDao = analysisStateDao,
@@ -166,7 +163,6 @@ class PluginAnalysisPipeline(
                 com.renyxin.localalbum.core.pipeline.stages.BuiltinSemanticStage(mediaDao, embeddingDao),
                 com.renyxin.localalbum.core.pipeline.stages.BuiltinOcrStage(context, mediaDao),
                 com.renyxin.localalbum.core.pipeline.stages.BuiltinGeoStage(mediaDao),
-                com.renyxin.localalbum.core.pipeline.stages.BuiltinSimilarityStage(mediaDao),
             )
             return PluginAnalysisPipeline(stages = builtinStages)
         }

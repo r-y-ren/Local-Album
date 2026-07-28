@@ -18,14 +18,12 @@ import com.renyxin.localalbum.data.repo.AlbumStats
 import com.renyxin.localalbum.data.repo.FaceCluster
 import com.renyxin.localalbum.data.repo.FaceStats
 import com.renyxin.localalbum.data.repo.DuplicateGroup
-import com.renyxin.localalbum.data.repo.DuplicateLevel
 import com.renyxin.localalbum.data.repo.GeoCluster
 import com.renyxin.localalbum.data.repo.GeoStats
 import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.data.repo.SemanticSearchResult
 import com.renyxin.localalbum.data.repo.SemanticSearchState
 import com.renyxin.localalbum.data.repo.SemanticStats
-import com.renyxin.localalbum.data.repo.SimilarGroup
 import com.renyxin.localalbum.data.worker.ThumbnailWorker
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -96,13 +94,6 @@ class AlbumViewModel(
     val sceneFileProgress: StateFlow<StageFileProgress> = progressManager?.progress
         ?.debounce(80L)
         ?.map { it.perStageFiles[AnalysisStage.STAGE_SCENE] ?: StageFileProgress.EMPTY }
-        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StageFileProgress.EMPTY)
-        ?: MutableStateFlow(StageFileProgress.EMPTY).asStateFlow()
-
-    /** 相似度分析阶段的 per-file 进度 */
-    val similarityFileProgress: StateFlow<StageFileProgress> = progressManager?.progress
-        ?.debounce(80L)
-        ?.map { it.perStageFiles[AnalysisStage.STAGE_SIMILARITY] ?: StageFileProgress.EMPTY }
         ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StageFileProgress.EMPTY)
         ?: MutableStateFlow(StageFileProgress.EMPTY).asStateFlow()
 
@@ -265,55 +256,7 @@ class AlbumViewModel(
         viewModelScope.launch { repository.loadFromDb() }
     }
 
-    // ---- 相似照片管理 (Phase 3.1) ----
-
-    private val _similarGroups = MutableStateFlow<List<SimilarGroup>>(emptyList())
-    val similarGroups: StateFlow<List<SimilarGroup>> = _similarGroups.asStateFlow()
-
-    private val _similarGroupPhotos = MutableStateFlow<List<MediaItem>>(emptyList())
-    val similarGroupPhotos: StateFlow<List<MediaItem>> = _similarGroupPhotos.asStateFlow()
-
-    /** 加载所有相似组（供管理界面分组展示） */
-    fun loadSimilarGroups() {
-        viewModelScope.launch {
-            _similarGroups.value = repository.getSimilarGroups()
-        }
-    }
-
-    /** 加载某个相似组内的完整媒体项 */
-    fun loadPhotosInGroup(groupId: String) {
-        viewModelScope.launch {
-            _similarGroupPhotos.value = repository.getPhotosInGroup(groupId)
-        }
-    }
-
-    /** "保留最佳"：删除组内除最高质量评分项之外的所有项 */
-    fun keepBestInGroup(groupId: String) {
-        viewModelScope.launch {
-            repository.keepBestInGroup(groupId)
-            // 刷新相似组列表
-            _similarGroups.value = repository.getSimilarGroups()
-            _similarGroupPhotos.value = repository.getPhotosInGroup(groupId)
-        }
-    }
-
-    /** 从相似组中移除指定路径（手动拆分组） */
-    fun removeFromSimilarGroup(paths: List<String>) {
-        viewModelScope.launch {
-            repository.removeFromSimilarGroup(paths)
-            _similarGroups.value = repository.getSimilarGroups()
-        }
-    }
-
-    /** 将多个路径合并到同一相似组 */
-    fun mergeIntoSimilarGroup(paths: List<String>, groupId: String) {
-        viewModelScope.launch {
-            repository.mergeIntoSimilarGroup(paths, groupId)
-            _similarGroups.value = repository.getSimilarGroups()
-        }
-    }
-
-    // ---- 重复照片管理 (DUP-1) ----
+    // ---- 重复照片管理 ----
 
     private val _duplicateGroups = MutableStateFlow<List<DuplicateGroup>>(emptyList())
     val duplicateGroups: StateFlow<List<DuplicateGroup>> = _duplicateGroups.asStateFlow()
@@ -384,11 +327,6 @@ class AlbumViewModel(
             repository.keepOneDeleteRest(groupId, keepPath)
             _duplicateGroups.value = repository.findDuplicateGroups()
         }
-    }
-
-    /** 获取某级别的重复组统计 */
-    fun getDuplicateCountByLevel(level: DuplicateLevel): Int {
-        return _duplicateGroups.value.count { it.level == level }
     }
 
     /** 所有重复文件总大小（浪费的存储空间） */

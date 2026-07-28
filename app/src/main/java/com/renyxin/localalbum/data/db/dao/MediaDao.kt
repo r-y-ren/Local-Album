@@ -275,35 +275,6 @@ interface MediaDao {
     @Query("UPDATE media_items SET ocrText = COALESCE(:ocrText, ocrText) WHERE filePath = :path")
     suspend fun setOcrText(path: String, ocrText: String?)
 
-    // ---- 相似组 (v2) ----
-    @Query("UPDATE media_items SET similarGroupId = :groupId WHERE filePath = :path")
-    suspend fun setSimilarGroupId(path: String, groupId: String)
-
-    @Query("UPDATE media_items SET similarGroupId = :groupId WHERE filePath IN (:paths)")
-    suspend fun updateSimilarGroupId(paths: List<String>, groupId: String)
-
-    @Query("UPDATE media_items SET similarGroupId = NULL WHERE filePath IN (:paths)")
-    suspend fun clearSimilarGroupId(paths: List<String>)
-
-    /**
-     * 查询所有非空 similarGroupId（去重），用于相似照片管理界面分组展示。
-     */
-    @Query("SELECT DISTINCT similarGroupId FROM media_items WHERE isTrashed = 0 AND similarGroupId IS NOT NULL")
-    suspend fun getSimilarGroupIds(): List<String>
-
-    /**
-     * 查询某个相似组内的所有媒体（按质量评分降序，便于"保留最佳"展示）。
-     */
-    @Query("SELECT * FROM media_items WHERE isTrashed = 0 AND similarGroupId = :groupId ORDER BY qualityScore DESC, capturedAtMs DESC")
-    suspend fun getPhotosInSimilarGroup(groupId: String): List<MediaEntity>
-
-    /**
-     * 查询所有相似组及其成员（一次性查询，用于管理界面批量加载）。
-     * 返回每条记录的 groupId + filePath + qualityScore，由调用方在内存中分组。
-     */
-    @Query("SELECT similarGroupId AS groupId, filePath, qualityScore FROM media_items WHERE isTrashed = 0 AND similarGroupId IS NOT NULL ORDER BY similarGroupId, qualityScore DESC")
-    suspend fun getAllSimilarGroupMembers(): List<SimilarGroupMember>
-
     @Query("SELECT filePath FROM media_items WHERE isTrashed = 0 AND latitude IS NOT NULL AND longitude IS NOT NULL")
     suspend fun getGeoPaths(): List<String>
 
@@ -385,15 +356,6 @@ data class TimelineBucket(
 data class SceneTypeStat(
     val sceneType: String,
     val cnt: Int
-)
-
-/**
- * 相似组成员投影，用于一次性批量加载所有相似组。
- */
-data class SimilarGroupMember(
-    val groupId: String,
-    val filePath: String,
-    val qualityScore: Float,
 )
 
 /**

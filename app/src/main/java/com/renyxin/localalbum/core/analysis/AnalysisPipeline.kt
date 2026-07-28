@@ -3,7 +3,6 @@ package com.renyxin.localalbum.core.analysis
 import android.content.Context
 import android.util.Log
 import com.renyxin.localalbum.core.analysis.SceneClassifier.SceneLabel
-import com.renyxin.localalbum.core.analysis.SimilarityAnalyzer.SimilarGroup
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.MediaDao
@@ -18,16 +17,15 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * 智能分析管道：编排 QualityAnalyzer, SimilarityAnalyzer,
+ * 智能分析管道：编排 QualityAnalyzer,
  * SceneClassifier, OcrProvider, FaceDetector, SemanticEmbedder 对索引完的媒体进行批量分析。
  *
  * 工作流:
  * 1. 将待分析文件路径分成批量 (BATCH_SIZE)
  * 2. 并行运行: 质量评分 + 场景分类 + OCR
  * 3. 批量写入分析结果到数据库
- * 4. 完成所有批次后运行相似度分析（需要感知哈希聚合）
- * 5. 完成所有批次后运行人脸检测 + DBSCAN 聚类（Phase 3.3）
- * 6. 完成所有批次后运行语义嵌入生成（Phase 4.1）
+ * 4. 完成所有批次后运行人脸检测 + DBSCAN 聚类（Phase 3.3）
+ * 5. 完成所有批次后运行语义嵌入生成（Phase 4.1）
  */
 class AnalysisPipeline(
     private val context: Context,
@@ -47,7 +45,6 @@ class AnalysisPipeline(
     private val qualityAnalyzer = QualityAnalyzer()
     private val sceneClassifier = SceneClassifier()
     private val ocrProvider = OcrProvider(context)
-    private val similarityAnalyzer = SimilarityAnalyzer()
     private val faceDetector: FaceDetector? by lazy {
         if (faceDao != null) FaceDetector(context) else null
     }
@@ -112,23 +109,6 @@ class AnalysisPipeline(
             } catch (e: Exception) {
                 Log.w(TAG, "批次 ${batchIndex + 1} 分析失败: ${e.message}", e)
                 failedCount += batch.size
-            }
-        }
-
-        // 所有批次完成后运行相似度分析
-        if (result.qualityScores.isNotEmpty()) {
-            try {
-                val files = result.qualityScores.keys.map { File(it) }.filter { it.exists() }
-                val hashes = similarityAnalyzer.computeHashes(files)
-                val groups = similarityAnalyzer.groupSimilar(hashes)
-                // 写入相似组 ID
-                for (group in groups) {
-                    for (path in group.filePaths) {
-                        mediaDao.setSimilarGroupId(path, group.groupId)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "相似度分析失败: ${e.message}", e)
             }
         }
 

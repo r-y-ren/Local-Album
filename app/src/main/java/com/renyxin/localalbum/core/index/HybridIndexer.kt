@@ -700,7 +700,6 @@ class HybridIndexer(
             ocrText = null,
             geoClusterId = null,
             qualityScore = 0f,
-            similarGroupId = null,
             deletedAtMs = if (isTrashed) modifiedAtMs else 0L,
             isCorrupted = isCorrupted,
             faceClusterId = null,

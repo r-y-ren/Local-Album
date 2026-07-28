@@ -185,7 +185,6 @@ class DatabaseImporter(
                     ocrText = obj.optStringOrNull("ocrText"),
                     geoClusterId = obj.optStringOrNull("geoClusterId"),
                     qualityScore = obj.optDouble("qualityScore", 0.0).toFloat(),
-                    similarGroupId = obj.optStringOrNull("similarGroupId"),
                     deletedAtMs = obj.optLong("deletedAtMs", 0L),
                     isCorrupted = obj.optBoolean("isCorrupted", false),
                     faceClusterId = obj.optStringOrNull("faceClusterId"),

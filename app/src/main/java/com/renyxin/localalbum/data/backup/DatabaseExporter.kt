@@ -167,7 +167,6 @@ class DatabaseExporter(
             obj.putOpt("ocrText", item.ocrText)
             obj.putOpt("geoClusterId", item.geoClusterId)
             obj.put("qualityScore", item.qualityScore)
-            obj.putOpt("similarGroupId", item.similarGroupId)
             obj.put("deletedAtMs", item.deletedAtMs)
             obj.put("isCorrupted", item.isCorrupted)
             obj.putOpt("faceClusterId", item.faceClusterId)

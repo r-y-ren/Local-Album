@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Favorite
@@ -133,7 +134,7 @@ import com.renyxin.localalbum.ui.screens.OnboardingScreen
 import com.renyxin.localalbum.ui.screens.SearchScreen
 import com.renyxin.localalbum.ui.screens.FacesScreen
 import com.renyxin.localalbum.ui.screens.MapScreen
-import com.renyxin.localalbum.ui.screens.SimilarPhotosScreen
+import com.renyxin.localalbum.ui.screens.DuplicatePhotosScreen
 import com.renyxin.localalbum.ui.screens.TrashScreen
 import com.renyxin.localalbum.ui.screens.ModelImportWizardScreen
 import com.renyxin.localalbum.ui.screens.ModelJsonEditorScreen
@@ -184,7 +185,7 @@ sealed interface Screen {
     data object Search : Screen
     data object Timeline : Screen
     data object Trash : Screen
-    data object SimilarPhotos : Screen
+    data object DuplicatePhotos : Screen
     data object Faces : Screen
     data object Map : Screen
     data object Favorites : Screen
@@ -413,34 +414,21 @@ fun LocalAlbumApp(
             )
         }
 
-        is Screen.SimilarPhotos -> {
-            val similarGroups by albumViewModel.similarGroups.collectAsStateWithLifecycle()
-            val groupPhotos by albumViewModel.similarGroupPhotos.collectAsStateWithLifecycle()
-            // DUP-1: 重复照片模式数据
+        is Screen.DuplicatePhotos -> {
             val duplicateGroups by albumViewModel.duplicateGroups.collectAsStateWithLifecycle()
             val isDuplicateLoading by albumViewModel.isDuplicateLoading.collectAsStateWithLifecycle()
-            // DUP-1: 进入页面时触发重复检测
+            // 进入页面时触发重复检测
             LaunchedEffect(Unit) {
                 albumViewModel.loadDuplicateGroups()
             }
-            SimilarPhotosScreen(
-                similarGroups = similarGroups,
-                groupPhotos = groupPhotos,
-                isLoading = false,
-                onBack = { goBack() },
-                onKeepBest = { groupId -> albumViewModel.keepBestInGroup(groupId) },
-                onMediaClick = { items, index ->
-                    navigateTo(Screen.MediaViewer(items, index, returnTo = s))
-                },
-                onRefresh = { albumViewModel.loadSimilarGroups() },
-                // DUP-1: 重复模式参数
+            DuplicatePhotosScreen(
                 duplicateGroups = duplicateGroups,
-                isDuplicateMode = true,
-                onDuplicateRefresh = { albumViewModel.loadDuplicateGroups() },
+                isLoading = isDuplicateLoading,
+                onBack = { goBack() },
                 onKeepOneDeleteRest = { groupId, keepPath ->
                     albumViewModel.keepOneDeleteRest(groupId, keepPath)
                 },
-                duplicateLoading = isDuplicateLoading,
+                onRefresh = { albumViewModel.loadDuplicateGroups() },
             )
         }
 
@@ -731,9 +719,9 @@ private fun currentTabContent(
             onNavigateToFavorites = {
                 navigateTo(Screen.Favorites)
             },
-            onNavigateToSimilar = {
-                albumViewModel.loadSimilarGroups()
-                navigateTo(Screen.SimilarPhotos)
+            onNavigateToDuplicate = {
+                albumViewModel.loadDuplicateGroups()
+                navigateTo(Screen.DuplicatePhotos)
             },
             onNavigateToFaces = {
                 albumViewModel.loadFaceClusters()
@@ -2397,7 +2385,7 @@ private fun PhotosTab(
     onMediaClick: (List<com.renyxin.localalbum.data.db.entity.MediaEntity>, Int) -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToFavorites: () -> Unit,
-    onNavigateToSimilar: () -> Unit,
+    onNavigateToDuplicate: () -> Unit,
     onNavigateToFaces: () -> Unit,
     onNavigateToMap: () -> Unit,
     onNavigateToRecommendations: () -> Unit,
@@ -2451,7 +2439,7 @@ private fun PhotosTab(
                 favoritesCount = allMedia.count { it.isFavorite },
                 onNavigateToSearch = onNavigateToSearch,
                 onNavigateToFavorites = onNavigateToFavorites,
-                onNavigateToSimilar = onNavigateToSimilar,
+                onNavigateToDuplicate = onNavigateToDuplicate,
                 onNavigateToFaces = onNavigateToFaces,
                 onNavigateToMap = onNavigateToMap,
                 onNavigateToRecommendations = onNavigateToRecommendations,
@@ -2468,7 +2456,7 @@ private fun QuickAccessRow(
     favoritesCount: Int,
     onNavigateToSearch: () -> Unit,
     onNavigateToFavorites: () -> Unit,
-    onNavigateToSimilar: () -> Unit,
+    onNavigateToDuplicate: () -> Unit,
     onNavigateToFaces: () -> Unit,
     onNavigateToMap: () -> Unit,
     onNavigateToRecommendations: () -> Unit,
@@ -2498,12 +2486,12 @@ private fun QuickAccessRow(
                 onClick = onNavigateToRecommendations,
             )
         }
-        item(key = "similar") {
+        item(key = "duplicate") {
             QuickAccessCard(
-                icon = Icons.Filled.AutoAwesome,
-                title = "相似照片",
+                icon = Icons.Filled.CleaningServices,
+                title = "重复照片",
                 subtitle = "清理重复",
-                onClick = onNavigateToSimilar,
+                onClick = onNavigateToDuplicate,
             )
         }
         item(key = "faces") {

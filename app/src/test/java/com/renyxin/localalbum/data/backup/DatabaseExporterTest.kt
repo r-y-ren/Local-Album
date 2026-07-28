@@ -98,13 +98,8 @@ class DatabaseExporterTest {
         override suspend fun updatePerceptualHash(path: String, hash: Long) {}
         override suspend fun getWithPerceptualHash(): List<MediaEntity> = emptyList()
         override suspend fun setSceneType(path: String, sceneType: String) {}
+        override suspend fun setOcrText(path: String, ocrText: String?) {}
         override suspend fun setAnalysisFields(path: String, score: Float, sceneType: String, ocrText: String?) {}
-        override suspend fun setSimilarGroupId(path: String, groupId: String) {}
-        override suspend fun updateSimilarGroupId(paths: List<String>, groupId: String) {}
-        override suspend fun clearSimilarGroupId(paths: List<String>) {}
-        override suspend fun getSimilarGroupIds(): List<String> = emptyList()
-        override suspend fun getPhotosInSimilarGroup(groupId: String): List<MediaEntity> = emptyList()
-        override suspend fun getAllSimilarGroupMembers(): List<com.renyxin.localalbum.data.db.dao.SimilarGroupMember> = emptyList()
         override suspend fun getGeoPaths(): List<String> = emptyList()
         override suspend fun getYearBuckets(): List<com.renyxin.localalbum.data.db.dao.TimelineBucket> = emptyList()
         override suspend fun getWithLocation(): List<MediaEntity> = store.values.filter { it.latitude != null }
@@ -199,7 +194,6 @@ class DatabaseExporterTest {
         model = "Pixel 8",
         sceneType = "landscape",
         qualityScore = 85.5f,
-        similarGroupId = "group-1",
         faceClusterId = "face-1",
     )
 
@@ -431,7 +425,6 @@ class DatabaseExporterTest {
             sceneType = null,
             ocrText = null,
             geoClusterId = null,
-            similarGroupId = null,
             faceClusterId = null,
         )
         mediaDao.insertAll(listOf(entity))

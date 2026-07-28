@@ -71,26 +71,9 @@ data class AlbumStats(
 )
 
 /**
- * 相似照片组（Phase 3.1），用于相似照片管理界面。
- * @param groupId 相似组 ID
- * @param filePaths 组内文件路径（按质量评分降序，首项为推荐保留的最佳项）
- * @param qualityScores 文件路径 → 质量评分映射
- */
-data class SimilarGroup(
-    val groupId: String,
-    val filePaths: List<String>,
-    val qualityScores: Map<String, Float>,
-) {
-    /** 推荐保留的最佳项路径（质量分最高） */
-    val bestPath: String? get() = filePaths.firstOrNull()
-}
-
-/**
- * 重复照片组（DUP-1），替代相似照片的精确+感知重复检测。
- * 使用 SHA-256 + pHash 三级分层：完全重复 → 感知重复 → 高度相似。
+ * 重复照片组，基于 SHA-256 完全重复检测。
  */
 typealias DuplicateGroup = DuplicateAnalyzer.DuplicateGroup
-typealias DuplicateLevel = DuplicateAnalyzer.Level
 
 /**
  * 人脸聚类（Phase 3.3），用于人脸相册界面。
@@ -220,7 +203,7 @@ class AlbumRepository(
         return SemanticSearcher(provider, dao)
     }
 
-    /** 重复文件分析器（DUP-1），SHA-256 + pHash 三级重复检测 */
+    /** 重复文件分析器，基于 SHA-256 完全重复检测 */
     private val duplicateAnalyzer = DuplicateAnalyzer()
 
     private val _albumTree = MutableStateFlow<List<Album>>(emptyList())
@@ -872,87 +855,18 @@ class AlbumRepository(
         mediaDao.getWithLocation().map { it.toMediaItem() }
     }
 
-    // ---- 相似照片管理 (Phase 3.1) ----
+    // ---- 重复照片管理 ----
 
     /**
-     * 获取所有相似组及其成员（一次性加载，供 UI 分组展示）。
-     * 返回 groupId → 成员列表（按质量评分降序，首项为推荐保留的最佳项）。
-     */
-    suspend fun getSimilarGroups(): List<SimilarGroup> = withContext(Dispatchers.IO) {
-        val members = mediaDao.getAllSimilarGroupMembers()
-        if (members.isEmpty()) return@withContext emptyList()
-        members.groupBy { it.groupId }
-            .map { (groupId, list) ->
-                SimilarGroup(
-                    groupId = groupId,
-                    filePaths = list.map { it.filePath },
-                    qualityScores = list.associate { it.filePath to it.qualityScore },
-                )
-            }
-            .sortedByDescending { it.filePaths.size }
-    }
-
-    /** 获取某个相似组内的完整媒体项（按质量评分降序）。 */
-    suspend fun getPhotosInGroup(groupId: String): List<MediaItem> = withContext(Dispatchers.IO) {
-        mediaDao.getPhotosInSimilarGroup(groupId).map { it.toMediaItem() }
-    }
-
-    /**
-     * "保留最佳"：删除组内除最高质量评分项之外的所有项（移入回收站）。
-     * @return 被移入回收站的路径列表
-     */
-    suspend fun keepBestInGroup(groupId: String): List<String> = withContext(Dispatchers.IO) {
-        val photos = mediaDao.getPhotosInSimilarGroup(groupId)
-        if (photos.size <= 1) return@withContext emptyList()
-        // 首项质量分最高，保留；其余移入回收站
-        val toRemove = photos.drop(1).map { it.filePath }
-        if (toRemove.isNotEmpty()) {
-            mediaDao.moveToTrash(toRemove, System.currentTimeMillis())
-            removeFromMemoryTree(toRemove.toSet())
-            refreshStats()
-        }
-        toRemove
-    }
-
-    /**
-     * 将指定路径从其相似组中移除（清除 similarGroupId），用于手动拆分组。
-     */
-    suspend fun removeFromSimilarGroup(paths: List<String>) = withContext(Dispatchers.IO) {
-        if (paths.isEmpty()) return@withContext
-        mediaDao.clearSimilarGroupId(paths)
-    }
-
-    /**
-     * 将多个路径合并到同一相似组（指定 groupId）。
-     */
-    suspend fun mergeIntoSimilarGroup(paths: List<String>, groupId: String) = withContext(Dispatchers.IO) {
-        if (paths.isEmpty()) return@withContext
-        mediaDao.updateSimilarGroupId(paths, groupId)
-    }
-
-    // ---- 重复照片管理 (DUP-1) ----
-
-    /**
-     * 执行三级重复检测并返回所有重复组。
-     * 使用 [DuplicateAnalyzer] 的 SHA-256 + pHash 分层检测。
+     * 执行完全重复检测（SHA-256）并返回所有重复组。
      *
-     * @return 按 [DuplicateLevel] 分组的重复照片组列表
+     * @return 重复照片组列表
      */
     suspend fun findDuplicateGroups(): List<DuplicateGroup> = withContext(Dispatchers.IO) {
         val allPaths = mediaDao.getAllPaths()
         if (allPaths.size < 2) return@withContext emptyList()
         val files = allPaths.map { java.io.File(it) }.filter { it.exists() }
         duplicateAnalyzer.findDuplicates(files, mediaDao)
-    }
-
-    /**
-     * 快速重复检测（仅 Level 1 + Level 2），用于扫描后即时展示。
-     */
-    suspend fun findExactAndPerceptualDuplicates(): List<DuplicateGroup> = withContext(Dispatchers.IO) {
-        val allPaths = mediaDao.getAllPaths()
-        if (allPaths.size < 2) return@withContext emptyList()
-        val files = allPaths.map { java.io.File(it) }.filter { it.exists() }
-        duplicateAnalyzer.findExactAndPerceptualDuplicates(files)
     }
 
     /**
