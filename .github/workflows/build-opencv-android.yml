@@ -1,0 +1,147 @@
+name: Build OpenCV 5.0 Android (NDK r27)
+
+# 用 NDK r27 从源码编译 OpenCV 5.0 的【自包含】libopencv_java5.so，解决官方预编译包
+# 在 Android 16 上的 __emutls_get_address / libc++ VTT ABI 不兼容问题。
+#
+# 关键点：
+#   - BUILD_SHARED_LIBS=OFF：core/imgproc/geometry 等模块编译为静态 .a，
+#     被【强制 SHARED】的 java 包装库静态链接 → 产出 ~30MB 自包含 libopencv_java5.so
+#     （与官方 SDK 单 .so 结构一致，无需额外打包 libopencv_core.so 等依赖）。
+#   - BUILD_ANDROID_PROJECTS=ON：满足 modules/java 的 cmake guard，启用 opencv_java 目标。
+#   - --target opencv_java：只构建 JNI .so 及其静态依赖，跳过 Gradle AAR 打包。
+#   - 产物校验：>5MB、无 __emutls_get_address、无 NEEDED libopencv_*.so（确认自包含）。
+#
+# 产物：arm64-v8a 与 x86_64 的 libopencv_java5.so，放入 app/src/main/jniLibs/<abi>/
+
+on:
+  workflow_dispatch:
+    inputs:
+      opencv_ref:
+        description: "OpenCV git ref/tag"
+        required: true
+        default: "5.0.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
+    steps:
+      - name: Checkout OpenCV
+        run: |
+          git clone --depth 1 --branch ${{ inputs.opencv_ref }} https://github.com/opencv/opencv.git opencv
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ant (Java wrapper codegen 打包用)
+        run: sudo apt-get update && sudo apt-get install -y ant
+
+      - name: Setup Android SDK + NDK r27c
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;27.2.12479018 cmake;3.22.1"
+
+      - name: Locate NDK & CMake
+        id: tools
+        run: |
+          NDK="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
+          CMAKE="$ANDROID_SDK_ROOT/cmake/3.22.1/bin/cmake"
+          test -d "$NDK" || NDK=$(ls -d $ANDROID_SDK_ROOT/ndk/* | head -1)
+          echo "ndk=$NDK" >> $GITHUB_OUTPUT
+          echo "cmake=$CMAKE" >> $GITHUB_OUTPUT
+          echo "NDK=$NDK"
+          echo "CMAKE=$CMAKE"
+
+      - name: Configure OpenCV
+        run: |
+          mkdir build && cd build
+          ${{ steps.tools.outputs.cmake }} ../opencv \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.tools.outputs.ndk }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_ANDROID_PROJECTS=ON \
+            -DBUILD_ANDROID_EXAMPLES=OFF \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_PERF_TESTS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_LIST=core,imgproc,geometry,java \
+            -DWITH_JAVA=ON \
+            -DWITH_OPENCL=OFF \
+            -DWITH_IPP=OFF \
+            -DWITH_TBB=OFF \
+            -DWITH_PTHREADS_PF=ON \
+            -DENABLE_PIC=ON \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DOPENCV_SKIP_PYTHON_WARNING=ON
+
+      - name: Build opencv_java target
+        run: |
+          cd build
+          ${{ steps.tools.outputs.cmake }} --build . --target opencv_java -j$(nproc)
+
+      - name: Locate & verify libopencv_java5.so
+        id: so
+        run: |
+          set -e
+          SO=$(find build -name 'libopencv_java5.so' -type f | head -1)
+          if [ -z "$SO" ]; then
+            echo "未找到 libopencv_java5.so"; find build -name '*.so' -o -name '*.a' | head -30; exit 1
+          fi
+          echo "so=$SO" >> $GITHUB_OUTPUT
+          SIZE=$(stat -c%s "$SO")
+          echo "产物: $SO ($SIZE bytes)"
+          # 1) 自包含校验：必须 >5MB（静态链接了 core/imgproc/geometry）
+          if [ "$SIZE" -lt 5242880 ]; then
+            echo ">>> 失败: .so 仅 $SIZE 字节 (<5MB)，说明模块未静态链接（仍是动态依赖）"
+            echo ">>> NEEDED 条目:"; readelf -d "$SO" | grep NEEDED || true
+            exit 1
+          fi
+          echo ">>> OK: 大小 $SIZE 字节 (>=5MB，自包含)"
+          # 2) emutls 校验：只关心【未定义 U】的 __emutls_get_address（未定义=运行时缺失会崩）。
+          #    c++_static 构建会静态链接 emutls 运行时（已定义 T），那是自包含、OK 的，不应判失败。
+          UNDEF_EMUTLS=$(nm -D "$SO" 2>/dev/null | grep ' U ' | grep '__emutls_get_address' || true)
+          if [ -n "$UNDEF_EMUTLS" ]; then
+            echo ">>> 失败: 仍有未定义 __emutls_get_address（运行时会缺失）"; exit 1
+          fi
+          if nm -D "$SO" 2>/dev/null | grep -qE ' [TtBb] __emutls_get_address'; then
+            echo ">>> OK: __emutls_get_address 已静态链接（自包含）"
+          else
+            echo ">>> OK: 无 __emutls_get_address（未使用 emutls）"
+          fi
+          # 3) 自包含校验：不应 NEEDED 任何 libopencv_*.so（只检查 NEEDED 条目，避免匹配 SONAME）
+          NEEDED_LIBS=$(readelf -d "$SO" | grep '(NEEDED)' || true)
+          if echo "$NEEDED_LIBS" | grep -q 'libopencv_'; then
+            echo ">>> 失败: 仍动态依赖其他 libopencv_*.so:"; echo "$NEEDED_LIBS" | grep 'libopencv_'; exit 1
+          fi
+          echo ">>> OK: 无 libopencv_* 动态依赖（自包含）"
+          echo ">>> NEEDED 条目:"; echo "$NEEDED_LIBS" || true
+          # 4) libc++ 静态化校验：不应再有未定义的 std::__ndk1 符号（VTT/vtable 等已静态链接）
+          UNDEF_NDK=$(nm -D "$SO" 2>/dev/null | grep ' U ' | grep 'NSt6__ndk1' || true)
+          if [ -n "$UNDEF_NDK" ]; then
+            echo ">>> 失败: 仍有未定义的 libc++ 符号（应静态化）:"; echo "$UNDEF_NDK" | head -5; exit 1
+          fi
+          echo ">>> OK: 无未定义 libc++ 符号（c++_static 静态化成功）"
+          # 4) 确认关键 JNI 符号导出
+          nm -D "$SO" 2>/dev/null | grep -q 'Java_org_opencv_core_Mat_n_Mat' && echo ">>> OK: Mat JNI 符号存在" || echo ">>> 警告: 未找到 Mat JNI 符号"
+
+      - name: Upload libopencv_java5.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libopencv_java5-${{ matrix.abi }}
+          path: ${{ steps.so.outputs.so }}
+          if-no-files-found: error

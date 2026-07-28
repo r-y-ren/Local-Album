@@ -1,0 +1,599 @@
+package com.renyxin.localalbum.ui.screens
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.RestoreFromTrash
+import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import com.renyxin.localalbum.core.model.MediaItem
+import com.renyxin.localalbum.core.model.MediaType
+import kotlinx.coroutines.launch
+import java.time.Duration
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+
+private const val TRASH_RETENTION_DAYS = 30L
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun TrashScreen(
+    trashedItems: List<MediaItem>,
+    onBack: () -> Unit,
+    onRestore: (List<String>) -> Unit = {},
+    onPermanentlyDelete: (List<String>) -> Unit = {},
+    onClearTrash: () -> Unit = {},
+    batchMessage: String? = null,
+    onBatchMessageConsumed: () -> Unit = {},
+) {
+    var isSelectionMode by remember { mutableStateOf(false) }
+    val selectedPaths = remember { mutableStateMapOf<String, Boolean>() }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showClearConfirm by remember { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    var operationInFlight by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // 退出选择模式时清空选择
+    LaunchedEffect(isSelectionMode) {
+        if (!isSelectionMode) selectedPaths.clear()
+    }
+
+    // 批量消息 → Snackbar
+    LaunchedEffect(batchMessage) {
+        if (!batchMessage.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(
+                message = batchMessage,
+                duration = SnackbarDuration.Short,
+            )
+            onBatchMessageConsumed()
+        }
+    }
+
+    // 永久删除确认对话框
+    if (showDeleteConfirm) {
+        val count = selectedPaths.size
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            icon = {
+                Icon(
+                    Icons.Default.DeleteForever,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            },
+            title = { Text("永久删除") },
+            text = {
+                Text("确定要永久删除选中的 $count 个文件吗？此操作不可撤销，文件将无法恢复！")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    operationInFlight = true
+                    onPermanentlyDelete(selectedPaths.keys.toList())
+                    selectedPaths.clear()
+                    isSelectionMode = false
+                    showDeleteConfirm = false
+                    operationInFlight = false
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            message = "已永久删除 $count 项",
+                            duration = SnackbarDuration.Short,
+                        )
+                    }
+                }) {
+                    Text("永久删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+
+    // 清空回收站确认
+    if (showClearConfirm) {
+        val totalCount = trashedItems.size
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            icon = {
+                Icon(
+                    Icons.Default.DeleteForever,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            },
+            title = { Text("清空回收站") },
+            text = {
+                Text("确定要清空回收站中的所有 $totalCount 个文件吗？此操作不可撤销！")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    operationInFlight = true
+                    onClearTrash()
+                    showClearConfirm = false
+                    isSelectionMode = false
+                    operationInFlight = false
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            message = "回收站已清空",
+                            duration = SnackbarDuration.Short,
+                        )
+                    }
+                }) {
+                    Text("清空", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            if (isSelectionMode) {
+                // 多选模式顶栏
+                TopAppBar(
+                    title = { Text("已选择 ${selectedPaths.size} 项") },
+                    navigationIcon = {
+                        IconButton(onClick = {
+                            selectedPaths.clear()
+                            isSelectionMode = false
+                        }) {
+                            Icon(Icons.Default.Close, "退出多选")
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = {
+                            if (selectedPaths.size == trashedItems.size) {
+                                selectedPaths.clear()
+                            } else {
+                                trashedItems.forEach { selectedPaths[it.filePath] = true }
+                            }
+                        }) {
+                            Icon(
+                                imageVector = if (selectedPaths.size == trashedItems.size)
+                                    Icons.Default.CheckCircle else Icons.Default.SelectAll,
+                                contentDescription = "全选",
+                            )
+                        }
+                        // 恢复按钮
+                        IconButton(onClick = {
+                            if (selectedPaths.isNotEmpty()) {
+                                val restoredCount = selectedPaths.size
+                                operationInFlight = true
+                                onRestore(selectedPaths.keys.toList())
+                                selectedPaths.clear()
+                                isSelectionMode = false
+                                operationInFlight = false
+                                scope.launch {
+                                    snackbarHostState.showSnackbar(
+                                        message = "已恢复 $restoredCount 项",
+                                        duration = SnackbarDuration.Short,
+                                    )
+                                }
+                            }
+                        }) {
+                            Icon(
+                                Icons.Default.RestoreFromTrash,
+                                contentDescription = "恢复",
+                                tint = if (selectedPaths.isEmpty())
+                                    MaterialTheme.colorScheme.outline
+                                else MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        // 永久删除按钮
+                        IconButton(onClick = {
+                            if (selectedPaths.isNotEmpty()) showDeleteConfirm = true
+                        }) {
+                            Icon(
+                                Icons.Default.DeleteForever,
+                                contentDescription = "永久删除",
+                                tint = if (selectedPaths.isEmpty())
+                                    MaterialTheme.colorScheme.outline
+                                else MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                    ),
+                )
+            } else {
+                TopAppBar(
+                    title = { Text("回收站 (${trashedItems.size})") },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
+                        }
+                    },
+                    actions = {
+                        if (trashedItems.isNotEmpty()) {
+                            IconButton(onClick = { showClearConfirm = true }) {
+                                Icon(
+                                    Icons.Default.DeleteForever,
+                                    contentDescription = "清空回收站",
+                                    tint = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+                    },
+                )
+            }
+        },
+        floatingActionButton = {
+            if (isSelectionMode) {
+                // 快捷恢复按钮
+                ExtendedFloatingActionButton(
+                    onClick = {
+                        if (selectedPaths.isNotEmpty()) {
+                            val restoredCount = selectedPaths.size
+                            onRestore(selectedPaths.keys.toList())
+                            selectedPaths.clear()
+                            isSelectionMode = false
+                            scope.launch {
+                                snackbarHostState.showSnackbar(
+                                    message = "已恢复 $restoredCount 项",
+                                    duration = SnackbarDuration.Short,
+                                )
+                            }
+                        }
+                    },
+                    icon = { Icon(Icons.Default.RestoreFromTrash, "恢复") },
+                    text = { Text("恢复 (${selectedPaths.size})") },
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                )
+            }
+        },
+    ) { padding ->
+        AnimatedVisibility(
+            visible = operationInFlight,
+            enter = expandVertically(),
+            exit = shrinkVertically(),
+        ) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
+
+        if (trashedItems.isEmpty()) {
+            // 空回收站 —— 增强空状态
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = null,
+                        modifier = Modifier.size(80.dp),
+                        tint = MaterialTheme.colorScheme.outlineVariant,
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        text = "回收站为空",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "被移到回收站的媒体文件将在这里显示",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "文件将在 $TRASH_RETENTION_DAYS 天后自动永久删除",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
+                }
+            }
+            return@Scaffold
+        }
+
+        // 天数提示条
+        val now = Instant.now()
+        val oldestDeletedAt = trashedItems
+            .filter { it.deletedAtMs > 0 }
+            .minOfOrNull { it.deletedAtMs }
+        val retentionBannerDays = if (oldestDeletedAt != null) {
+            val deletedInstant = Instant.ofEpochMilli(oldestDeletedAt)
+            val remaining = TRASH_RETENTION_DAYS - Duration.between(deletedInstant, now).toDays()
+            remaining.coerceAtLeast(0)
+        } else null
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(padding),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            // 提示横幅
+            if (retentionBannerDays != null && !isSelectionMode) {
+                item(key = "banner") {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (retentionBannerDays > 0) {
+                                        "最早删除的项目将在 $retentionBannerDays 天后被自动清理"
+                                    } else {
+                                        "部分项目即将被自动清理"
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    text = "回收站中的文件保留 $TRASH_RETENTION_DAYS 天后将自动永久删除",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.outline,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            items(trashedItems, key = { it.id }) { item ->
+                TrashItemRow(
+                    item = item,
+                    isSelected = selectedPaths[item.filePath] == true,
+                    isSelectionMode = isSelectionMode,
+                    onClick = {
+                        if (isSelectionMode) {
+                            if (selectedPaths[item.filePath] == true) {
+                                selectedPaths.remove(item.filePath)
+                            } else {
+                                selectedPaths[item.filePath] = true
+                            }
+                        }
+                    },
+                    onLongClick = {
+                        isSelectionMode = true
+                        selectedPaths[item.filePath] = true
+                    },
+                    onRestore = {
+                        onRestore(listOf(item.filePath))
+                        scope.launch {
+                            snackbarHostState.showSnackbar(
+                                message = "已恢复「${item.fileName}」",
+                                duration = SnackbarDuration.Short,
+                            )
+                        }
+                    },
+                    now = now,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun TrashItemRow(
+    item: MediaItem,
+    isSelected: Boolean,
+    isSelectionMode: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onRestore: () -> Unit,
+    now: Instant,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            ),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected)
+                MaterialTheme.colorScheme.primaryContainer
+            else MaterialTheme.colorScheme.surface,
+        ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // 选择框
+            if (isSelectionMode) {
+                Icon(
+                    imageVector = if (isSelected)
+                        Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                    contentDescription = if (isSelected) "已选中" else "未选中",
+                    tint = if (isSelected)
+                        MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(end = 8.dp).size(24.dp),
+                )
+            }
+
+            // 缩略图
+            Box(modifier = Modifier.size(56.dp)) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(item.thumbnailPath ?: item.filePath)
+                        .crossfade(true)
+                        .size(112)
+                        .build(),
+                    contentDescription = item.fileName,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentScale = ContentScale.Crop,
+                )
+                if (item.type == MediaType.VIDEO) {
+                    Icon(
+                        imageVector = Icons.Default.PlayCircle,
+                        contentDescription = "视频",
+                        tint = Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier
+                            .size(22.dp)
+                            .align(Alignment.Center),
+                    )
+                }
+            }
+
+            Spacer(Modifier.width(12.dp))
+
+            // 文件信息
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = item.fileName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(2.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = formatFileSize(item.fileSize),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                    if (item.deletedAtMs > 0) {
+                        Text(
+                            text = "  ·  ",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline,
+                        )
+                        Text(
+                            text = formatRemainingDays(item.deletedAtMs, now),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (item.deletedAtMs > 0) {
+                                val remaining = TRASH_RETENTION_DAYS -
+                                    Duration.between(Instant.ofEpochMilli(item.deletedAtMs), now).toDays()
+                                if (remaining <= 3) MaterialTheme.colorScheme.error
+                                else if (remaining <= 7) MaterialTheme.colorScheme.tertiary
+                                else MaterialTheme.colorScheme.outline
+                            } else MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                }
+
+                Text(
+                    text = item.filePath,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            // 恢复按钮（非选择模式下显示）
+            if (!isSelectionMode) {
+                IconButton(onClick = onRestore) {
+                    Icon(
+                        Icons.Default.RestoreFromTrash,
+                        contentDescription = "恢复",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatRemainingDays(deletedAtMs: Long, now: Instant): String {
+    if (deletedAtMs <= 0) return ""
+    val deletedInstant = Instant.ofEpochMilli(deletedAtMs)
+    val remainingDays = TRASH_RETENTION_DAYS - Duration.between(deletedInstant, now).toDays()
+    return when {
+        remainingDays <= 0 -> "即将清理"
+        remainingDays == 1L -> "剩余 1 天"
+        else -> "剩余 $remainingDays 天"
+    }
+}
+
+private fun formatFileSize(bytes: Long): String {
+    return when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+        bytes < 1024 * 1024 * 1024 -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
+        else -> String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+@Suppress("unused")
+private fun formatDateTime(instant: Instant): String {
+    val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+        .withZone(ZoneId.systemDefault())
+    return formatter.format(instant)
+}

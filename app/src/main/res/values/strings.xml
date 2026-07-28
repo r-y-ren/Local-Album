@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LocalAlbum</string>
+
+    <!-- Navigation -->
+    <string name="nav_timeline">Timeline</string>
+    <string name="nav_albums">Albums</string>
+    <string name="nav_faces">Faces</string>
+    <string name="nav_map">Map</string>
+    <string name="nav_search">Search</string>
+    <string name="nav_settings">Settings</string>
+    <string name="nav_plugins">Plugins</string>
+
+    <!-- Actions -->
+    <string name="action_scan">Scan</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_favorite">Favorite</string>
+    <string name="action_unfavorite">Unfavorite</string>
+    <string name="action_restore">Restore</string>
+    <string name="action_share">Share</string>
+    <string name="action_export">Export</string>
+    <string name="action_import">Import</string>
+    <string name="action_save">Save</string>
+    <string name="action_confirm">Confirm</string>
+
+    <!-- Scan -->
+    <string name="scan_scanning">Scanning media files…</string>
+    <string name="scan_complete">Scan complete</string>
+    <string name="scan_incremental">Incremental scan</string>
+    <string name="scan_full">Full scan</string>
+
+    <!-- Trash -->
+    <string name="trash_empty">Trash is empty</string>
+    <string name="trash_restore_all">Restore All</string>
+    <string name="trash_delete_permanently">Delete Permanently</string>
+    <string name="trash_auto_cleanup">Auto-clean after 30 days</string>
+
+    <!-- Search -->
+    <string name="search_hint">Search photos…</string>
+    <string name="search_keyword">Keyword</string>
+    <string name="search_semantic">Semantic</string>
+    <string name="search_no_results">No results found</string>
+    <string name="search_semantic_hint">Describe what you\'re looking for…</string>
+
+    <!-- Plugin -->
+    <string name="plugin_import">Import Plugin</string>
+    <string name="plugin_manage">Manage Plugins</string>
+    <string name="plugin_enabled">Enabled</string>
+    <string name="plugin_disabled">Disabled</string>
+    <string name="plugin_loading">Loading…</string>
+    <string name="plugin_error">Error</string>
+    <string name="plugin_ready">Ready</string>
+
+    <!-- Face -->
+    <string name="face_unknown">Unknown Person</string>
+    <string name="face_clustering">Clustering faces…</string>
+    <string name="face_swap">Face Swap</string>
+
+    <!-- Map -->
+    <string name="map_no_location">No location data</string>
+    <string name="map_loading">Loading map…</string>
+
+    <!-- Settings -->
+    <string name="settings_scan_roots">Scan Directories</string>
+    <string name="settings_theme">Theme</string>
+    <string name="settings_theme_light">Light</string>
+    <string name="settings_theme_dark">Dark</string>
+    <string name="settings_theme_system">System Default</string>
+    <string name="settings_language">Language</string>
+
+    <!-- Common -->
+    <string name="common_loading">Loading…</string>
+    <string name="common_error">An error occurred</string>
+    <string name="common_retry">Retry</string>
+    <string name="common_empty">Nothing here yet</string>
+    <string name="common_processing">Processing…</string>
+</resources>

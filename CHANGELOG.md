@@ -1,0 +1,43 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - 2026-07-27
+
+### Added
+
+- Core media indexing engine (HybridIndexer) with full/incremental scan
+- Room database v11 with FTS4 full-text search
+- AI plugin system with DexClassLoader-based hot-loading
+- Plugin manifest JSON editor with real-time validation
+- Model import wizard (4-step visual flow)
+- Plugin manager UI with enable/disable and ordering
+- Dynamic capability registry (CapabilityRegistryV2) with provider switching
+- Face detection and clustering (ML Kit + InsightFace/RetinaFace/SCRFD)
+- Face swap pipeline (ReActor-like, ONNX-based inswapper + FaceDetailer)
+- Scene classification (MobileNetV2 TFLite + heuristic fallback)
+- Quality scoring (heuristic analysis)
+- OCR text recognition (PaddleOCR + ML Kit Chinese + GLM-OCR)
+- Semantic embedding (EVA02-CLIP ONNX + MobileCLIP TFLite + concept vectors)
+- Semantic search engine with hybrid retrieval
+- Similar/duplicate photo detection (perceptual hash)
+- Geographic clustering and reverse geocoding
+- Map view (osmdroid-based)
+- Timeline view with section grouping
+- Album tree builder with directory hierarchy
+- Recommendation engine
+- Database JSON import/export for cross-device data migration
+- Global progress indicator with ETA estimation
+- Trash cleanup worker (WorkManager)
+- Compose Material 3 UI with dark/light theme support
+- ONNX Runtime 1.19.2, TensorFlow Lite 2.14.0, PyTorch Mobile 1.13.1 runtimes
+- OpenCV 5.0 integration (affine transforms, Poisson blending)
+- emutls shim for cross-library thread-local storage compatibility
+- Extension plugin registry (InSwapper, style transfer)
+
+[0.1.0]: https://github.com/renyxin/LocalAlbum/releases/tag/v0.1.0
