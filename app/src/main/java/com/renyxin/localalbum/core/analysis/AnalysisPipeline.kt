@@ -249,6 +249,13 @@ class AnalysisPipeline(
         val allFaces = dao.getAll()
         if (allFaces.isEmpty()) return FaceClusterer.ClusterResult(emptyList(), emptyList())
 
+        // 修复：聚类前清空所有含人脸照片的 media_items.faceClusterId，
+        // 使变为 noise 的照片不残留旧 clusterId，保证 faces 表与 media_items 表一致
+        val allFacePaths = allFaces.map { it.filePath }.distinct()
+        if (allFacePaths.isNotEmpty()) {
+            allFacePaths.chunked(500).forEach { chunk -> mediaDao.clearFaceClusterId(chunk) }
+        }
+
         val samples = allFaces.map { face ->
             FaceClusterer.FaceSample(
                 id = face.faceId,

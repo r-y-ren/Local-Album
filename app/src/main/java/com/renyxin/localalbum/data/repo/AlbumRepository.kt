@@ -366,8 +366,9 @@ class AlbumRepository(
                 } else {
                     hybridIndexer.incrementalScan(roots, allowNomedia)
                 }
-                // 兜底孤儿记录清理（防止 MediaStore/File API 双通道遗漏）
-                removeOrphanedRecords(mediaDao.getAllPaths().toSet())
+                // 修复：移除无效的"兜底孤儿清理"调用。原调用 removeOrphanedRecords(mediaDao.getAllPaths())
+                // 把数据库路径当作"文件系统实际路径"传入，差集恒为空，是 no-op（还白做两次全表路径查询）。
+                // 孤儿清理由 fullScan/incrementalScan 内部基于真实文件系统快照完成，此处无需重复。
                 loadFromDb()
                 _scanState.value = ScanState.Done
                 refreshStats()
@@ -520,9 +521,16 @@ class AlbumRepository(
         refreshStats()
     }
 
+    /**
+     * 彻底删除：删除物理文件 + 清理 media_items/FTS/faces/embeddings/analysis_state。
+     *
+     * 修复：原实现仅删数据库记录，物理文件残留导致下次增量扫描"复活"被删照片；
+     * 同时未清 faces/embeddings，人物相册与语义搜索残留。现与 TrashCleanupWorker 对齐。
+     */
     suspend fun permanentlyDelete(paths: List<String>) = withContext(Dispatchers.IO) {
         if (paths.isEmpty()) return@withContext
-        mediaDao.deleteByPaths(paths)
+        deletePhysicalFiles(paths)
+        purgeMediaData(paths)
         removeFromMemoryTree(paths.toSet())
         refreshStats()
     }
@@ -534,9 +542,55 @@ class AlbumRepository(
         loadFromDb()
     }
 
+    /**
+     * 清空回收站：删除所有已回收媒体的物理文件 + 全量清理相关数据。
+     */
     suspend fun clearTrash() = withContext(Dispatchers.IO) {
-        mediaDao.clearTrash()
+        val trashed = mediaDao.getTrashed()
+        if (trashed.isEmpty()) return@withContext
+        val paths = trashed.map { it.filePath }
+        deletePhysicalFiles(paths)
+        purgeMediaData(paths)
+        removeFromMemoryTree(paths.toSet())
         refreshStats()
+    }
+
+    /**
+     * 删除物理文件（与 TrashCleanupWorker 一致使用 File.delete，失败仅告警不阻塞）。
+     */
+    private suspend fun deletePhysicalFiles(paths: List<String>): List<String> = withContext(Dispatchers.IO) {
+        val deleted = mutableListOf<String>()
+        for (path in paths) {
+            try {
+                val file = java.io.File(path)
+                if (!file.exists()) {
+                    deleted.add(path) // 视为已删除
+                    continue
+                }
+                if (file.delete()) {
+                    deleted.add(path)
+                } else {
+                    Log.w(TAG, "物理文件删除失败（可能无权限）: $path")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "删除物理文件异常: $path", e)
+            }
+        }
+        deleted
+    }
+
+    /**
+     * 彻底清理媒体相关数据：media_items + FTS + faces + embeddings + analysis_state（分块规避 999 上限）。
+     */
+    private suspend fun purgeMediaData(paths: List<String>) {
+        if (paths.isEmpty()) return
+        paths.chunked(500).forEach { chunk ->
+            mediaDao.deleteByPaths(chunk)
+            mediaDao.deleteFtsEntries(chunk)
+            faceDao?.deleteByFilePaths(chunk)
+            embeddingDao?.deleteByFilePaths(chunk)
+            hybridIndexer?.invalidateAnalysisState(chunk)
+        }
     }
 
     // ---- 搜索 (优先 FTS4 全文索引，失败回退 LIKE + OCR) ----
@@ -730,11 +784,31 @@ class AlbumRepository(
                     success = false,
                     errorMessage = "DatabaseImporter 未初始化",
                 )
-            val result = importer.importFromFile(inputFile)
+            // 修复：导入（清空 4 表 + 逐表插入）必须在 scanMutex 内执行，防止与
+            // ContentObserver 触发的 rescan 并发：rescan 可能读到"清了一半"的库走错分支，
+            // 或与导入交叉写入造成数据错乱。loadFromDb/refreshStats 不持锁，可一并放入。
+            val result = scanMutex.withLock {
+                val r = importer.importFromFile(inputFile)
+                if (r.success) {
+                    loadFromDb()
+                    refreshStats()
+                }
+                r
+            }
             if (result.success) {
-                // 导入成功后重建相册树与统计
-                loadFromDb()
-                refreshStats()
+                // 对账扫描在锁外执行：scanMutex 不可重入，且 rescan 自身会持锁。
+                // 导入后自动触发一次增量扫描，清理"幽灵记录"并补充设备上未纳入备份的新文件。
+                // 注意：roots 为空时 rescan 会清空数据库（见 rescan 内分支），必须跳过，
+                // 否则刚导入的数据会被立即清掉。
+                val roots = withTimeoutOrNull(5000L) {
+                    settingsRepository.state.first()
+                }?.scanRoots ?: emptyList()
+                if (roots.isNotEmpty()) {
+                    Log.i(TAG, "importDatabase: 导入成功，触发对账增量扫描…")
+                    rescan()
+                } else {
+                    Log.w(TAG, "importDatabase: 未配置扫描根目录，跳过对账扫描")
+                }
             }
             result
         }

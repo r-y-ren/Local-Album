@@ -2203,8 +2203,21 @@ private fun SettingsTab(
                 shape = RoundedCornerShape(20.dp),
             ) {
                 val backupState by albumViewModel.backupState.collectAsStateWithLifecycle()
+                val pendingImport by albumViewModel.pendingImport.collectAsStateWithLifecycle()
                 val context = androidx.compose.ui.platform.LocalContext.current
-                var showImportConfirm by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Pair<String, String?>?>(null) }
+
+                // SAF 导出：用户选择目标位置（自定义路径）
+                val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json"),
+                ) { uri ->
+                    if (uri != null) albumViewModel.exportDatabaseToUri(context, uri)
+                }
+                // SAF 导入：用户选择 JSON 文件（自定义路径）
+                val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+                ) { uri ->
+                    if (uri != null) albumViewModel.prepareImportFromUri(context, uri)
+                }
 
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -2216,7 +2229,7 @@ private fun SettingsTab(
                         fontWeight = FontWeight.Bold,
                     )
                     Text(
-                        text = "将索引数据库导出为 JSON 文件，换设备后可一键恢复，避免重新扫描。导出文件保存在应用专属目录下。",
+                        text = "将索引数据库导出为 JSON 文件，换设备后可一键恢复，避免重新扫描。可选择自定义位置导出/导入。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
                     )
@@ -2224,11 +2237,8 @@ private fun SettingsTab(
                     // Export button
                     OutlinedButton(
                         onClick = {
-                            val dir = java.io.File(context.getExternalFilesDir(null), "backups")
-                            if (!dir.exists()) dir.mkdirs()
                             val fileName = "localalbum_backup_${java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(java.util.Date())}.json"
-                            val exportFile = java.io.File(dir, fileName)
-                            albumViewModel.exportDatabase(exportFile)
+                            exportLauncher.launch(fileName)
                         },
                         enabled = backupState !is AlbumViewModel.BackupState.InProgress,
                         modifier = Modifier.fillMaxWidth(),
@@ -2236,28 +2246,13 @@ private fun SettingsTab(
                     ) {
                         Icon(Icons.Default.CloudUpload, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
-                        Text("导出数据库")
+                        Text("导出数据库（选择位置）")
                     }
 
                     // Import button
                     OutlinedButton(
                         onClick = {
-                            val dir = java.io.File(context.getExternalFilesDir(null), "backups")
-                            val backupFiles = dir.listFiles { f -> f.extension == "json" }?.sortedByDescending { it.lastModified() }
-                            if (backupFiles.isNullOrEmpty()) {
-                                showImportConfirm = "未找到备份文件，请先导出或将备份 JSON 放入目录：${dir.absolutePath}" to null
-                            } else {
-                                val latest = backupFiles.first()
-                                val (counts, error) = albumViewModel.validateImportFile(latest)
-                                if (error != null) {
-                                    showImportConfirm = "文件格式错误: $error" to null
-                                } else if (counts != null) {
-                                    val mc = counts.optInt("media", 0)
-                                    val fc = counts.optInt("faces", 0)
-                                    val ec = counts.optInt("embeddings", 0)
-                                    showImportConfirm = "即将导入 ${latest.name}：$mc 条媒体, $fc 张人脸, $ec 条嵌入。当前数据将被覆盖！" to latest.absolutePath
-                                }
-                            }
+                            importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*"))
                         },
                         enabled = backupState !is AlbumViewModel.BackupState.InProgress,
                         modifier = Modifier.fillMaxWidth(),
@@ -2265,7 +2260,7 @@ private fun SettingsTab(
                     ) {
                         Icon(Icons.Default.CloudDownload, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
-                        Text("导入数据库（从最新备份）")
+                        Text("导入数据库（选择文件）")
                     }
 
                     // Status display
@@ -2302,27 +2297,22 @@ private fun SettingsTab(
                     }
                 }
 
-                // Import confirmation dialog
-                showImportConfirm?.let { (message, filePath) ->
+                // Import confirmation dialog（SAF 选择文件并校验后弹出）
+                pendingImport?.let { (message, tempPath) ->
                     androidx.compose.material3.AlertDialog(
-                        onDismissRequest = {
-                            showImportConfirm = null
-                        },
+                        onDismissRequest = { albumViewModel.cancelImport() },
                         title = { Text("确认导入") },
                         text = { Text(message) },
                         confirmButton = {
                             androidx.compose.material3.TextButton(
                                 onClick = {
-                                    if (filePath != null) {
-                                        albumViewModel.importDatabase(java.io.File(filePath))
-                                    }
-                                    showImportConfirm = null
+                                    if (tempPath != null) albumViewModel.confirmImport(tempPath)
                                 },
                             ) { Text("确认导入") }
                         },
                         dismissButton = {
                             androidx.compose.material3.TextButton(
-                                onClick = { showImportConfirm = null },
+                                onClick = { albumViewModel.cancelImport() },
                             ) { Text("取消") }
                         },
                     )

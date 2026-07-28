@@ -522,6 +522,104 @@ class AlbumViewModel(
         _backupState.value = BackupState.Idle
     }
 
+    // ---- SAF 自定义路径导入/导出（Phase 改进） ----
+
+    /** 待确认导入的临时文件信息（确认文案 -> 临时文件绝对路径），null 表示无待确认导入。 */
+    private val _pendingImport = MutableStateFlow<Pair<String, String?>?>(null)
+    val pendingImport: StateFlow<Pair<String, String?>?> = _pendingImport.asStateFlow()
+
+    /**
+     * 导出数据库到用户通过 SAF 选择的目标 Uri。
+     * 先导出到缓存临时文件，再复制到目标 Uri，最后清理临时文件。
+     */
+    fun exportDatabaseToUri(context: android.content.Context, uri: android.net.Uri) {
+        viewModelScope.launch {
+            _backupState.value = BackupState.InProgress("正在导出数据库…")
+            val temp = java.io.File(context.cacheDir, "localalbum_export_tmp.json")
+            try {
+                val result = repository.exportDatabase(temp)
+                if (!result.success) {
+                    _backupState.value = BackupState.Error(result.errorMessage ?: "导出失败")
+                    return@launch
+                }
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    temp.inputStream().use { it.copyTo(out) }
+                } ?: run {
+                    _backupState.value = BackupState.Error("无法写入目标位置")
+                    return@launch
+                }
+                _backupState.value = BackupState.Success(
+                    "导出成功：${result.mediaCount} 条媒体, ${result.faceCount} 张人脸, " +
+                        "${result.embeddingCount} 条嵌入 (${result.fileSizeBytes / 1024}KB)",
+                )
+            } catch (e: Exception) {
+                _backupState.value = BackupState.Error("导出失败: ${e.message}")
+            } finally {
+                temp.delete()
+            }
+        }
+    }
+
+    /**
+     * 从用户通过 SAF 选择的 Uri 读取导入文件，校验后置为待确认状态（不立即导入）。
+     */
+    fun prepareImportFromUri(context: android.content.Context, uri: android.net.Uri) {
+        viewModelScope.launch {
+            _backupState.value = BackupState.InProgress("正在读取文件…")
+            val temp = java.io.File(context.cacheDir, "localalbum_import_tmp.json")
+            try {
+                val opened = context.contentResolver.openInputStream(uri)?.use { inp ->
+                    temp.outputStream().use { inp.copyTo(it) }
+                    true
+                } ?: false
+                if (!opened) {
+                    _backupState.value = BackupState.Error("无法读取所选文件")
+                    return@launch
+                }
+                val (counts, error) = repository.validateImportFile(temp)
+                if (error != null) {
+                    _backupState.value = BackupState.Error("文件格式错误: $error")
+                    temp.delete()
+                    return@launch
+                }
+                val mc = counts?.optInt("media", 0) ?: 0
+                val fc = counts?.optInt("faces", 0) ?: 0
+                val ec = counts?.optInt("embeddings", 0) ?: 0
+                _backupState.value = BackupState.Idle
+                _pendingImport.value =
+                    "即将导入：$mc 条媒体, $fc 张人脸, $ec 条嵌入。当前数据将被覆盖！" to temp.absolutePath
+            } catch (e: Exception) {
+                _backupState.value = BackupState.Error("读取失败: ${e.message}")
+                temp.delete()
+            }
+        }
+    }
+
+    /** 确认执行待确认的导入。 */
+    fun confirmImport(tempPath: String) {
+        viewModelScope.launch {
+            _pendingImport.value = null
+            _backupState.value = BackupState.InProgress("正在导入数据库…")
+            val temp = java.io.File(tempPath)
+            val result = repository.importDatabase(temp)
+            temp.delete()
+            _backupState.value = if (result.success) {
+                BackupState.Success(
+                    "导入成功：${result.mediaCount} 条媒体, ${result.faceCount} 张人脸, " +
+                        "${result.embeddingCount} 条嵌入",
+                )
+            } else {
+                BackupState.Error(result.errorMessage ?: "导入失败")
+            }
+        }
+    }
+
+    /** 取消待确认的导入，清理临时文件。 */
+    fun cancelImport() {
+        _pendingImport.value?.second?.let { java.io.File(it).delete() }
+        _pendingImport.value = null
+    }
+
     // ---- 推荐刷新 ----
 
     /**

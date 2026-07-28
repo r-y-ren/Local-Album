@@ -61,8 +61,12 @@ class FaceStage(
         try {
             enhancedCallback(0, total, null, null)
 
-            // 1. 清除旧的人脸记录
+            // 1. 清除旧的人脸记录，并同步清空这些照片的 media_items.faceClusterId，
+            //    避免不再含人脸的照片残留旧聚类 ID（faces 表与 media_items 表不一致）
             faceDao.deleteByFilePaths(filePaths)
+            if (filePaths.isNotEmpty()) {
+                filePaths.chunked(500).forEach { chunk -> mediaDao.clearFaceClusterId(chunk) }
+            }
 
             // 2. 并发检测人脸（文件级并行，充分利用多核）
             val allFaceEntities = mutableListOf<FaceEntity>()
@@ -143,6 +147,15 @@ class FaceStage(
             if (faceCount > 0) {
                 faceDao.clearAllClusterIds()
                 val allFaces = faceDao.getAll()
+
+                // 修复：聚类前清空所有含人脸照片的 media_items.faceClusterId，
+                // 使变为 noise 的照片不残留旧 clusterId，保证 faces 表与 media_items 表一致
+                // （列表来自 faces 表 getClusterSummaries，详情来自 media_items 表 getByFaceCluster，
+                //  两表必须同步，否则数量与图片不符）
+                val allFacePaths = allFaces.map { it.filePath }.distinct()
+                if (allFacePaths.isNotEmpty()) {
+                    allFacePaths.chunked(500).forEach { chunk -> mediaDao.clearFaceClusterId(chunk) }
+                }
 
                 val samples = allFaces.map { face ->
                     FaceClusterer.FaceSample(

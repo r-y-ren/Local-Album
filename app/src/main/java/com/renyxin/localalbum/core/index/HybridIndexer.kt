@@ -61,6 +61,16 @@ class HybridIndexer(
     }
 
     /**
+     * Phase 1: 按路径失效分析断点状态（彻底删除媒体时调用，避免残留）。
+     */
+    suspend fun invalidateAnalysisState(paths: List<String>) {
+        if (paths.isEmpty() || analysisStateDao == null) return
+        paths.chunked(500).forEach { chunk ->
+            analysisStateDao.deleteByPaths(chunk)
+        }
+    }
+
+    /**
      * Phase 1: 已完成分析（任意阶段）的去重文件数，供 UI 显示分析完成度。
      */
     suspend fun countAnalysisDonePaths(): Int {
@@ -209,6 +219,9 @@ class HybridIndexer(
                 mediaDao.deleteFtsEntries(chunk)
                 // Phase 1: 同步清理孤儿文件的分析断点状态
                 analysisStateDao?.deleteByPaths(chunk)
+                // 同步清理人脸与语义嵌入（人物相册/语义搜索直接查这些表，不 JOIN media_items）
+                faceDao?.deleteByFilePaths(chunk)
+                embeddingDao?.deleteByFilePaths(chunk)
             }
         }
 
@@ -319,6 +332,12 @@ class HybridIndexer(
             // 修复：分块删除，避免 SQLite IN 查询变量数超过 999 限制
             toDelete.chunked(500).forEach { chunk ->
                 mediaDao.deleteByPaths(chunk)
+                // 修复：同步清理 FTS/人脸/语义嵌入残留。
+                // 人物相册聚类（FaceDao.getClusterSummaries）与语义搜索（SemanticSearcher.getAll）
+                // 均直接查这些表而不 JOIN media_items，不清理会导致已删除文件仍出现。
+                mediaDao.deleteFtsEntries(chunk)
+                faceDao?.deleteByFilePaths(chunk)
+                embeddingDao?.deleteByFilePaths(chunk)
             }
         }
         if (toInsert.isNotEmpty()) {
