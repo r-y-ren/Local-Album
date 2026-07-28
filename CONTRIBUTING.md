@@ -76,13 +76,13 @@ Write tests for:
 ### Adding a New Analysis Stage
 
 1. Implement the `AnalysisStage` interface
-2. Add to `PluginAnalysisPipeline.create()` builtin stage list
+2. Add a `when` branch mapping in `PluginAnalysisPipeline.create()` (or register a new `CapabilitySlot` + Provider)
 3. Set correct `stageId`, `dependencies`, and `displayName`
 
 ### Adding a New Capability Provider
 
 1. Implement the capability interface (e.g., `SceneProvider`)
-2. Register in `AppContainer.initCapabilities()` with a unique provider ID
+2. Register in `AppContainer`'s `capabilityRegistry` initialization block (`CapabilityRegistryV2().apply { ... }`) with a unique provider ID
 3. Add default activation logic if applicable
 
 ### Adding a New Model Runtime
@@ -93,4 +93,4 @@ Write tests for:
 
 ## Questions?
 
-Open a [GitHub Discussion](https://github.com/renyxin/LocalAlbum/discussions) for questions, ideas, or general conversation.
+Open a [GitHub Discussion](https://github.com/r-y-ren/Local-Album/discussions) for questions, ideas, or general conversation.

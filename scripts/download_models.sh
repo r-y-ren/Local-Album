@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# 模型下载脚本 — 下载核心 AI 模型到 assets/models/
+# 模型下载脚本 — 从 GitHub Releases 下载 AI 模型到 assets/models/
 #
 # 用法:
 #   chmod +x scripts/download_models.sh
@@ -8,10 +8,7 @@
 #
 # 模型文件将下载到: app/src/main/assets/models/
 #
-# 注意:
-#   - MobileNetV2 从 TF Hub 下载 (~4.3MB)
-#   - 其他模型 URL 为占位符, 请替换为实际可用的下载地址
-#   - GLM-OCR 模型较大 (~300MB), 如不需要 OCR 可注释掉
+# 模型来源: https://github.com/r-y-ren/Local-Album/releases/tag/v0.1.0
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -19,6 +16,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ASSETS_DIR="$PROJECT_DIR/app/src/main/assets/models"
+
+# GitHub Release 下载基础 URL
+RELEASE_URL="https://github.com/r-y-ren/Local-Album/releases/download/v0.1.0"
 
 mkdir -p "$ASSETS_DIR"
 
@@ -31,7 +31,7 @@ NC='\033[0m'
 download() {
     local url="$1"
     local filename="$2"
-    local dest="$ASSETS_DIR/$filename"
+    local dest="$3"
 
     if [ -f "$dest" ] && [ -s "$dest" ]; then
         echo -e "${GREEN}[跳过]${NC} $filename 已存在 ($(du -h "$dest" | cut -f1))"
@@ -42,61 +42,51 @@ download() {
     if curl -fSL --connect-timeout 30 --max-time 600 -o "$dest" "$url"; then
         echo -e "${GREEN}[完成]${NC} $filename ($(du -h "$dest" | cut -f1))"
     else
-        echo -e "${RED}[失败]${NC} $filename — 请检查 URL 或手动下载"
+        echo -e "${RED}[失败]${NC} $filename — 请检查网络或手动下载"
         rm -f "$dest"
         return 1
     fi
 }
 
 echo "══════════════════════════════════════════════"
-echo "  核心 AI 模型下载工具"
+echo "  LocalAlbum AI 模型下载工具"
 echo "  目标目录: $ASSETS_DIR"
+echo "  来源: GitHub Releases v0.1.0"
 echo "══════════════════════════════════════════════"
 echo ""
 
-# ── 1. MobileNetV2 (场景分类, ~4.3MB) ──
-download \
-    "https://storage.googleapis.com/download.tensorflow.org/models/tflite/mobilenet_v2_1.0_224_quant.tflite" \
-    "model:mobilenet_v2.tflite"
+# ── 1. EVA02-CLIP 语义搜索模型 (~415MB) ──
+mkdir -p "$ASSETS_DIR/eva02_clip"
+download "$RELEASE_URL/eva02_text_int8.onnx" "eva02_text_int8.onnx" "$ASSETS_DIR/eva02_clip/eva02_text_int8.onnx"
+download "$RELEASE_URL/eva02_visual_336_int8.onnx" "eva02_visual_336_int8.onnx" "$ASSETS_DIR/eva02_clip/eva02_visual_336_int8.onnx"
 
-# ── 2. ArcFace (人脸嵌入, ~4MB) ──
-# NOTE: ArcFace ONNX 需要转换为 TFLite，URL 为占位符
-# 实际使用时请替换为可用的 TFLite 模型下载地址
-echo -e "${YELLOW}[提示]${NC} ArcFace 模型需要手动转换为 TFLite 格式后放置到 $ASSETS_DIR/model:arcface.tflite"
-# download \
-#     "https://huggingface.co/deepinsight/insightface/resolve/main/models/arcface_r100.onnx" \
-#     "model:arcface.tflite"
+# ── 2. 换脸模型 inswapper_128 (~529MB) ──
+download "$RELEASE_URL/inswapper_128.onnx" "inswapper_128.onnx" "$ASSETS_DIR/inswapper_128.onnx"
 
-# ── 3. MobileCLIP 图像编码器 (~35MB) ──
-# NOTE: URL 为占位符
-echo -e "${YELLOW}[提示]${NC} MobileCLIP 图像编码器模型需放置到 $ASSETS_DIR/model:mobileclip_image.tflite"
-# download \
-#     "https://huggingface.co/apple/MobileCLIP-S0/resolve/main/image_encoder.tflite" \
-#     "model:mobileclip_image.tflite"
+# ── 3. 人脸检测模型 ──
+download "$RELEASE_URL/retinaface-resnet50.onnx" "retinaface-resnet50.onnx" "$ASSETS_DIR/retinaface-resnet50.onnx"
+download "$RELEASE_URL/scrfd_person_2.5g.onnx" "scrfd_person_2.5g.onnx" "$ASSETS_DIR/scrfd_person_2.5g.onnx"
 
-# ── 4. MobileCLIP 文本编码器 (~10MB) ──
-# NOTE: URL 为占位符
-echo -e "${YELLOW}[提示]${NC} MobileCLIP 文本编码器模型需放置到 $ASSETS_DIR/model:mobileclip_text.tflite"
-# download \
-#     "https://huggingface.co/apple/MobileCLIP-S0/resolve/main/text_encoder.tflite" \
-#     "model:mobileclip_text.tflite"
+# ── 4. 人脸模型包 buffalo_l (~276MB) ──
+download "$RELEASE_URL/buffalo_l.zip" "buffalo_l.zip" "$ASSETS_DIR/buffalo_l.zip"
 
-# ── 5. GLM-OCR 编码器 (~180MB) ──
-# NOTE: URL 为占位符, 体积较大
-echo -e "${YELLOW}[提示]${NC} GLM-OCR 编码器模型需放置到 $ASSETS_DIR/model:glm_ocr_encoder.tflite"
-# download \
-#     "https://huggingface.co/THUDM/GLM-OCR/resolve/main/vision_encoder.tflite" \
-#     "model:glm_ocr_encoder.tflite"
+# ── 5. emap 矩阵 (换脸用, ~1MB) ──
+download "$RELEASE_URL/emap_512.bin" "emap_512.bin" "$ASSETS_DIR/emap_512.bin"
 
-# ── 6. GLM-OCR 解码器 (~120MB) ──
-# NOTE: URL 为占位符, 体积较大
-echo -e "${YELLOW}[提示]${NC} GLM-OCR 解码器模型需放置到 $ASSETS_DIR/model:glm_ocr_decoder.tflite"
-# download \
-#     "https://huggingface.co/THUDM/GLM-OCR/resolve/main/text_decoder.tflite" \
-#     "model:glm_ocr_decoder.tflite"
+# ── 6. PP-OCR 模型 (~25MB) ──
+mkdir -p "$ASSETS_DIR/PP-OCRv5_mobile_rec_infer"
+download "$RELEASE_URL/PP-OCRv5_mobile_rec_inference.onnx" "PP-OCRv5_mobile_rec_inference.onnx" "$ASSETS_DIR/PP-OCRv5_mobile_rec_infer/inference.onnx"
+
+mkdir -p "$ASSETS_DIR/PP-OCRv6_small_det_infer"
+download "$RELEASE_URL/PP-OCRv6_small_det_inference.onnx" "PP-OCRv6_small_det_inference.onnx" "$ASSETS_DIR/PP-OCRv6_small_det_infer/inference.onnx"
 
 echo ""
 echo "══════════════════════════════════════════════"
-echo "  完成！请检查 $ASSETS_DIR"
+echo "  下载完成！请检查 $ASSETS_DIR"
+echo ""
+echo "  如需从 inswapper_128.onnx 提取 emap 矩阵:"
+echo "    pip install onnx numpy"
+echo "    python scripts/extract_emap.py"
+echo ""
 echo "  然后运行 ./gradlew installDebug 构建 APK"
 echo "══════════════════════════════════════════════"

@@ -103,28 +103,38 @@ LocalAlbum is a fully offline Android smart photo manager. No cloud services req
 #### 2.3 Build Steps
 
 ```bash
-# 1. Clone the repository (with Git LFS for model files)
-git lfs install
-git clone <repo-url>
-cd LocalAlbum
+# 1. Clone the repository
+git clone https://github.com/r-y-ren/Local-Album.git
+cd Local-Album
 
-# 2. Open in Android Studio and wait for Gradle sync
+# 2. Download AI model files via the provided script.
+#    The script fetches all models (large + small/medium) from GitHub Releases;
+#    small/medium models (EVA02-CLIP, PP-OCR) are already bundled in the repo
+#    and will be skipped if present.
+chmod +x scripts/download_models.sh
+./scripts/download_models.sh
 
-# 3. Build debug APK
+# 3. (Optional) Regenerate the face-swap emap matrix locally instead of downloading:
+#    pip install onnx numpy && python scripts/extract_emap.py
+
+# 4. Open in Android Studio and wait for Gradle sync
+
+# 5. Build debug APK
 ./gradlew assembleDebug
 
-# 4. Run unit tests
+# 6. Run unit tests
 ./gradlew testDebugUnitTest
 
-# 5. Install on device
+# 7. Install on device
 ./gradlew installDebug
 ```
 
 **Notes:**
 
 - PyTorch Mobile requires JitPack repository (configured in `settings.gradle.kts`)
-- ONNX + PyTorch adds ~55MB APK size; ABI splits configured for arm64-v8a and x86_64 only
-- First build downloads native runtime libraries — may take a while
+- AI models bundled in `assets/` dominate APK size (~1.6 GB); native libraries are limited to `arm64-v8a` and `x86_64` via `ndk.abiFilters`
+- The Gradle daemon runs on JDK 21 (auto-provisioned via the foojay toolchain resolver in `gradle/gradle-daemon-jvm.properties`); compilation uses JDK 17
+- First build downloads Gradle/AGP dependencies and native runtime libraries — may take a while
 
 ---
 
@@ -178,9 +188,10 @@ cd LocalAlbum
 
 #### 3.3 Key Design Patterns
 
-- **Factory Method**: `PluginAnalysisPipeline.create()` auto-assembles built-in stages + external plugins
+- **Factory Method**: `PluginAnalysisPipeline.create()` assembles core analysis stages from the active providers in `CapabilityRegistryV2`
 - **Strategy**: `ModelRuntime.create()` returns runtime implementation by model format
-- **Adapter**: `PluginAnalysisStage` wraps `AiPlugin` into unified `AnalysisStage`
+- **Strategy + Capability Slots**: `CapabilityRegistryV2` exposes swappable provider slots (face/scene/semantic/quality/ocr); `PluginAnalysisPipeline.create()` assembles stages from the active provider of each slot
+- **Adapter** (legacy): `PluginAnalysisStage` wraps `AiPlugin` into unified `AnalysisStage` (deprecated path; extension plugins are now invoked interactively via `ExtensionPluginRegistry`)
 - **Observer**: Extensive use of Kotlin `StateFlow` / `SharedFlow` for reactive state
 - **Dependency Injection**: Manual DI via `AppContainer`
 - **Sealed Class Polymorphism**: `PluginInput` / `PluginOutput` type-safe I/O
@@ -210,9 +221,14 @@ Runtime hot-loading of external APK plugins via `DexClassLoader`. Plugins implem
 
 ```kotlin
 interface AiPlugin {
+    fun getId(): String
+    fun getManifest(): PluginManifest
+    fun getInputSchema(): List<FeatureSchema.FieldSpec>
+    fun getOutputSchema(): FeatureSchema
     suspend fun initialize(context: Context, pluginContext: PluginContext)
+    fun isReady(): Boolean
     suspend fun execute(input: PluginInput): PluginOutput
-    fun release()
+    suspend fun release()
 }
 ```
 
@@ -236,38 +252,38 @@ Factory: `ModelRuntime.create(format)` returns the appropriate implementation.
 
 #### 4.4 Plugin Analysis Pipeline (PluginAnalysisPipeline)
 
-Core orchestration engine with DAG topological sort (Kahn's algorithm):
+Core orchestration engine with DAG topological sort (Kahn's algorithm). Stages are assembled from the active provider of each capability slot in `CapabilityRegistryV2`, plus two fixed stages (geo, similarity). Extension AI plugins (face swap, style transfer) are **not** part of the batch pipeline — they are invoked interactively via `ExtensionPluginRegistry`.
 
-| Built-in Stage ID    | Function             |
-| -------------------- | -------------------- |
-| `builtin:face`       | Face detect + embed  |
-| `builtin:quality`    | Photo quality score  |
-| `builtin:scene`      | Scene classification |
-| `builtin:semantic`   | Semantic embeddings  |
-| `builtin:ocr`        | OCR text recognition |
-| `builtin:geo`        | GPS geocoding        |
-| `builtin:similarity` | Perceptual hash      |
+| Stage ID             | Source                       | Function             |
+| -------------------- | ---------------------------- | -------------------- |
+| `core:face`          | `FaceProvider` slot          | Face detect + embed  |
+| `core:quality`       | `QualityProvider` slot       | Photo quality score  |
+| `core:scene`         | `SceneProvider` slot         | Scene classification |
+| `core:semantic`      | `SemanticEmbedProvider` slot | Semantic embeddings  |
+| `core:ocr`           | `OcrProvider` slot           | OCR text recognition |
+| `builtin:geo`        | Fixed implementation         | GPS geocoding        |
+| `builtin:similarity` | Fixed implementation         | Perceptual hash      |
 
-External plugins wrapped via `PluginAnalysisStage` adapter, output persisted to `feature_store` table.
+The factory `PluginAnalysisPipeline.create(mediaDao, faceDao, embeddingDao, capabilityRegistry)` iterates registered capability slots and maps each to its corresponding stage. The legacy `PluginAnalysisStage` adapter (wrapping `AiPlugin` into the batch pipeline and persisting to `feature_store`) is deprecated.
 
 #### 4.5 Progress Management (ProgressManager)
 
-Dual-track progress (stage 60% + file 40%), sliding-window ETA estimation (20-sample moving average), suspendable cancellation.
+Two-level progress tracking: a pipeline-level `ProgressManager` (overall percent = completed-stage fraction + current-stage file fraction) with per-stage ETA based on current-stage processing rate; and a task-level `ProgressManager` with sliding-window ETA estimation (20-sample moving average) and weighted global aggregation. Suspendable cancellation is supported throughout.
 
 #### 4.6 AI Capabilities
 
-| Module          | Implementation                      | Output                  |
-| --------------- | ----------------------------------- | ----------------------- |
-| Face Detection  | ML Kit + InsightFace/Retina         | Face boxes + embeddings |
-| Face Clustering | DBSCAN                              | Person groups           |
-| Scene Classify  | MobileNetV2 TFLite + heuristic      | Scene labels            |
-| Quality Score   | Heuristic algorithm                 | 0~1 score               |
-| OCR             | PaddleOCR + ML Kit + GLM-OCR        | Recognized text         |
-| Semantic Embed  | EVA02-CLIP ONNX + MobileCLIP TFLite | Feature vectors         |
-| Similarity      | Perceptual hash                     | Similar groups          |
-| Geo Cluster     | Distance-based clustering           | Location groups         |
-| Reverse Geocode | Android Geocoder                    | Place names             |
-| EXIF            | ExifInterface                       | Camera params, GPS      |
+| Module          | Implementation                                          | Output                  |
+| --------------- | ------------------------------------------------------- | ----------------------- |
+| Face Detection  | InsightFace (default) + RetinaFace/SCRFD/ArcFace/ML Kit | Face boxes + embeddings |
+| Face Clustering | DBSCAN                                                  | Person groups           |
+| Scene Classify  | MobileNetV2 TFLite + heuristic                          | Scene labels            |
+| Quality Score   | Heuristic algorithm                                     | 0~1 score               |
+| OCR             | PaddleOCR + ML Kit + GLM-OCR                            | Recognized text         |
+| Semantic Embed  | EVA02-CLIP ONNX + MobileCLIP TFLite                     | Feature vectors         |
+| Similarity      | Perceptual hash                                         | Similar groups          |
+| Geo Cluster     | Distance-based clustering                               | Location groups         |
+| Reverse Geocode | Android Geocoder                                        | Place names             |
+| EXIF            | ExifInterface                                           | Camera params, GPS      |
 
 #### 4.7 Data Persistence
 
@@ -300,35 +316,43 @@ Full JSON export (media records + face records + embeddings) with metadata (devi
 
 LocalAlbum requires AI model files for most intelligent features. Models are stored in `app/src/main/assets/models/`.
 
-#### Option A: Clone with Git LFS (Recommended)
+Small and medium models (EVA02-CLIP, PP-OCR) are **bundled in the repository** and arrive with `git clone`. Large models are **not tracked** (see `.gitignore`) and must be fetched before building.
 
-```bash
-git lfs install
-git clone <repo-url>
-# Model files will be downloaded automatically
-```
+#### Download Large Models
 
-#### Option B: Download Models Separately
-
-Use the provided download script:
+Use the provided script to download all large models from GitHub Releases:
 
 ```bash
 chmod +x scripts/download_models.sh
 ./scripts/download_models.sh
 ```
 
-This downloads MobileNetV2 from TF Hub. Other models require manual download due to licensing — see script comments for URLs.
+The script is idempotent — it skips files already present. It fetches the face-swap, face detection/recognition, and emap models from `https://github.com/r-y-ren/Local-Album/releases/tag/v0.1.0`.
 
-#### Required Model Files
+#### Face-Swap emap Matrix
 
-| File                               | Feature         | Source                                |
-| ---------------------------------- | --------------- | ------------------------------------- |
-| `eva02_clip/*.onnx`                | Semantic Search | Included (Git LFS)                    |
-| `emap_512.bin`                     | Face Swap       | Extract via `scripts/extract_emap.py` |
-| `PP-OCRv5_mobile_rec_infer/*.onnx` | OCR (Paddle)    | Included (Git LFS)                    |
-| `PP-OCRv6_small_det_infer/*.onnx`  | OCR (Paddle)    | Included (Git LFS)                    |
+`emap_512.bin` (the inswapper source-latent transform matrix) is also fetched by the script. Alternatively, regenerate it locally from `inswapper_128.onnx`:
 
-> **Note**: Not all model files are bundled in this repository. Refer to `scripts/download_models.sh` for obtaining additional models.
+```bash
+pip install onnx numpy
+python scripts/extract_emap.py
+```
+
+#### Model File Inventory
+
+| File                                       | Feature                        | Bundled?                        |
+| ------------------------------------------ | ------------------------------ | ------------------------------- |
+| `eva02_clip/eva02_visual_336_int8.onnx`    | Semantic search (image)        | Yes (repo)                      |
+| `eva02_clip/eva02_text_int8.onnx`          | Semantic search (text)         | Yes (repo)                      |
+| `PP-OCRv6_small_det_infer/inference.onnx`  | OCR detection                  | Yes (repo)                      |
+| `PP-OCRv5_mobile_rec_infer/inference.onnx` | OCR recognition                | Yes (repo)                      |
+| `inswapper_128.onnx`                       | Face swap                      | No — `download_models.sh`       |
+| `buffalo_l.zip`                            | Face detection + ArcFace embed | No — `download_models.sh`       |
+| `retinaface-resnet50.onnx`                 | Face detection                 | No — `download_models.sh`       |
+| `scrfd_person_2.5g.onnx`                   | Face/person detection          | No — `download_models.sh`       |
+| `emap_512.bin`                             | Face swap (emap matrix)        | No — script / `extract_emap.py` |
+
+> **Note**: Large model binaries (`*.onnx` > ~50 MB, `*.zip`, `*.bin`) are git-ignored. Only small/medium models and config files (vocab, merges, tokenizer, inference.yml) are committed.
 
 ---
 
@@ -436,28 +460,37 @@ LocalAlbum 是一个纯本地的 Android 智能相册应用，无需云端服务
 #### 2.3 构建步骤
 
 ```bash
-# 1. 克隆项目（含 Git LFS 模型文件）
-git lfs install
-git clone <repo-url>
-cd LocalAlbum
+# 1. 克隆项目
+git clone https://github.com/r-y-ren/Local-Album.git
+cd Local-Album
 
-# 2. 使用 Android Studio 打开项目根目录，等待 Gradle Sync 完成
+# 2. 通过脚本下载 AI 模型文件。
+#    脚本会从 GitHub Releases 拉取全部模型（大型 + 小/中型）；
+#    小/中型模型（EVA02-CLIP、PP-OCR）已随仓库内置，存在时自动跳过。
+chmod +x scripts/download_models.sh
+./scripts/download_models.sh
 
-# 3. 命令行构建 Debug APK
+# 3.（可选）本地重新生成换脸 emap 矩阵，替代下载：
+#    pip install onnx numpy && python scripts/extract_emap.py
+
+# 4. 使用 Android Studio 打开项目根目录，等待 Gradle Sync 完成
+
+# 5. 命令行构建 Debug APK
 ./gradlew assembleDebug
 
-# 4. 运行单元测试
+# 6. 运行单元测试
 ./gradlew testDebugUnitTest
 
-# 5. 安装到设备
+# 7. 安装到设备
 ./gradlew installDebug
 ```
 
 **注意事项**：
 
 - PyTorch Mobile 依赖需要 JitPack 仓库（已在 `settings.gradle.kts` 中配置）
-- ONNX + PyTorch 增加约 55MB APK 体积，ABI splits 已通过 `ndk.abiFilters` 配置仅保留 `arm64-v8a` 和 `x86_64`
-- 首次构建需下载模型运行时 native 库，耗时较长
+- 内置于 `assets/` 的 AI 模型主导 APK 体积（约 1.6 GB）；native 库已通过 `ndk.abiFilters` 仅保留 `arm64-v8a` 和 `x86_64`
+- Gradle daemon 运行于 JDK 21（由 `gradle/gradle-daemon-jvm.properties` 通过 foojay 工具链自动配置）；编译使用 JDK 17
+- 首次构建需下载 Gradle/AGP 依赖与模型运行时 native 库，耗时较长
 
 ---
 
@@ -477,8 +510,8 @@ cd LocalAlbum
 │  AlbumRepository / SettingsRepository                │
 ├──────────────────────────────────────────────────────┤
 │  核心业务层                                           │
-│  PluginAnalysisPipeline / PluginRegistry             │
-│  HybridIndexer / AnalysisPipeline                    │
+│  PluginAnalysisPipeline / CapabilityRegistryV2       │
+│  HybridIndexer / ExtensionPluginRegistry             │
 │  FaceDetector / SceneClassifier / SemanticEmbedder   │
 ├──────────────────────────────────────────────────────┤
 │  数据层 (Room v11)                                    │
@@ -511,9 +544,10 @@ cd LocalAlbum
 
 #### 3.3 关键设计模式
 
-- **工厂方法**: `PluginAnalysisPipeline.create()` 自动组装内置阶段和外部插件
+- **工厂方法**: `PluginAnalysisPipeline.create()` 从 `CapabilityRegistryV2` 各槽位的激活 Provider 组装核心分析阶段
 - **策略模式**: `ModelRuntime.create()` 根据模型格式返回对应运行时实现
-- **适配器模式**: `PluginAnalysisStage` 将 `AiPlugin` 适配为统一的 `AnalysisStage` 接口
+- **策略 + 能力槽位**: `CapabilityRegistryV2` 提供可切换的 Provider 槽位（face/scene/semantic/quality/ocr）
+- **适配器模式**（旧路径）: `PluginAnalysisStage` 将 `AiPlugin` 适配为统一的 `AnalysisStage` 接口（已废弃；扩展插件现通过 `ExtensionPluginRegistry` 交互式调用）
 - **观察者模式**: 大量使用 Kotlin `StateFlow` / `SharedFlow` 进行响应式状态传递
 - **依赖注入**: 手动 DI 容器 `AppContainer`
 - **Sealed Class 多态**: `PluginInput` / `PluginOutput` 类型安全的输入输出模型
@@ -586,7 +620,9 @@ fun unregisterContentObserver()
 
 1. `initialize(context, pluginContext)` — 加载模型文件
 2. `execute(input): PluginOutput` — 执行推理
-3. `release()` — 释放资源
+3. `release()` — 释放资源（`suspend` 方法）
+
+此外还须实现 `getId()`、`getManifest()`、`getInputSchema()`、`getOutputSchema()`、`isReady()` 等元信息方法。
 
 根据任务类型细分为 4 种子接口：
 
@@ -605,6 +641,11 @@ fun unregisterContentObserver()
 描述插件输出的异构特征数据结构，支持任意维度向量、自定义标签、坐标等。序列化为 JSON 后与数据一同持久化到 `feature_store` 表。
 
 ##### 4.2.2 插件加载与注册
+
+> **架构说明**：当前插件体系拆分为两个注册中心：
+>
+> - **`CapabilityRegistryV2`**：管理批处理分析管道的能力槽位（face/scene/semantic/quality/ocr），每个槽位可注册多个可切换的 Provider，由 `PluginAnalysisPipeline` 取激活 Provider 组装阶段。
+> - **`ExtensionPluginRegistry`**：管理交互式扩展插件（换脸、风格迁移等），不参与批处理管道，通过 UI 入口触发。下方 `PluginLoader` / `PluginRegistry` 描述适用于扩展插件加载链路。
 
 **`PluginLoader`**：
 使用 `DexClassLoader` 在运行时动态加载外部 APK 插件，实现真正的热插拔：
@@ -690,7 +731,7 @@ interface ModelRuntime {
 
 #### 4.4 插件化分析管道 (PluginAnalysisPipeline)
 
-`PluginAnalysisPipeline` 是 AI 分析的核心编排引擎，统一调度内置分析阶段和外部插件阶段。
+`PluginAnalysisPipeline` 是 AI 分析的核心编排引擎。各阶段从 `CapabilityRegistryV2` 各槽位的激活 Provider 组装，另含两个固定实现阶段（geo、similarity）。扩展 AI 插件（换脸、风格迁移等）**不参与批处理管道**，改由 `ExtensionPluginRegistry` 交互式调用。
 
 **DAG 拓扑排序**：
 
@@ -713,19 +754,19 @@ interface ModelRuntime {
 - `pipelineStatusFlow: StateFlow<Status>` — IDLE → RUNNING → COMPLETED / ERROR
 - `pipelineResults: StateFlow<Map<String, StageResult>>` — 管道完成后所有阶段的汇总结果
 
-**工厂方法 `PluginAnalysisPipeline.create()`** 自动组装 7 个内置阶段 + 所有已加载外部插件：
+**工厂方法 `PluginAnalysisPipeline.create(mediaDao, faceDao, embeddingDao, capabilityRegistry)`** 遍历已注册能力槽位并映射到对应阶段，共 7 个阶段（5 个能力槽位 + 2 个固定实现）：
 
-| 内置阶段 ID          | 功能                |
-| -------------------- | ------------------- |
-| `builtin:face`       | 人脸检测 + 嵌入提取 |
-| `builtin:quality`    | 图片质量评分        |
-| `builtin:scene`      | 场景分类            |
-| `builtin:semantic`   | 语义嵌入生成        |
-| `builtin:ocr`        | OCR 文字识别        |
-| `builtin:geo`        | GPS 地理编码        |
-| `builtin:similarity` | 感知哈希相似度      |
+| 阶段 ID              | 来源                         | 功能                |
+| -------------------- | ---------------------------- | ------------------- |
+| `core:face`          | `FaceProvider` 槽位          | 人脸检测 + 嵌入提取 |
+| `core:quality`       | `QualityProvider` 槽位       | 图片质量评分        |
+| `core:scene`         | `SceneProvider` 槽位         | 场景分类            |
+| `core:semantic`      | `SemanticEmbedProvider` 槽位 | 语义嵌入生成        |
+| `core:ocr`           | `OcrProvider` 槽位           | OCR 文字识别        |
+| `builtin:geo`        | 固定实现                     | GPS 地理编码        |
+| `builtin:similarity` | 固定实现                     | 感知哈希相似度      |
 
-外部插件通过 `PluginAnalysisStage` 适配器包裹，输出通过 `FeatureStoreDao` 持久化到 `feature_store` 表。
+旧版 `PluginAnalysisStage` 适配器（将 `AiPlugin` 包裹进批处理管道并持久化到 `feature_store`）已废弃。
 
 #### 4.5 进度管理 (ProgressManager)
 
@@ -733,8 +774,8 @@ interface ModelRuntime {
 
 **管道级** `ProgressManager`：
 
-- 阶段进度与文件进度混合计算（阶段占 60%、文件占 40%）
-- ETA 估算：基于已处理文件数与已耗时的总体速率计算剩余时间
+- 全局进度 = 已完成阶段占比 + 当前阶段文件进度（按 `1/总阶段数` 加权），非固定 60/40 比例
+- ETA 估算：按当前阶段处理速率（已处理文件数 / 已耗时）独立估算，每阶段重置计时基准
 - 暴露 `progress: StateFlow<AnalysisProgress>` 供 UI 观察
 
 **任务级** `ProgressManager`：
@@ -753,18 +794,18 @@ interface ModelRuntime {
 
 #### 4.6 AI 分析能力
 
-| 分析模块     | 实现方式                                       | 输出              |
-| ------------ | ---------------------------------------------- | ----------------- |
-| 人脸检测     | ML Kit Face Detection                          | 人脸框 + 特征嵌入 |
-| 人脸聚类     | DBSCAN 聚类                                    | 人物分组          |
-| 场景分类     | MobileNetV2 TFLite + 启发式                    | 场景标签          |
-| 质量评分     | 启发式算法                                     | 0~1 质量分        |
-| OCR          | PaddleOCR + ML Kit + GLM-OCR                   | 识别文字          |
-| 语义嵌入     | EVA02-CLIP ONNX + MobileCLIP TFLite + 概念向量 | 特征向量          |
-| 相似度       | 感知哈希                                       | 相似组            |
-| 地理聚类     | 基于距离的聚类                                 | 地理位置分组      |
-| 反向地理编码 | Android Geocoder                               | 地名              |
-| EXIF 提取    | ExifInterface                                  | 拍摄参数、GPS     |
+| 分析模块     | 实现方式                                             | 输出              |
+| ------------ | ---------------------------------------------------- | ----------------- |
+| 人脸检测     | InsightFace（默认）+ RetinaFace/SCRFD/ArcFace/ML Kit | 人脸框 + 特征嵌入 |
+| 人脸聚类     | DBSCAN 聚类                                          | 人物分组          |
+| 场景分类     | MobileNetV2 TFLite + 启发式                          | 场景标签          |
+| 质量评分     | 启发式算法                                           | 0~1 质量分        |
+| OCR          | PaddleOCR + ML Kit + GLM-OCR                         | 识别文字          |
+| 语义嵌入     | EVA02-CLIP ONNX + MobileCLIP TFLite + 概念向量       | 特征向量          |
+| 相似度       | 感知哈希                                             | 相似组            |
+| 地理聚类     | 基于距离的聚类                                       | 地理位置分组      |
+| 反向地理编码 | Android Geocoder                                     | 地名              |
+| EXIF 提取    | ExifInterface                                        | 拍摄参数、GPS     |
 
 #### 4.7 数据持久化层
 
@@ -822,35 +863,43 @@ interface ModelRuntime {
 
 LocalAlbum 的大部分 AI 功能需要模型文件。模型文件存放在 `app/src/main/assets/models/` 目录下。
 
-#### 方式 A：使用 Git LFS 克隆（推荐）
+小/中型模型（EVA02-CLIP、PP-OCR）**已内置在仓库中**，随 `git clone` 获得。大型模型**不入库**（见 `.gitignore`），构建前需自行下载。
 
-```bash
-git lfs install
-git clone <repo-url>
-# 模型文件会自动下载
-```
+#### 下载大型模型
 
-#### 方式 B：单独下载模型
-
-使用提供的下载脚本：
+使用提供的脚本从 GitHub Releases 下载全部大型模型：
 
 ```bash
 chmod +x scripts/download_models.sh
 ./scripts/download_models.sh
 ```
 
-此脚本会从 TF Hub 下载 MobileNetV2。其他模型由于许可限制需手动下载——具体 URL 参见脚本注释。
+该脚本幂等——已存在的文件会跳过。它从 `https://github.com/r-y-ren/Local-Album/releases/tag/v0.1.0` 获取换脸、人脸检测/识别与 emap 模型。
 
-#### 内置模型文件清单
+#### 换脸 emap 矩阵
 
-| 文件                               | 功能     | 获取方式                            |
-| ---------------------------------- | -------- | ----------------------------------- |
-| `eva02_clip/*.onnx`                | 语义搜索 | 已内置（Git LFS）                   |
-| `emap_512.bin`                     | 换脸     | 通过 `scripts/extract_emap.py` 提取 |
-| `PP-OCRv5_mobile_rec_infer/*.onnx` | OCR 识别 | 已内置（Git LFS）                   |
-| `PP-OCRv6_small_det_infer/*.onnx`  | OCR 检测 | 已内置（Git LFS）                   |
+`emap_512.bin`（inswapper source latent 变换矩阵）同样由脚本下载。也可从 `inswapper_128.onnx` 本地重新生成：
 
-> **注意**：并非所有模型文件都包含在本仓库中。获取更多模型请参考 `scripts/download_models.sh`。
+```bash
+pip install onnx numpy
+python scripts/extract_emap.py
+```
+
+#### 模型文件清单
+
+| 文件                                       | 功能                    | 是否内置                      |
+| ------------------------------------------ | ----------------------- | ----------------------------- |
+| `eva02_clip/eva02_visual_336_int8.onnx`    | 语义搜索（图像）        | 是（仓库内置）                |
+| `eva02_clip/eva02_text_int8.onnx`          | 语义搜索（文本）        | 是（仓库内置）                |
+| `PP-OCRv6_small_det_infer/inference.onnx`  | OCR 检测                | 是（仓库内置）                |
+| `PP-OCRv5_mobile_rec_infer/inference.onnx` | OCR 识别                | 是（仓库内置）                |
+| `inswapper_128.onnx`                       | 换脸                    | 否 — `download_models.sh`     |
+| `buffalo_l.zip`                            | 人脸检测 + ArcFace 嵌入 | 否 — `download_models.sh`     |
+| `retinaface-resnet50.onnx`                 | 人脸检测                | 否 — `download_models.sh`     |
+| `scrfd_person_2.5g.onnx`                   | 人脸/人体检测           | 否 — `download_models.sh`     |
+| `emap_512.bin`                             | 换脸（emap 矩阵）       | 否 — 脚本 / `extract_emap.py` |
+
+> **注意**：大型模型二进制（`*.onnx` > ~50 MB、`*.zip`、`*.bin`）均被 git 忽略；仅小/中型模型与配置文件（vocab、merges、tokenizer、inference.yml）入库。
 
 ---
 
@@ -893,8 +942,9 @@ buildTypes {
 `AppContainer` 在 `LocalAlbumApplication.onCreate()` 中创建：
 
 - 初始化 Room 数据库
-- 创建 `PluginRegistry` 并调用 `loadPlugins()`（含重试机制：最多 2 次，间隔 1 秒）
-- 创建 `PluginAnalysisPipeline`（自动组装内置阶段 + 加载外部插件）
+- 创建 `CapabilityRegistryV2`（注册 5 个能力槽位及各 Provider）与 `ExtensionPluginRegistry`
+- 调用 `loadPlugins()` 加载扩展插件（含重试机制：最多 2 次，间隔 1 秒）
+- 懒加载创建 `PluginAnalysisPipeline`（从 `CapabilityRegistryV2` 激活 Provider 组装核心阶段）
 - 注册 `MediaContentObserver` 监听系统媒体库变更
 
 #### 6.3 扫描目录与过滤
@@ -966,7 +1016,7 @@ albumViewModel.smartSearch("生日聚会")
 2. 实现 `AiPlugin` 接口（或其子接口）
 3. 在 `assets/plugin_manifest.json` 中描述插件元数据
 4. 构建 APK 后放入 `context.filesDir/plugins/` 目录
-5. 调用 `pluginRegistry.loadAll()` 加载
+5. 调用 `extensionPluginRegistry.loadAll()` 加载
 
 **`model_manifest.json` 示例**：
 
@@ -1072,7 +1122,7 @@ LocalAlbum/
 │   └── src/
 │       ├── main/
 │       │   ├── AndroidManifest.xml
-│       │   ├── assets/models/              # AI 模型文件（Git LFS 追踪）
+│       │   ├── assets/models/              # AI 模型文件（小/中型入库，大型由脚本下载）
 │       │   ├── cpp/CMakeLists.txt          # emutls 兼容层
 │       │   ├── java/com/renyxin/localalbum/
 │       │   │   ├── AppContainer.kt          # DI 容器
@@ -1121,7 +1171,6 @@ LocalAlbum/
 ├── gradle.properties
 ├── gradlew / gradlew.bat                    # Gradle Wrapper
 ├── .gitignore
-├── .gitattributes                           # Git LFS 配置
 ├── LICENSE                                  # Apache 2.0
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
@@ -1148,7 +1197,7 @@ LocalAlbum/
 **添加新的内置分析阶段**：
 
 1. 实现 `AnalysisStage` 接口
-2. 在 `PluginAnalysisPipeline.create()` 的 `builtinStages` 列表中添加新阶段
+2. 在 `PluginAnalysisPipeline.create()` 的槽位映射 `when` 分支中添加新阶段，或注册新的 `CapabilitySlot` + Provider
 3. 设置正确的 `stageId`、`dependencies` 和 `displayName`
 
 **添加新的模型格式支持**：

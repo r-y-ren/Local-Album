@@ -67,3 +67,6 @@ app/src/main/assets/models/*.bin
 app/src/main/assets/models/*.zip
 app/src/main/assets/models/*.tflite
 app/src/main/assets/models/*.ptl
+app/src/main/assets/models/eva02_clip/*.onnx
+app/src/main/assets/models/PP-OCRv5_mobile_rec_infer/*.onnx
+app/src/main/assets/models/PP-OCRv6_small_det_infer/*.onnx

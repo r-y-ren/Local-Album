@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore missing `emap_512.bin` (face-swap emap matrix) — regenerated from `inswapper_128.onnx` via `scripts/extract_emap.py`; its absence silently degraded face-swap output to ≈ input.
+
+### Changed
+
+- Documentation: replace outdated Git LFS model workflow with `scripts/download_models.sh` / `extract_emap.py`; correct the model inventory and repository URLs.
+
 ## [0.1.0] - 2026-07-27
 
 ### Added
@@ -19,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin manager UI with enable/disable and ordering
 - Dynamic capability registry (CapabilityRegistryV2) with provider switching
 - Face detection and clustering (ML Kit + InsightFace/RetinaFace/SCRFD)
-- Face swap pipeline (ReActor-like, ONNX-based inswapper + FaceDetailer)
+- Face swap pipeline (ReActor-like, ONNX-based inswapper with emap latent transform)
 - Scene classification (MobileNetV2 TFLite + heuristic fallback)
 - Quality scoring (heuristic analysis)
 - OCR text recognition (PaddleOCR + ML Kit Chinese + GLM-OCR)
@@ -40,4 +48,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - emutls shim for cross-library thread-local storage compatibility
 - Extension plugin registry (InSwapper, style transfer)
 
-[0.1.0]: https://github.com/renyxin/LocalAlbum/releases/tag/v0.1.0
+[0.1.0]: https://github.com/r-y-ren/Local-Album/releases/tag/v0.1.0
