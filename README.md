@@ -236,7 +236,7 @@ Four specialized sub-interfaces: `ClassificationPlugin`, `FeatureExtractionPlugi
 
 **Security**: Optional APK signature verification against manifest-declared SHA-256 certificate fingerprints.
 
-**UI**: Visual import wizard (4-step flow), JSON manifest editor with real-time validation, plugin manager with enable/disable and ordering.
+**UI**: Visual import wizard (4-step flow), JSON manifest editor with 800ms-debounced real-time validation, and a plugin manager screen showing core-feature model readiness status (face clustering, map clustering, semantic recognition, face swap) with a face-swap entry point.
 
 #### 4.3 Model Runtime (ModelRuntime)
 
@@ -685,22 +685,20 @@ suspend fun unload(pluginId: String): Boolean
 
 ##### 4.2.3 插件配置管理
 
-**双轨制导入 UI**：
+三个 Screen 共享同一 `PluginViewModel`：
 
 - **可视化向导** `ModelImportWizardScreen`：
-  4 步流程：选择模型文件 → 自动解析张量元数据回填 → 表单完善 → 预览确认导入
+  4 步流程：选择模型文件（SAF）→ 确认模型元数据（格式、文件名，自动解析张量规格回填）→ 配置插件信息（名称、任务类型、输入/输出张量、特征 Schema）→ 保存完成
 
 - **JSON 编辑器** `ModelJsonEditorScreen`：
-  提供代码编辑器（Monospace 字体），支持：
-  - 手动编辑 `model_manifest.json`
+  面向高级用户的 `model_manifest.json` 直接编辑器，支持：
+  - 手动编辑 + 一键重置模板（`initEditorFromTemplate()`）
   - 从 `.json` 文件导入（SAF `OpenDocument`）
-  - 800ms 防抖实时自动校验
-  - 错误信息含行号/字符位置定位
+  - 800ms 防抖自动校验 + 手动「校验」按钮
+  - 错误信息含行号/字符位置定位（`extractJsonErrorLine()` 解析 `at line N` / `at character N`）
 
 - **插件管理** `PluginManagerScreen`：
-  - 卡片式已安装插件列表（名称、类型、状态、启用开关）
-  - ↑↓ 按钮调整同阶段内插件的执行顺序
-  - 删除插件、重新加载插件
+  核心功能模型状态看板，展示人脸聚类、地图聚类、语义识别、换脸四大核心功能的模型可用性（就绪 / 未下载 / 下载中 / 出错）；换脸功能卡片提供「进入换脸」入口跳转 `FaceSwapScreen`。
 
 **持久化**：导入的插件清单存于 `plugin_manifest` 表，通过 `PluginManifestDao` 管理（含 `orderIndex` 排序字段）。
 
