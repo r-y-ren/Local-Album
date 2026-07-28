@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.ConcurrentHashMap
+import com.renyxin.localalbum.data.db.entity.AnalysisStateEntity
 
 /**
  * 分析管道核心编排器（Phase 2 重构）。
@@ -46,6 +47,7 @@ class PluginAnalysisPipeline(
     private val stages: List<AnalysisStage>,
     private val dagSorter: StageDagSorter = StageDagSorter,
     val progressManager: ProgressManager = ProgressManager(),
+    private val analysisStateDao: com.renyxin.localalbum.data.db.dao.AnalysisStateDao? = null,
 ) {
     companion object {
         private const val TAG = "PluginPipeline"
@@ -68,6 +70,7 @@ class PluginAnalysisPipeline(
             faceDao: com.renyxin.localalbum.data.db.dao.FaceDao,
             embeddingDao: com.renyxin.localalbum.data.db.dao.EmbeddingDao,
             capabilityRegistry: CapabilityRegistryV2,
+            analysisStateDao: com.renyxin.localalbum.data.db.dao.AnalysisStateDao? = null,
         ): PluginAnalysisPipeline {
             val stages = mutableListOf<AnalysisStage>()
 
@@ -133,7 +136,10 @@ class PluginAnalysisPipeline(
             // 相似度 — 固定实现
             stages.add(com.renyxin.localalbum.core.pipeline.stages.BuiltinSimilarityStage(mediaDao))
 
-            return PluginAnalysisPipeline(stages = stages)
+            return PluginAnalysisPipeline(
+                stages = stages,
+                analysisStateDao = analysisStateDao,
+            )
         }
 
         /**
@@ -256,23 +262,64 @@ class PluginAnalysisPipeline(
         progressManager.onStageStart(stage.stageId, stage.displayName, targetPaths.size)
 
         try {
-            val stageResult = stage.executeEnhanced(targetPaths) { processed, total, filePath, status ->
-                _stageProgress.tryEmit(
-                    StageProgress(
-                        stageId = stage.stageId,
-                        displayName = stage.displayName,
-                        stageIndex = stageIdx,
-                        totalStages = totalStages,
-                        stageStatus = StageProgress.StageStatus.RUNNING,
-                        processedFiles = processed,
-                        totalFiles = total,
-                    ),
-                )
-                progressManager.onFileProgress(processed, total)
-                if (filePath != null && status != null) {
-                    progressManager.onFileStatusChange(stage.stageId, filePath, status)
+            // Phase 1 断点续跑：缓存型阶段跳过已完成文件，仅对 pending 子集推理。
+            // 粒度为 (file, stage)：一个文件可能已完成 face 但未完成 ocr，各阶段独立判定。
+            val donePaths: Set<String> = if (stage.isCacheable && analysisStateDao != null) {
+                analysisStateDao.getDonePaths(stage.stageId, stage.modelVersion).toSet()
+            } else {
+                emptySet()
+            }
+            val pendingPaths = if (donePaths.isEmpty()) targetPaths else targetPaths - donePaths
+            val skippedCount = targetPaths.size - pendingPaths.size
+            val completedPaths = java.util.Collections.synchronizedSet(HashSet<String>())
+
+            val stageResult: StageResult = if (pendingPaths.isEmpty()) {
+                // 全部已完成（断点续跑命中），无需推理
+                Log.i(TAG, "[${stage.stageId}] 断点续跑：${targetPaths.size} 个文件全部已完成，跳过")
+                StageResult(successCount = 0, failedCount = 0)
+            } else {
+                stage.executeEnhanced(pendingPaths) { processed, total, filePath, status ->
+                    // 将 pending 维度的进度映射回 targetPaths 维度，含已跳过文件
+                    val overallProcessed = skippedCount + processed
+                    _stageProgress.tryEmit(
+                        StageProgress(
+                            stageId = stage.stageId,
+                            displayName = stage.displayName,
+                            stageIndex = stageIdx,
+                            totalStages = totalStages,
+                            stageStatus = StageProgress.StageStatus.RUNNING,
+                            processedFiles = overallProcessed,
+                            totalFiles = targetPaths.size,
+                        ),
+                    )
+                    progressManager.onFileProgress(overallProcessed, targetPaths.size)
+                    if (filePath != null && status != null) {
+                        if (status == FileProcessingStatus.COMPLETED) {
+                            completedPaths.add(filePath)
+                        }
+                        progressManager.onFileStatusChange(stage.stageId, filePath, status)
+                    }
                 }
             }
+
+            // 落库本次成功的 done 状态（仅缓存型阶段，批量事务规避 999 变量上限）
+            if (stage.isCacheable && analysisStateDao != null && completedPaths.isNotEmpty()) {
+                val now = System.currentTimeMillis()
+                completedPaths.toList().chunked(500).forEach { chunk ->
+                    analysisStateDao.upsertAll(
+                        chunk.map {
+                            AnalysisStateEntity(
+                                filePath = it,
+                                stageId = stage.stageId,
+                                status = AnalysisStateEntity.STATUS_DONE,
+                                modelVersion = stage.modelVersion,
+                                updatedAtMs = now,
+                            )
+                        },
+                    )
+                }
+            }
+
             results[stage.stageId] = stageResult
 
             val elapsed = System.currentTimeMillis() - stageStart
@@ -288,7 +335,8 @@ class PluginAnalysisPipeline(
                     stageIndex = stageIdx,
                     totalStages = totalStages,
                     stageStatus = StageProgress.StageStatus.COMPLETED,
-                    processedFiles = stageResult.successCount + stageResult.failedCount,
+                    // 断点续跑：阶段完成时所有 targetPaths 均已处理（含跳过），进度记满
+                    processedFiles = targetPaths.size,
                     totalFiles = targetPaths.size,
                 ),
             )

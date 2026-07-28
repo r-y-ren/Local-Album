@@ -6,11 +6,13 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.renyxin.localalbum.data.db.dao.AnalysisStateDao
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.FeatureStoreDao
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.dao.PluginManifestDao
+import com.renyxin.localalbum.data.db.entity.AnalysisStateEntity
 import com.renyxin.localalbum.data.db.entity.FaceEntity
 import com.renyxin.localalbum.data.db.entity.FeatureStoreEntity
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
@@ -26,8 +28,9 @@ import com.renyxin.localalbum.data.db.entity.PluginManifestEntity
         MediaEmbedding::class,
         FeatureStoreEntity::class,
         PluginManifestEntity::class,
+        AnalysisStateEntity::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -36,6 +39,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun embeddingDao(): EmbeddingDao
     abstract fun featureStoreDao(): FeatureStoreDao
     abstract fun pluginManifestDao(): PluginManifestDao
+    abstract fun analysisStateDao(): AnalysisStateDao
 
     companion object {
         @Volatile
@@ -134,6 +138,38 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migration 11 → 12：新增 analysis_state 表（Phase 1 断点续跑）。
+         *
+         * 持久化 (filePath, stageId) 粒度的分析阶段完成状态，进程重启后据此跳过已完成阶段。
+         */
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS analysis_state (
+                        filePath TEXT NOT NULL,
+                        stageId TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        modelVersion INTEGER NOT NULL DEFAULT 1,
+                        updatedAtMs INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(filePath, stageId)
+                    )
+                """.trimIndent())
+                db.execSQL("""
+                    CREATE INDEX IF NOT EXISTS index_analysis_state_stageId
+                    ON analysis_state(stageId)
+                """.trimIndent())
+                db.execSQL("""
+                    CREATE INDEX IF NOT EXISTS index_analysis_state_status
+                    ON analysis_state(status)
+                """.trimIndent())
+                db.execSQL("""
+                    CREATE INDEX IF NOT EXISTS index_analysis_state_modelVersion
+                    ON analysis_state(modelVersion)
+                """.trimIndent())
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -141,7 +177,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "local_album_db"
                 )
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
                     // 1.2: 仅在降级时销毁数据；升级缺失迁移时抛异常而非静默清库
                     .fallbackToDestructiveMigrationOnDowngrade()
                     .build()

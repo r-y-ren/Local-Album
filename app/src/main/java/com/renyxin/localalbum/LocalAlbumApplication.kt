@@ -51,11 +51,15 @@ class LocalAlbumApplication : Application(), ImageLoaderFactory {
         }
         Log.i("CrashDebug", "=== Application.onCreate native 库加载完成 ===")
         container = AppContainer(this)
+        // Phase 0: 提前创建扫描进度通知渠道（幂等），确保首次 acquire 时渠道就绪
+        com.renyxin.localalbum.data.worker.ScanServiceController.ensureChannel(this)
         TrashCleanupWorker.schedule(this)
         // 注册 MediaStore ContentObserver，监听图片/视频变更并触发防抖增量扫描
         container.registerContentObserver()
         // 加载所有已安装的 AI 插件（Phase 2.5）
         container.loadPlugins()
+        // Phase 1: 启动时若存在中断未完成的分析，自动续跑（跳过已完成阶段）
+        container.maybeResumeAnalysis()
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
@@ -63,6 +67,8 @@ class LocalAlbumApplication : Application(), ImageLoaderFactory {
                 if (activityCount == 0) {
                     // App 从后台回到前台，重新注册 Observer
                     container.registerContentObserver()
+                    // Phase 2: 补偿后台期间遗漏的 MediaStore 变更（30s 节流）
+                    container.maybeRescanOnForeground()
                 }
                 activityCount++
             }

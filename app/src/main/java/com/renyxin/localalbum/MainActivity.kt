@@ -137,11 +137,13 @@ class MainActivity : ComponentActivity() {
 
     private fun requestPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+: 请求细粒度媒体权限
+            // Android 13+: 请求细粒度媒体权限 + 通知权限（Phase 0 扫描前台服务通知）
+            // 通知权限被拒时降级为仅应用内进度，不阻塞扫描功能
             requestPermissions(
                 arrayOf(
                     android.Manifest.permission.READ_MEDIA_IMAGES,
                     android.Manifest.permission.READ_MEDIA_VIDEO,
+                    android.Manifest.permission.POST_NOTIFICATIONS,
                 ),
                 REQUEST_CODE_MEDIA_PERMISSIONS,
             )

@@ -335,6 +335,10 @@ interface MediaDao {
     @Query("SELECT * FROM media_items WHERE filePath = :path LIMIT 1")
     suspend fun getByFilePathLight(path: String): MediaEntity?
 
+    // Phase 3: 批量轻量查询，替代增量更新路径的 N+1 逐条查询（调用方需 chunked 规避 999 变量上限）
+    @Query("SELECT * FROM media_items WHERE filePath IN (:paths)")
+    suspend fun getByFilePathsLight(paths: List<String>): List<MediaEntity>
+
     // ---- 人脸聚类 (Phase 3.3) ----
     @Query("UPDATE media_items SET faceClusterId = :clusterId WHERE filePath = :path")
     suspend fun setFaceClusterId(path: String, clusterId: String)

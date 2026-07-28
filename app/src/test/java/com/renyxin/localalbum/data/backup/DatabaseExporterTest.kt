@@ -117,6 +117,8 @@ class DatabaseExporterTest {
             store[filePath]?.let { store[filePath] = it.copy(thumbnailPath = thumbPath) }
         }
         override suspend fun getByFilePathLight(path: String): MediaEntity? = store[path]
+        override suspend fun getByFilePathsLight(paths: List<String>): List<MediaEntity> =
+            paths.mapNotNull { store[it] }
         override suspend fun setFaceClusterId(path: String, clusterId: String) {}
         override suspend fun updateFaceClusterId(paths: List<String>, clusterId: String) {}
         override suspend fun clearFaceClusterId(paths: List<String>) {}

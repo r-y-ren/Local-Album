@@ -16,15 +16,23 @@ import com.renyxin.localalbum.data.db.dao.PathModifiedTime
 import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.db.entity.MediaFts
 import com.renyxin.localalbum.data.source.MediaSource
+import com.renyxin.localalbum.data.worker.ScanServiceController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import com.renyxin.localalbum.core.concurrent.InferenceDispatchers
 import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 混合增量索引引擎。
@@ -32,7 +40,7 @@ import java.time.Instant
  * 策略 (按 PRODUCT_SPEC_V2 §5.2):
  * - MediaStore 负责高频增量检测（快速感知新增/删除）
  * - File API 负责完整性回补和异常修复
- * - fingerprintHead 作为 modifiedAt 相同时的二次校验
+ * - fingerprintHead 作为 modifiedAt 变化时的内容真实性二次校验（mtime 相同视为未变更，跳过指纹计算）
  * - 扫描流水线：枚举 → 元数据提取 → 缩略图 → 入库
  */
 class HybridIndexer(
@@ -42,7 +50,22 @@ class HybridIndexer(
     private val embeddingDao: com.renyxin.localalbum.data.db.dao.EmbeddingDao? = null,
     private val mediaSource: MediaSource = MediaSource(context),
     private val pluginPipeline: PluginAnalysisPipeline? = null,
+    private val analysisStateDao: com.renyxin.localalbum.data.db.dao.AnalysisStateDao? = null,
 ) {
+    /**
+     * Phase 1: 清空全部分析断点状态。forceReanalyzeAll 全量重分析前调用，
+     * 确保断点续跑不会跳过需重跑的文件。
+     */
+    suspend fun clearAnalysisState() {
+        analysisStateDao?.deleteAll()
+    }
+
+    /**
+     * Phase 1: 已完成分析（任意阶段）的去重文件数，供 UI 显示分析完成度。
+     */
+    suspend fun countAnalysisDonePaths(): Int {
+        return analysisStateDao?.countDistinctDonePaths() ?: 0
+    }
     companion object {
         private const val TAG = "HybridIndexer"
         private const val HEAD_HASH_BYTES = 4096 // 读取前4KB计算头部哈希
@@ -141,7 +164,11 @@ class HybridIndexer(
      * @param allowNomedia 为 true 时不再跳过含 .nomedia 的目录
      * @return 索引的媒体项总数
      */
-    suspend fun fullScan(roots: List<String>, allowNomedia: Boolean = false): Int = withContext(Dispatchers.IO) {
+    suspend fun fullScan(
+        roots: List<String>,
+        allowNomedia: Boolean = false,
+        progress: ((processed: Int, total: Int) -> Unit)? = null,
+    ): Int = withContext(Dispatchers.IO) {
         Log.i(TAG, "开始全量扫描…")
         val startTime = System.currentTimeMillis()
 
@@ -150,7 +177,26 @@ class HybridIndexer(
 
         // 合并去重（以 filePath 为主键，File API 的 EXIF 数据更全，优先保留）
         val merged = mergeAndDeduplicate(mediaStoreItems, fileSystemItems)
-        val entities = merged.map { it.toEntity() }
+
+        // Phase 3: 指纹计算并行化（原为单协程串行 IO，数万文件时为瓶颈）。
+        // toEntity() 内部调用 computeFingerprintHead（4KB 读 + SHA-256），属 IO+轻 CPU，
+        // 在 ioBound 上并发并用 Semaphore 限流（上限 cpuCores，SD 卡/OTG 场景实测下调）。
+        // 同时上报 processed/total 填充 ScanState 进度（D10）。
+        val totalForProgress = merged.size
+        val processedCounter = AtomicInteger(0)
+        val fingerprintSemaphore = Semaphore(InferenceDispatchers.cpuCores)
+        val entities = coroutineScope {
+            merged.map { item ->
+                async(InferenceDispatchers.ioBound) {
+                    fingerprintSemaphore.withPermit {
+                        val entity = item.toEntity()
+                        val done = processedCounter.incrementAndGet()
+                        progress?.invoke(done, totalForProgress)
+                        entity
+                    }
+                }
+            }.awaitAll()
+        }
 
         // P2-4: 先插入新数据（REPLACE 策略），再删除孤儿记录，避免全量扫描期间 UI 空窗
         mediaDao.insertAll(entities)
@@ -161,6 +207,8 @@ class HybridIndexer(
             orphaned.toList().chunked(500).forEach { chunk ->
                 mediaDao.deleteByPaths(chunk)
                 mediaDao.deleteFtsEntries(chunk)
+                // Phase 1: 同步清理孤儿文件的分析断点状态
+                analysisStateDao?.deleteByPaths(chunk)
             }
         }
 
@@ -178,6 +226,9 @@ class HybridIndexer(
         // 现改为 fire-and-forget：扫描入库后立即返回，AI 分析在后台协程执行，不阻塞扫描状态。
         val allPaths = entities.map { it.filePath }
         if (allPaths.isNotEmpty()) {
+            // Phase 0: 分析侧前台服务引用，在 launch 前同步 acquire（避免与扫描侧 release 之间的空窗），
+            // 在协程结束时 finally release。扫描侧引用在 rescan 返回后释放，二者独立计数。
+            ScanServiceController.acquire(context, "正在分析 AI 特征…")
             analysisScope.launch {
                 try {
                     if (pluginPipeline != null) {
@@ -193,6 +244,8 @@ class HybridIndexer(
                     // 避免冒泡到协程 UncaughtExceptionHandler 导致进程闪退。
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     Log.e("CrashDebug", "AI 分析管道执行失败 (全量扫描): ${e.javaClass.name}: ${e.message}", e)
+                } finally {
+                    ScanServiceController.release(context)
                 }
             }
         }
@@ -253,6 +306,14 @@ class HybridIndexer(
             }
         }
 
+        // Phase 1: 文件更新/删除时失效其分析断点状态，确保断点续跑不会跳过需重分析的文件
+        val pathsToInvalidate = toUpdate.map { it.filePath } + toDelete
+        if (pathsToInvalidate.isNotEmpty() && analysisStateDao != null) {
+            pathsToInvalidate.chunked(500).forEach { chunk ->
+                analysisStateDao.deleteByPaths(chunk)
+            }
+        }
+
         // 执行数据库操作
         if (toDelete.isNotEmpty()) {
             // 修复：分块删除，避免 SQLite IN 查询变量数超过 999 限制
@@ -265,14 +326,16 @@ class HybridIndexer(
         }
         if (toUpdate.isNotEmpty()) {
             // P1-B: 增量更新时保留数据库中已有的 faceClusterId，避免 REPLACE 覆盖管道写入的聚类结果
+            // Phase 3: N+1 改批量——一次性取回所有待更新文件实体（chunked 规避 999 变量上限）
+            val existingByPath: Map<String, MediaEntity> = try {
+                toUpdate.map { it.filePath }.chunked(500).flatMap { chunk ->
+                    mediaDao.getByFilePathsLight(chunk)
+                }.associateBy { it.filePath }
+            } catch (_: Exception) { emptyMap() }
+
             val entitiesToUpdate = toUpdate.map { item ->
                 val entity = item.toEntity()
-                val existingFaceClusterId = dbMap[item.filePath]?.let {
-                    // 从数据库读取当前实体以获取 faceClusterId
-                    try {
-                        mediaDao.getByFilePathLight(item.filePath)?.faceClusterId
-                    } catch (_: Exception) { null }
-                }
+                val existingFaceClusterId = existingByPath[item.filePath]?.faceClusterId
                 if (existingFaceClusterId != null) {
                     entity.copy(faceClusterId = existingFaceClusterId)
                 } else {
@@ -299,6 +362,8 @@ class HybridIndexer(
             // 异步执行 AI 分析，不阻塞增量扫描完成状态（与 fullScan 一致）
             val pathsToAnalyze = filesToAnalyze.toList()
             val allPathsSnapshot = mediaDao.getAllPaths()
+            // Phase 0: 分析侧前台服务引用（见 fullScan 注释）
+            ScanServiceController.acquire(context, "正在分析 AI 特征…")
             analysisScope.launch {
                 try {
                     if (pluginPipeline != null) {
@@ -309,8 +374,13 @@ class HybridIndexer(
                     } else {
                         analysisPipeline.analyzeNewFiles(pathsToAnalyze, enableOcr = false)
                     }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
+                    // 修复：与 fullScan 一致，catch Throwable 并重新抛出 CancellationException，
+                    // 避免吞掉取消信号导致协程无法正确终止。
+                    if (e is kotlinx.coroutines.CancellationException) throw e
                     Log.w(TAG, "分析管道执行失败 (增量扫描): ${e.message}", e)
+                } finally {
+                    ScanServiceController.release(context)
                 }
             }
         }

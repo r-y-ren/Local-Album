@@ -3,7 +3,6 @@ package com.renyxin.localalbum.core.index
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.HandlerThread
-import android.os.Looper
 import android.util.Log
 
 /**
@@ -14,11 +13,38 @@ import android.util.Log
  * 因此使用 [Handler.postDelayed] 做防抖，在静默窗口
  * [DEBOUNCE_DELAY_MS] 内无新回调时才真正触发 [onChanged]。
  *
+ * ## 线程模型（D9 修正）
+ *
+ * [ContentObserver] 的父类构造接收的 [Handler] 决定 [onChange] 的派发线程。
+ * 原实现传入主线程 Handler，导致 `onChange` 在主线程执行（虽仅做 `postDelayed`，影响极小）。
+ * 现改为传入独立 [HandlerThread] 的 Handler，使 `onChange` 派发与防抖任务均在后台线程完成，
+ * 彻底避免高频变更时对主线程的任何压力。
+ *
  * 生命周期由 [HybridIndexer.registerContentObserver] / [unregisterContentObserver] 管理。
  */
-class MediaContentObserver(
+class MediaContentObserver private constructor(
     private val onChanged: () -> Unit,
-) : ContentObserver(Handler(Looper.getMainLooper())) {
+    private val handlerThread: HandlerThread,
+    handler: Handler,
+) : ContentObserver(handler) {
+
+    /**
+     * 公开构造：创建独立 [HandlerThread] 并以其 Handler 派发回调。
+     * 默认参数 [holder] 在构造时求值一次，确保父类构造与实例字段共用同一 Handler。
+     */
+    constructor(onChanged: () -> Unit) : this(
+        onChanged = onChanged,
+        holder = Holder(),
+    )
+
+    private constructor(
+        onChanged: () -> Unit,
+        holder: Holder,
+    ) : this(
+        onChanged = onChanged,
+        handlerThread = holder.thread,
+        handler = holder.handler,
+    )
 
     companion object {
         private const val TAG = "MediaContentObserver"
@@ -27,14 +53,13 @@ class MediaContentObserver(
         private val TOKEN = Any()
     }
 
-    // P1-3: 使用独立 HandlerThread 替代主线程 Handler，避免 onChange 阻塞 UI
-    private val handlerThread = HandlerThread("MediaObserver").apply { start() }
     private val handler = Handler(handlerThread.looper)
+
     @Volatile
     private var isRegistered = false
 
     /**
-     * ContentObserver 回调入口。
+     * ContentObserver 回调入口（运行于 [handlerThread]）。
      * 每次收到变更都先移除上一次的防抖任务，再重新延迟触发，
      * 从而实现"连续变更只在最后一次结束后统一扫描一次"。
      */
@@ -68,9 +93,15 @@ class MediaContentObserver(
     internal fun markUnregistered() {
         isRegistered = false
         handler.removeCallbacksAndMessages(TOKEN)
-        // P1-3: 注销时释放 HandlerThread 资源
+        // 注销时释放 HandlerThread 资源
         handlerThread.quitSafely()
     }
 
     fun isRegistered(): Boolean = isRegistered
+
+    /** 持有同一 [HandlerThread] 及其 [Handler]，供父类构造与实例字段共享。 */
+    private class Holder(
+        val thread: HandlerThread = HandlerThread("MediaObserver").apply { start() },
+        val handler: Handler = Handler(thread.looper),
+    )
 }

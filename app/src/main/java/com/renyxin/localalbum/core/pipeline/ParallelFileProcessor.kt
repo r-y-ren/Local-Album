@@ -83,9 +83,9 @@ object ParallelFileProcessor {
                         } else {
                             enhancedCallback(processed.get(), total, path, FileProcessingStatus.PROCESSING)
                             try {
-                                android.util.Log.i("CrashDebug", ">> 文件处理开始: $path (线程=${Thread.currentThread().name})")
+                                // D7 日志治理：移除每文件 2 条 CrashDebug 日志（5 万文件 = 10 万条 logcat）。
+                                // 仅保留失败路径的错误日志，成功路径通过 enhancedCallback 上报进度。
                                 val value = process(path)
-                                android.util.Log.i("CrashDebug", "<< 文件处理完成: $path")
                                 val done = processed.incrementAndGet()
                                 enhancedCallback(done, total, path, FileProcessingStatus.COMPLETED)
                                 FileResult(path, success = true, value = value)

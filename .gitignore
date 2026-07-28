@@ -5,7 +5,8 @@
 *.class
 *.ap_
 *.aab_
-
+# ── plan ──
+plan/
 # ── Gradle ──
 .gradle/
 build/

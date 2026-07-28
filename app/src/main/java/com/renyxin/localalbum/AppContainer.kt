@@ -43,6 +43,7 @@ import com.renyxin.localalbum.core.plugin.extension.ExtensionPluginRegistry
 import com.renyxin.localalbum.core.recommendation.RecommendationEngine
 import com.renyxin.localalbum.data.db.AppDatabase
 import com.renyxin.localalbum.data.prefs.SettingsStore
+import com.renyxin.localalbum.data.worker.AnalysisResumePrefs
 import com.renyxin.localalbum.data.repo.AlbumRepository
 import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.data.repo.SettingsRepository
@@ -55,6 +56,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Phase 2: 回前台补偿扫描节流窗口（毫秒）。 */
+private const val FOREGROUND_RESCAN_THROTTLE_MS = 30_000L
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
@@ -260,6 +264,45 @@ class AppContainer(context: Context) {
         // 修复：原实现仅 copyBundledModels 复制文件但不更新状态，导致内置 MODEL 类型
         // Provider 启动时状态恒为 NOT_DOWNLOADED，UI 误显示「未就绪」。
         prepareBundledModels()
+
+        // Phase 0: 订阅分析管道阶段进度，更新前台服务通知文案
+        startScanProgressNotification()
+        // Phase 1: 订阅管道整体状态，维护「中断待续跑」标志
+        startAnalysisResumeFlagTracking()
+    }
+
+    /**
+     * Phase 1: 订阅 [PluginAnalysisPipeline.pipelineStatusFlow]，管道运行中置位中断标志，
+     * 正常结束（COMPLETED/ERROR）清零。进程被杀后标志保持，下次启动触发续跑。
+     */
+    private fun startAnalysisResumeFlagTracking() {
+        appScope.launch {
+            pluginAnalysisPipeline.pipelineStatusFlow.collect { status ->
+                when (status) {
+                    PluginAnalysisPipeline.Status.RUNNING ->
+                        AnalysisResumePrefs.setPending(appContext, true)
+                    PluginAnalysisPipeline.Status.COMPLETED,
+                    PluginAnalysisPipeline.Status.ERROR ->
+                        AnalysisResumePrefs.setPending(appContext, false)
+                    PluginAnalysisPipeline.Status.IDLE -> Unit
+                }
+            }
+        }
+    }
+
+    /**
+     * Phase 1: 启动时若存在中断未完成的分析，自动续跑（跳过已完成阶段）。
+     * 仅在 [AnalysisResumePrefs.isPending] 为 true 时执行，避免每次冷启动都跑重负载。
+     * 应在 Application.onCreate 中、插件加载之后调用。
+     */
+    fun maybeResumeAnalysis() {
+        appScope.launch {
+            try {
+                albumRepository.resumeAnalysisIfNeeded()
+            } catch (e: Exception) {
+                android.util.Log.e("AppContainer", "续跑分析失败", e)
+            }
+        }
     }
 
     /**
@@ -425,6 +468,7 @@ class AppContainer(context: Context) {
             faceDao = database.faceDao(),
             embeddingDao = database.embeddingDao(),
             capabilityRegistry = capabilityRegistry,
+            analysisStateDao = database.analysisStateDao(),
         )
     }
 
@@ -457,6 +501,7 @@ class AppContainer(context: Context) {
         embeddingDao = database.embeddingDao(),
         mediaSource = mediaSource,
         pluginPipeline = pluginAnalysisPipeline,
+        analysisStateDao = database.analysisStateDao(),
     )
 
     val albumRepository = AlbumRepository(
@@ -476,6 +521,30 @@ class AppContainer(context: Context) {
         context = context.applicationContext,
     )
 
+    /**
+     * Phase 0: 订阅分析管道阶段进度，更新前台服务通知文案。
+     *
+     * 仅在 FGS 活跃时生效（[ScanServiceController.updateProgress] 对未运行服务静默忽略），
+     * 故无需关心订阅与扫描生命周期的精确对齐。
+     */
+    private fun startScanProgressNotification() {
+        appScope.launch {
+            pluginAnalysisPipeline.stageProgressFlow.collect { progress ->
+                if (progress.stageStatus ==
+                    com.renyxin.localalbum.core.pipeline.StageProgress.StageStatus.RUNNING
+                ) {
+                    val text = appContext.getString(
+                        com.renyxin.localalbum.R.string.scan_notif_stage,
+                        progress.displayName,
+                        progress.processedFiles,
+                        progress.totalFiles,
+                    )
+                    com.renyxin.localalbum.data.worker.ScanServiceController.updateProgress(text)
+                }
+            }
+        }
+    }
+
     fun registerContentObserver() {
         hybridIndexer.registerContentObserver(onChanged = {
             // 在协程中触发增量扫描，避免阻塞主线程
@@ -490,6 +559,30 @@ class AppContainer(context: Context) {
                 albumRepository.rescan()
             }
         })
+    }
+
+    /**
+     * Phase 2: 回前台补偿增量扫描。
+     *
+     * App 在后台期间 Observer 已注销，可能遗漏 MediaStore 变更。回到前台时触发一次增量扫描补齐。
+     * 加 30s 节流，避免频繁切前后台导致重复扫描与 UI 进度条闪烁。
+     * 复用 scanMutex 串行，与 Observer 防抖任务互斥。
+     */
+    @Volatile
+    private var lastForegroundRescanMs = 0L
+
+    fun maybeRescanOnForeground() {
+        val now = System.currentTimeMillis()
+        if (now - lastForegroundRescanMs < FOREGROUND_RESCAN_THROTTLE_MS) {
+            android.util.Log.d("AppContainer", "回前台节流：距上次扫描不足 ${FOREGROUND_RESCAN_THROTTLE_MS}ms，跳过")
+            return
+        }
+        lastForegroundRescanMs = now
+        appScope.launch {
+            val currentState = albumRepository.scanState.value
+            if (currentState is ScanState.Scanning) return@launch
+            albumRepository.rescan()
+        }
     }
 
     /**

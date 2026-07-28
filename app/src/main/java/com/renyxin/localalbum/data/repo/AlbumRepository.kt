@@ -26,6 +26,8 @@ import com.renyxin.localalbum.data.db.entity.FaceEntity
 import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.source.MediaMetadataCache
 import com.renyxin.localalbum.data.source.MediaSource
+import com.renyxin.localalbum.data.worker.AnalysisResumePrefs
+import com.renyxin.localalbum.data.worker.ScanServiceController
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
@@ -327,6 +329,8 @@ class AlbumRepository(
         scanMutex.withLock {
             Log.i(TAG, "rescan: 获得 scanMutex，设置 Scanning 状态")
             _scanState.value = ScanState.Scanning("准备扫描…")
+            // Phase 0: 扫描期间持有前台服务引用，防杀后台。AI 分析侧由 HybridIndexer 独立 acquire。
+            appContext?.let { ScanServiceController.acquire(it, "正在扫描媒体…") }
             try {
             runCatching {
             // 诊断：settingsRepository.state 为 combine(vararg) 冷 Flow，若任一源 Flow 不发射则 .first() 永久阻塞。
@@ -355,7 +359,10 @@ class AlbumRepository(
                     if (isFirstScan) "首次全量扫描…" else "增量扫描…"
                 )
                 if (isFirstScan) {
-                    hybridIndexer.fullScan(roots, allowNomedia)
+                    // Phase 3: 全量扫描进度填充（D10）——指纹阶段上报 processed/total
+                    hybridIndexer.fullScan(roots, allowNomedia) { processed, total ->
+                        _scanState.value = ScanState.Scanning("首次全量扫描…", processed, total)
+                    }
                 } else {
                     hybridIndexer.incrementalScan(roots, allowNomedia)
                 }
@@ -405,6 +412,8 @@ class AlbumRepository(
             _scanState.value = ScanState.Failed(e.message ?: "扫描失败")
         }
             } finally {
+                // Phase 0: 释放扫描侧前台服务引用（分析侧引用独立计数，未完成则服务继续存活）
+                appContext?.let { ScanServiceController.release(it) }
                 // 修复：确保 scanState 永远不会卡在 Scanning 状态（如协程被取消时）
                 if (_scanState.value is ScanState.Scanning) {
                     _scanState.value = ScanState.Done
@@ -433,6 +442,9 @@ class AlbumRepository(
 
         _scanState.value = ScanState.Scanning("正在分析 ${allPaths.size} 个文件…", 0, allPaths.size)
 
+        // Phase 1: 全量重分析前清空断点状态，避免被断点续跑跳过
+        hybridIndexer?.clearAnalysisState()
+
         val pipeline = hybridIndexer?.getPluginPipeline()
         if (pipeline != null) {
             Log.i(TAG, "forceReanalyzeAll: 使用插件化管道分析 ${allPaths.size} 个文件")
@@ -451,6 +463,53 @@ class AlbumRepository(
         refreshStats()
         Log.i(TAG, "forceReanalyzeAll: 完成 ${allPaths.size} 个文件的分析")
         } // scanMutex.withLock
+    }
+
+    /**
+     * Phase 1: 启动时若存在中断未完成的分析，自动续跑。
+     *
+     * [PluginAnalysisPipeline.runFullScan] 内部断点续跑会跳过已完成阶段，仅推理 pending 部分，
+     * 故可安全地对全量路径调用。仅在 [AnalysisResumePrefs.isPending] 为 true 时执行，
+     * 避免每次冷启动都跑重负载。
+     *
+     * 注意：续跑属重负载，后续可加约束（充电/非低电量）调度；当前仅在中断时触发。
+     */
+    suspend fun resumeAnalysisIfNeeded() = withContext(Dispatchers.IO) {
+        val ctx = appContext ?: return@withContext
+        if (!AnalysisResumePrefs.isPending(ctx)) return@withContext
+        val pipeline = hybridIndexer?.getPluginPipeline() ?: run {
+            AnalysisResumePrefs.setPending(ctx, false)
+            return@withContext
+        }
+        val allPaths = mediaDao.getAllPaths()
+        if (allPaths.isEmpty()) {
+            AnalysisResumePrefs.setPending(ctx, false)
+            return@withContext
+        }
+        scanMutex.withLock {
+            Log.i(TAG, "resumeAnalysisIfNeeded: 续跑未完成分析 ${allPaths.size} 个文件")
+            _scanState.value = ScanState.Scanning("续跑 AI 分析…", 0, allPaths.size)
+            ScanServiceController.acquire(ctx, "正在分析 AI 特征…")
+            try {
+                pipeline.runFullScan(allPaths)
+            } finally {
+                ScanServiceController.release(ctx)
+                if (_scanState.value is ScanState.Scanning) {
+                    _scanState.value = ScanState.Done
+                }
+            }
+        }
+    }
+
+    /**
+     * Phase 1: 分析完成度统计，供 UI 显示「已分析 x/y」。
+     *
+     * @return (已完成去重文件数, 媒体总数)
+     */
+    suspend fun getAnalysisCompletion(): Pair<Int, Int> = withContext(Dispatchers.IO) {
+        val mediaCount = mediaDao.getCount()
+        val done = hybridIndexer?.countAnalysisDonePaths() ?: 0
+        done to mediaCount
     }
 
     // ---- 删除/回收站 ----

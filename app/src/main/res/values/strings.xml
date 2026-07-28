@@ -75,4 +75,12 @@
     <string name="common_retry">Retry</string>
     <string name="common_empty">Nothing here yet</string>
     <string name="common_processing">Processing…</string>
+
+    <!-- Scan Foreground Service (Phase 0) -->
+    <string name="scan_channel_name">Scan Progress</string>
+    <string name="scan_channel_desc">Media scanning and AI analysis progress</string>
+    <string name="scan_notif_title">LocalAlbum</string>
+    <string name="scan_notif_scanning">Scanning media files…</string>
+    <string name="scan_notif_analyzing">Analyzing AI features…</string>
+    <string name="scan_notif_stage">Analyzing: %1$s (%2$d/%3$d)</string>
 </resources>

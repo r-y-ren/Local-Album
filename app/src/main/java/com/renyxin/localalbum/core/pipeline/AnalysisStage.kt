@@ -76,6 +76,15 @@ interface AnalysisStage {
     val isCacheable: Boolean get() = true
 
     /**
+     * 生成该阶段结果所用模型版本（Phase 1 断点续跑）。
+     *
+     * 当模型升级导致版本变化时，[com.renyxin.localalbum.data.db.dao.AnalysisStateDao]
+     * 中旧 `done` 记录因 modelVersion 不匹配被视为失效，该阶段对相关文件重跑。
+     * 内置启发式阶段默认 1；模型阶段可覆盖为对应模型版本号。
+     */
+    val modelVersion: Int get() = 1
+
+    /**
      * 执行分析阶段（简化回调签名）。
      *
      * @param filePaths 待分析的文件路径列表
