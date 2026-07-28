@@ -315,6 +315,13 @@ class MediaSource(
      * 原实现 [readExifData] 每次新建 ExifInterface，与 [readImageCapturedAt] 重复打开同一文件。
      */
     private fun readAllExifData(exif: ExifInterface, file: File): Map<String, String> {
+        // GPS 坐标：ExifInterface.TAG_GPS_LATITUDE/LONGITUDE 返回度分秒(DMS)有理数字符串
+        // (如 "39/1,54/1,30/1")，直接 toDoubleOrNull 会失败。
+        // 改用 getLatLong() 获取已转换为十进制的坐标，并过滤无效的 (0,0)。
+        val latLong = FloatArray(2)
+        val hasGeo = exif.getLatLong(latLong)
+        val latitudeStr = if (hasGeo) latLong[0].toString() else ""
+        val longitudeStr = if (hasGeo) latLong[1].toString() else ""
         return mapOf(
             "width" to (exif.getAttributeInt(ExifInterface.TAG_IMAGE_WIDTH, 0).toString()),
             "height" to (exif.getAttributeInt(ExifInterface.TAG_IMAGE_LENGTH, 0).toString()),
@@ -325,8 +332,8 @@ class MediaSource(
             "iso" to (exif.getAttribute(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY) ?: ""),
             "exposureTime" to (exif.getAttribute(ExifInterface.TAG_EXPOSURE_TIME) ?: ""),
             "orientation" to (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, 0).toString()),
-            "latitude" to (exif.getAttribute(ExifInterface.TAG_GPS_LATITUDE) ?: ""),
-            "longitude" to (exif.getAttribute(ExifInterface.TAG_GPS_LONGITUDE) ?: ""),
+            "latitude" to latitudeStr,
+            "longitude" to longitudeStr,
             // 从扩展名推断 MIME 类型
             "mimeType" to mimeTypeForExtension(file.extension),
         )

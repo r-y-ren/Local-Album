@@ -4,7 +4,10 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.BitmapShader
+import android.graphics.Matrix
 import android.graphics.Rect
+import android.graphics.Shader
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import androidx.compose.foundation.background
@@ -49,6 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,8 +64,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import coil.request.SuccessResult
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.pipeline.StageFileProgress
 import com.renyxin.localalbum.data.repo.GeoCluster
@@ -243,6 +254,9 @@ private fun OsmMapView(
     onClusterClick: (String) -> Unit,
 ) {
     var mapView by remember { mutableStateOf<MapView?>(null) }
+    val imageLoader = remember { coil.Coil.imageLoader(context) }
+    val scope = rememberCoroutineScope()
+    val markerJobs = remember { mutableListOf<Job>() }
 
     AndroidView(
         factory = { ctx ->
@@ -256,6 +270,9 @@ private fun OsmMapView(
         },
         update = { map ->
             mapView = map
+            // 取消上一轮缩略图加载任务，避免对已移除的标记做无效刷新
+            markerJobs.forEach { it.cancel() }
+            markerJobs.clear()
             // 清除旧标记
             map.overlays.clear()
 
@@ -266,6 +283,9 @@ private fun OsmMapView(
                     mapView = map,
                     cluster = cluster,
                     context = context,
+                    imageLoader = imageLoader,
+                    scope = scope,
+                    jobs = markerJobs,
                     onClick = { onClusterClick(cluster.clusterId) },
                 )
                 marker.position = point
@@ -306,53 +326,115 @@ private fun OsmMapView(
 }
 
 /**
- * 自定义聚类标记，显示照片数量。
+ * 自定义聚类标记。
+ *
+ * 标记图标优先使用聚类代表缩略图（[GeoCluster.representativeThumb]）做圆形裁剪，
+ * 并在右下角叠加照片数量角标；缩略图尚未加载完成或缺失时回退为带数字的蓝色圆圈，
+ * 加载完成后异步刷新图标。
  */
 private class ClusterMarker(
     mapView: MapView,
     private val cluster: GeoCluster,
     private val context: Context,
+    private val imageLoader: ImageLoader,
+    private val scope: CoroutineScope,
+    private val jobs: MutableList<Job>,
     private val onClick: () -> Unit,
 ) : Marker(mapView) {
+
+    private val mapRef = mapView
+    private val iconSize = 96
+
+    @Volatile
+    private var thumbBitmap: Bitmap? = null
 
     init {
         title = cluster.placeName ?: "位置 ${cluster.clusterId.take(6)}"
         snippet = "${cluster.photoCount} 张照片"
-        setOnMarkerClickListener { marker, mapView ->
+        // 初始图标：缩略图未加载时的降级样式（纯数字圆圈）
+        icon = createClusterIcon(cluster.photoCount, null)
+        setOnMarkerClickListener { _, _ ->
             onClick()
             // 显示默认信息窗口
             showInfoWindow()
             true
         }
-    }
-
-    override fun getIcon(): Drawable {
-        // 生成带数字的圆形标记图标
-        return createClusterIcon(cluster.photoCount)
+        // 异步加载代表缩略图，完成后刷新标记图标
+        val thumbPath = cluster.representativeThumb
+        if (thumbPath != null) {
+            val job = scope.launch {
+                val request = ImageRequest.Builder(context)
+                    .data(android.net.Uri.parse("file://$thumbPath"))
+                    .size(iconSize)
+                    .build()
+                val result = imageLoader.execute(request)
+                val drawable = (result as? SuccessResult)?.drawable ?: return@launch
+                val bmp = withContext(Dispatchers.IO) { drawableToBitmap(drawable, iconSize) }
+                withContext(Dispatchers.Main) {
+                    thumbBitmap = bmp
+                    icon = createClusterIcon(cluster.photoCount, bmp)
+                    mapRef.post { mapRef.invalidate() }
+                }
+            }
+            jobs.add(job)
+        }
     }
 
     /**
-     * 生成带照片数量数字的圆形标记图标。
+     * 将 Drawable 转换为指定尺寸的 Bitmap（用于 BitmapShader 圆形裁剪）。
      */
-    private fun createClusterIcon(count: Int): Drawable {
-        val size = 96
+    private fun drawableToBitmap(drawable: Drawable, size: Int): Bitmap {
+        if (drawable is BitmapDrawable && drawable.bitmap != null) {
+            return Bitmap.createScaledBitmap(drawable.bitmap, size, size, true)
+        }
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        drawable.setBounds(0, 0, size, size)
+        drawable.draw(canvas)
+        return bmp
+    }
+
+    /**
+     * 生成聚类标记图标。
+     * - 有缩略图时：圆形裁剪的代表缩略图 + 右下角数字角标。
+     * - 无缩略图时：回退为带数字的蓝色圆圈。
+     */
+    private fun createClusterIcon(count: Int, thumb: Bitmap?): Drawable {
+        val size = iconSize
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val density = context.resources.displayMetrics.density
+        val cx = size / 2f
+        val cy = size / 2f
         val radius = size / 2f - 4f
 
         // 外圈阴影
         val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.argb(60, 0, 0, 0)
         }
-        canvas.drawCircle(size / 2f, size / 2f + 2f, radius, shadowPaint)
+        canvas.drawCircle(cx, cy + 2f, radius, shadowPaint)
 
-        // 主圆
-        val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.rgb(66, 133, 244) // Google Blue
-            style = Paint.Style.FILL
+        if (thumb != null) {
+            // 圆形裁剪缩略图
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            val shader = BitmapShader(thumb, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            val srcSize = minOf(thumb.width, thumb.height).toFloat()
+            val scale = (radius * 2f) / srcSize
+            val matrix = Matrix()
+            matrix.setTranslate((thumb.width - srcSize) / -2f, (thumb.height - srcSize) / -2f)
+            matrix.postScale(scale, scale)
+            matrix.postTranslate(cx - radius, cy - radius)
+            shader.setLocalMatrix(matrix)
+            paint.shader = shader
+            canvas.drawCircle(cx, cy, radius, paint)
+        } else {
+            // 回退：蓝色主圆
+            val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.rgb(66, 133, 244) // Google Blue
+                style = Paint.Style.FILL
+            }
+            canvas.drawCircle(cx, cy, radius, circlePaint)
         }
-        canvas.drawCircle(size / 2f, size / 2f, radius, circlePaint)
 
         // 白色边框
         val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -360,21 +442,70 @@ private class ClusterMarker(
             style = Paint.Style.STROKE
             strokeWidth = 3f * density
         }
-        canvas.drawCircle(size / 2f, size / 2f, radius, borderPaint)
+        canvas.drawCircle(cx, cy, radius, borderPaint)
 
-        // 数字文本
+        // 有缩略图时数字以角标形式叠加在右下角；无缩略图时数字居中显示
+        if (thumb != null) {
+            drawCountBadge(canvas, count, cx, cy, radius, density)
+        } else {
+            drawCenterText(canvas, count, cx, cy, density)
+        }
+
+        return BitmapDrawable(context.resources, bitmap)
+    }
+
+    /** 右下角数字角标（白底蓝圆 + 数字）。 */
+    private fun drawCountBadge(
+        canvas: Canvas,
+        count: Int,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        density: Float,
+    ) {
+        val badgeRadius = 14f * density
+        val bx = cx + radius * 0.62f
+        val by = cy + radius * 0.62f
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            style = Paint.Style.FILL
+        }
+        canvas.drawCircle(bx, by, badgeRadius + 2f, bgPaint)
+        val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(66, 133, 244)
+            style = Paint.Style.FILL
+        }
+        canvas.drawCircle(bx, by, badgeRadius, badgePaint)
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            textSize = badgeRadius * 1.1f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.CENTER
+        }
+        val text = if (count > 99) "99+" else count.toString()
+        val bounds = Rect()
+        textPaint.getTextBounds(text, 0, text.length, bounds)
+        canvas.drawText(text, bx, by + bounds.height() / 2f, textPaint)
+    }
+
+    /** 居中数字文本（无缩略图降级样式）。 */
+    private fun drawCenterText(
+        canvas: Canvas,
+        count: Int,
+        cx: Float,
+        cy: Float,
+        density: Float,
+    ) {
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.WHITE
             textSize = 28f * density / 2
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             textAlign = Paint.Align.CENTER
         }
-        val textBounds = Rect()
         val text = if (count > 99) "99+" else count.toString()
-        textPaint.getTextBounds(text, 0, text.length, textBounds)
-        canvas.drawText(text, size / 2f, size / 2f + textBounds.height() / 2f, textPaint)
-
-        return BitmapDrawable(context.resources, bitmap)
+        val bounds = Rect()
+        textPaint.getTextBounds(text, 0, text.length, bounds)
+        canvas.drawText(text, cx, cy + bounds.height() / 2f, textPaint)
     }
 }
 
