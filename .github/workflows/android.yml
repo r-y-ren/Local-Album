@@ -42,8 +42,9 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
+      # 增加了 -x lint，确保 assembleDebug 过程中不会意外触发全局 lint 导致构建中断
       - name: Run ${{ matrix.gradle-task }}
-        run: ./gradlew ${{ matrix.gradle-task }}
+        run: ./gradlew ${{ matrix.gradle-task }} -x lint
 
   lint:
     runs-on: ubuntu-latest
@@ -67,5 +68,6 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
+      # 核心修改：追加 -x :opencv:lintDebug 忽略引起报错的第三方 OpenCV 模块
       - name: Run lint
-        run: ./gradlew lintDebug
+        run: ./gradlew lintDebug -x :opencv:lintDebug
