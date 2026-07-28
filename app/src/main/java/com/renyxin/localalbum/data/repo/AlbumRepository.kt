@@ -345,6 +345,8 @@ class AlbumRepository(
             }
             val roots = settings?.scanRoots ?: emptyList()
             val allowNomedia = settings?.showNomediaDirectories ?: false
+            // 用户配置的忽略规则（正则），同时匹配目录名与文件名；复用 ignoreDirNames 通路
+            val ignorePatterns = settings?.ignoreDirNames ?: emptyList()
             if (roots.isEmpty()) {
                 Log.w(TAG, "rescan: scanRoots 为空，清空并返回 Idle")
                 clearAll()
@@ -360,11 +362,11 @@ class AlbumRepository(
                 )
                 if (isFirstScan) {
                     // Phase 3: 全量扫描进度填充（D10）——指纹阶段上报 processed/total
-                    hybridIndexer.fullScan(roots, allowNomedia) { processed, total ->
+                    hybridIndexer.fullScan(roots, allowNomedia, ignorePatterns) { processed, total ->
                         _scanState.value = ScanState.Scanning("首次全量扫描…", processed, total)
                     }
                 } else {
-                    hybridIndexer.incrementalScan(roots, allowNomedia)
+                    hybridIndexer.incrementalScan(roots, allowNomedia, ignorePatterns)
                 }
                 // 修复：移除无效的"兜底孤儿清理"调用。原调用 removeOrphanedRecords(mediaDao.getAllPaths())
                 // 把数据库路径当作"文件系统实际路径"传入，差集恒为空，是 no-op（还白做两次全表路径查询）。
@@ -388,7 +390,7 @@ class AlbumRepository(
                 }
 
                 _scanState.value = ScanState.Scanning("正在扫描文件系统…")
-                val tree = mediaSource.scanRoots(roots, cache, allowNomedia)
+                val tree = mediaSource.scanRoots(roots, cache, allowNomedia, ignorePatterns)
 
                 val allItems = mutableListOf<MediaItem>()
                 tree.forEach { collectMediaItems(it, allItems) }

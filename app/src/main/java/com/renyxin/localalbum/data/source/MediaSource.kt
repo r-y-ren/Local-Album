@@ -13,6 +13,7 @@ import android.util.Log
 import android.util.Size
 import androidx.annotation.RequiresApi
 import androidx.exifinterface.media.ExifInterface
+import com.renyxin.localalbum.core.index.IgnorePatternMatcher
 import com.renyxin.localalbum.core.model.DirectoryNode
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
@@ -20,6 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.util.regex.Pattern
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -85,38 +87,45 @@ class MediaSource(
     /**
      * 异步扫描多个根目录，返回每个根对应的 [DirectoryNode]。
      * @param allowNomedia 为 true 时不再跳过含 .nomedia 的目录
+     * @param ignorePatterns 用户配置的忽略规则（正则字符串列表），同时匹配目录名与文件名。
+     *        非法正则会在编译阶段被跳过（见 [IgnorePatternMatcher.compile]）。
      */
     suspend fun scanRoots(
         rootPaths: List<String>,
         cache: MediaMetadataCache? = null,
         allowNomedia: Boolean = false,
+        ignorePatterns: List<String> = emptyList(),
     ): List<DirectoryNode> = withContext(Dispatchers.IO) {
+        val compiled = IgnorePatternMatcher.compile(ignorePatterns)
         rootPaths.mapNotNull { rootPath ->
             val rootDir = File(rootPath)
             if (!rootDir.exists() || !rootDir.isDirectory) {
                 Log.w(TAG, "跳过不存在的根目录: $rootPath")
                 return@mapNotNull null
             }
-            buildNode(rootDir, parentPath = null, cache = cache, allowNomedia = allowNomedia)
+            buildNode(rootDir, parentPath = null, cache = cache, allowNomedia = allowNomedia, ignorePatterns = compiled)
         }
     }
 
     /**
      * 同步版本，在 IO 协程中调用。
      * @param allowNomedia 为 true 时不再跳过含 .nomedia 的目录
+     * @param ignorePatterns 用户配置的忽略规则（正则字符串列表），同时匹配目录名与文件名。
      */
     fun scanRootsSync(
         rootPaths: List<String>,
         cache: MediaMetadataCache? = null,
         allowNomedia: Boolean = false,
+        ignorePatterns: List<String> = emptyList(),
     ): List<DirectoryNode> = buildList {
+        val compiled = IgnorePatternMatcher.compile(ignorePatterns)
         for (rootPath in rootPaths) {
             val rootDir = File(rootPath)
             if (!rootDir.exists() || !rootDir.isDirectory) {
                 Log.w(TAG, "跳过不存在的根目录: $rootPath")
                 continue
             }
-            add(buildNode(rootDir, parentPath = null, cache = cache, allowNomedia = allowNomedia))
+            add(buildNode(rootDir, parentPath = null, cache = cache, allowNomedia = allowNomedia, ignorePatterns = compiled))
         }
     }
 
@@ -125,6 +134,7 @@ class MediaSource(
         parentPath: String?,
         cache: MediaMetadataCache?,
         allowNomedia: Boolean = false,
+        ignorePatterns: List<Pattern> = emptyList(),
     ): DirectoryNode {
         val children = mutableListOf<DirectoryNode>()
         val mediaItems = mutableListOf<MediaItem>()
@@ -134,11 +144,13 @@ class MediaSource(
             for (file in files) {
                 when {
                     file.isDirectory -> {
-                        if (shouldIgnoreDir(file.name)) continue
+                        if (shouldIgnoreDir(file.name, ignorePatterns)) continue
                         if (hasNoMedia(file, allowNomedia)) continue
-                        children += buildNode(file, parentPath = dir.absolutePath, cache = cache, allowNomedia = allowNomedia)
+                        children += buildNode(file, parentPath = dir.absolutePath, cache = cache, allowNomedia = allowNomedia, ignorePatterns = ignorePatterns)
                     }
                     file.isFile -> {
+                        // 用户配置的正则忽略规则对文件名生效（如 ^.trash 命中以 .trash 开头的文件）
+                        if (shouldIgnoreFile(file.name, ignorePatterns)) continue
                         val mediaType = detectMediaType(file.name)
                         if (mediaType != null) {
                             mediaItems += buildMediaItem(file, mediaType, cache)
@@ -157,9 +169,28 @@ class MediaSource(
         )
     }
 
-    private fun shouldIgnoreDir(name: String): Boolean {
+    /**
+     * 判断目录是否应被忽略。
+     *
+     * 三层规则（任一命中即跳过）：
+     * 1. 以 `.` 开头的隐藏目录（系统约定，始终跳过）；
+     * 2. [DefaultIgnoreDirs] 中的精确目录名（大小写不敏感）；
+     * 3. 用户配置的正则忽略规则（[IgnorePatternMatcher.matchesAny]）。
+     */
+    private fun shouldIgnoreDir(name: String, ignorePatterns: List<Pattern> = emptyList()): Boolean {
         if (name.startsWith('.')) return true
-        return ignoreDirNames.any { it.equals(name, ignoreCase = true) }
+        if (ignoreDirNames.any { it.equals(name, ignoreCase = true) }) return true
+        return IgnorePatternMatcher.matchesAny(name, ignorePatterns)
+    }
+
+    /**
+     * 判断文件是否应被忽略（仅用户配置的正则忽略规则生效）。
+     *
+     * 注意：此处不自动跳过以 `.` 开头的隐藏文件——隐藏文件是否为媒体由 [detectMediaType]
+     * 的扩展名判定决定；用户若需排除特定前缀文件，请配置正则规则（如 `^.trash`）。
+     */
+    private fun shouldIgnoreFile(name: String, ignorePatterns: List<Pattern>): Boolean {
+        return IgnorePatternMatcher.matchesAny(name, ignorePatterns)
     }
 
     private fun hasNoMedia(dir: File, allowNomedia: Boolean = false): Boolean {

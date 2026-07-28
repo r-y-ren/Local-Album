@@ -177,13 +177,14 @@ class HybridIndexer(
     suspend fun fullScan(
         roots: List<String>,
         allowNomedia: Boolean = false,
+        ignorePatterns: List<String> = emptyList(),
         progress: ((processed: Int, total: Int) -> Unit)? = null,
     ): Int = withContext(Dispatchers.IO) {
         Log.i(TAG, "开始全量扫描…")
         val startTime = System.currentTimeMillis()
 
-        val mediaStoreItems = queryMediaStore(roots)
-        val fileSystemItems = queryFileSystem(roots, allowNomedia)
+        val mediaStoreItems = queryMediaStore(roots, ignorePatterns)
+        val fileSystemItems = queryFileSystem(roots, allowNomedia, ignorePatterns)
 
         // 合并去重（以 filePath 为主键，File API 的 EXIF 数据更全，优先保留）
         val merged = mergeAndDeduplicate(mediaStoreItems, fileSystemItems)
@@ -276,14 +277,18 @@ class HybridIndexer(
      * @param allowNomedia 为 true 时不再跳过含 .nomedia 的目录
      * @return 更新的媒体项数量
      */
-    suspend fun incrementalScan(roots: List<String>, allowNomedia: Boolean = false): IncrementalResult = withContext(Dispatchers.IO) {
+    suspend fun incrementalScan(
+        roots: List<String>,
+        allowNomedia: Boolean = false,
+        ignorePatterns: List<String> = emptyList(),
+    ): IncrementalResult = withContext(Dispatchers.IO) {
         Log.i(TAG, "开始增量扫描…")
         val startTime = System.currentTimeMillis()
 
         val dbMap = mediaDao.getModifiedTimeMap().associateBy { it.filePath }
 
-        val mediaStoreItems = queryMediaStore(roots)
-        val fileSystemItems = queryFileSystem(roots, allowNomedia)
+        val mediaStoreItems = queryMediaStore(roots, ignorePatterns)
+        val fileSystemItems = queryFileSystem(roots, allowNomedia, ignorePatterns)
 
         val currentMap = mergeAndDeduplicate(mediaStoreItems, fileSystemItems)
             .associateBy { it.filePath }
@@ -444,8 +449,10 @@ class HybridIndexer(
         }
     }
 
-    private fun queryMediaStore(roots: List<String>): List<MediaItem> {
+    private fun queryMediaStore(roots: List<String>, ignorePatterns: List<String> = emptyList()): List<MediaItem> {
         val items = mutableListOf<MediaItem>()
+        // 用户配置的正则忽略规则预编译（对文件名生效，如 ^.trash）。非法正则自动跳过。
+        val compiledIgnore = IgnorePatternMatcher.compile(ignorePatterns)
 
         // 查询图片
         context.contentResolver.query(
@@ -474,6 +481,8 @@ class HybridIndexer(
                 if (!file.exists()) continue
                 // 按扫描根目录过滤：仅索引用户选定目录下的媒体
                 if (!isUnderAnyRoot(path, roots)) continue
+                // 用户配置的正则忽略规则对文件名生效
+                if (IgnorePatternMatcher.matchesAny(file.name, compiledIgnore)) continue
 
                 items.add(MediaItem(
                     id = java.util.UUID.nameUUIDFromBytes(path.toByteArray()).toString(),
@@ -521,6 +530,8 @@ class HybridIndexer(
                 if (!file.exists()) continue
                 // 按扫描根目录过滤：仅索引用户选定目录下的媒体
                 if (!isUnderAnyRoot(path, roots)) continue
+                // 用户配置的正则忽略规则对文件名生效
+                if (IgnorePatternMatcher.matchesAny(file.name, compiledIgnore)) continue
 
                 items.add(MediaItem(
                     id = java.util.UUID.nameUUIDFromBytes(path.toByteArray()).toString(),
@@ -550,10 +561,14 @@ class HybridIndexer(
      * 用于补充 MediaStore 未覆盖的文件（如用户自选目录下的媒体）。
      * @param allowNomedia 为 true 时不再跳过含 .nomedia 的目录
      */
-    private fun queryFileSystem(roots: List<String>, allowNomedia: Boolean = false): List<MediaItem> {
+    private fun queryFileSystem(
+        roots: List<String>,
+        allowNomedia: Boolean = false,
+        ignorePatterns: List<String> = emptyList(),
+    ): List<MediaItem> {
         if (roots.isEmpty()) return emptyList()
         val result = mutableListOf<MediaItem>()
-        val tree = mediaSource.scanRootsSync(roots, allowNomedia = allowNomedia)
+        val tree = mediaSource.scanRootsSync(roots, allowNomedia = allowNomedia, ignorePatterns = ignorePatterns)
         tree.forEach { collectMediaItems(it, result) }
         return result
     }

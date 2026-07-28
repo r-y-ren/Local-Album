@@ -1995,12 +1995,13 @@ private fun SettingsTab(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Text(
-                        text = "忽略目录规则",
+                        text = "忽略规则（正则）",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                     )
                     Text(
-                        text = "命中此列表中名称的文件夹（包含隐藏文件夹如 .thumbnails）将被自动跳过扫描。",
+                        text = "支持正则表达式，同时匹配目录名与文件名。命中任一规则的目录或文件将被跳过扫描。" +
+                            "例如输入 ^.trash 可跳过所有以 .trash 开头的目录与文件；非法正则将被自动忽略。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
                     )
@@ -2013,8 +2014,8 @@ private fun SettingsTab(
                         OutlinedTextField(
                             value = newIgnore,
                             onValueChange = { newIgnore = it },
-                            label = { Text("要忽略的文件夹名") },
-                            placeholder = { Text(".cache") },
+                            label = { Text("正则规则") },
+                            placeholder = { Text("^.trash") },
                             singleLine = true,
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.weight(1f),
