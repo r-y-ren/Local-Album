@@ -511,6 +511,7 @@ class AppContainer(context: Context) {
     val albumRepository = AlbumRepository(
         settingsRepository = settingsRepository,
         mediaDao = database.mediaDao(),
+        database = database,
         faceDao = database.faceDao(),
         embeddingDao = database.embeddingDao(),
         mediaSource = mediaSource,

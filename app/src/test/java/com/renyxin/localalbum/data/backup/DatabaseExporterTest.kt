@@ -68,6 +68,9 @@ class DatabaseExporterTest {
         override suspend fun getModifiedTimeMap(): List<com.renyxin.localalbum.data.db.dao.PathModifiedTime> = emptyList()
         override suspend fun getModifiedTimeForPath(path: String): com.renyxin.localalbum.data.db.dao.PathModifiedTime? = null
         override suspend fun getAllPaths(): List<String> = store.keys.toList()
+        override suspend fun getImagePaths(): List<String> = store.values
+            .filter { it.mediaType == MediaType.IMAGE }
+            .map { it.filePath }
         override suspend fun getAllTimelineItems(): List<MediaEntity> = store.values.toList()
         override suspend fun getTimelineItemsByRange(startMs: Long, endMs: Long): List<MediaEntity> = emptyList()
         override suspend fun getCountByDateRange(startMs: Long, endMs: Long): Int = 0

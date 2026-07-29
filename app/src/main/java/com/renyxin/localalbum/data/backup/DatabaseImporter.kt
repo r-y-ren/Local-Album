@@ -1,6 +1,8 @@
 package com.renyxin.localalbum.data.backup
 
+import androidx.room.withTransaction
 import com.renyxin.localalbum.core.model.MediaType
+import com.renyxin.localalbum.data.db.AppDatabase
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.MediaDao
@@ -36,6 +38,11 @@ class DatabaseImporter(
     private val mediaDao: MediaDao,
     private val faceDao: FaceDao? = null,
     private val embeddingDao: EmbeddingDao? = null,
+    /**
+     * 真实 Room 数据库用于将整次覆盖式恢复包进同一个事务。
+     * 单元测试可省略该参数，此时仍执行相同逻辑，但不具备跨 DAO 的 SQLite 原子性。
+     */
+    private val database: AppDatabase? = null,
 ) {
     companion object {
         private const val TAG = "DatabaseImporter"
@@ -63,6 +70,8 @@ class DatabaseImporter(
         try {
             val json = inputFile.readText(Charsets.UTF_8)
             importFromJson(json)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             ImportResult(success = false, errorMessage = e.message)
         }
@@ -93,26 +102,25 @@ class DatabaseImporter(
             val embeddings = parseEmbeddings(root.optJSONArray("embeddings"))
             val ftsEntries = parseFtsEntries(root.optJSONArray("ftsEntries"))
 
-            // 清空现有数据（覆盖式导入）
-            mediaDao.clearAll()
-            mediaDao.clearAllFts()
-            faceDao?.clearAll()
-            embeddingDao?.clearAll()
+            // 覆盖式恢复必须跨媒体、FTS、人脸和嵌入表原子执行：任何写入失败均回滚到导入前状态。
+            // 当 database 为 null（纯 JVM Fake DAO 测试）时仅执行同一写入逻辑，真实 App 路径必须注入 AppDatabase。
+            suspend fun restoreAll() {
+                mediaDao.clearAll()
+                mediaDao.clearAllFts()
+                faceDao?.clearAll()
+                embeddingDao?.clearAll()
 
-            // 按外键语义顺序插入
-            if (mediaItems.isNotEmpty()) {
-                mediaDao.insertAll(mediaItems)
-            }
-            if (ftsEntries.isNotEmpty()) {
-                for (fts in ftsEntries) {
-                    mediaDao.insertFtsEntry(fts.filePath, fts.fileName, fts.ocrText, fts.make, fts.model)
+                if (mediaItems.isNotEmpty()) mediaDao.insertAll(mediaItems)
+                if (ftsEntries.isNotEmpty()) {
+                    ftsEntries.chunked(500).forEach { chunk -> mediaDao.insertFtsAll(chunk) }
                 }
+                if (faces.isNotEmpty()) faceDao?.insertFaces(faces)
+                if (embeddings.isNotEmpty()) embeddingDao?.insertEmbeddings(embeddings)
             }
-            if (faces.isNotEmpty()) {
-                faceDao?.insertFaces(faces)
-            }
-            if (embeddings.isNotEmpty()) {
-                embeddingDao?.insertEmbeddings(embeddings)
+            if (database != null) {
+                database.withTransaction { restoreAll() }
+            } else {
+                restoreAll()
             }
 
             ImportResult(
@@ -122,6 +130,8 @@ class DatabaseImporter(
                 embeddingCount = embeddings.size,
                 ftsCount = ftsEntries.size,
             )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             ImportResult(success = false, errorMessage = e.message)
         }

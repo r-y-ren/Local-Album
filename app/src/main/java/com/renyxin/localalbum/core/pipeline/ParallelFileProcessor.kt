@@ -1,6 +1,7 @@
 package com.renyxin.localalbum.core.pipeline
 
 import com.renyxin.localalbum.core.concurrent.InferenceDispatchers
+import com.renyxin.localalbum.core.concurrent.InferenceMetrics
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.async
@@ -85,7 +86,13 @@ object ParallelFileProcessor {
                             try {
                                 // D7 日志治理：移除每文件 2 条 CrashDebug 日志（5 万文件 = 10 万条 logcat）。
                                 // 仅保留失败路径的错误日志，成功路径通过 enhancedCallback 上报进度。
-                                val value = process(path)
+                                // 指标仅按并行批处理聚合，不记录文件路径，避免高基数和隐私泄露。
+                                val value = InferenceMetrics.measure(
+                                    operation = "pipeline:file",
+                                    backend = InferenceMetrics.Backend.CPU_DEFAULT,
+                                ) {
+                                    process(path)
+                                }
                                 val done = processed.incrementAndGet()
                                 enhancedCallback(done, total, path, FileProcessingStatus.COMPLETED)
                                 FileResult(path, success = true, value = value)

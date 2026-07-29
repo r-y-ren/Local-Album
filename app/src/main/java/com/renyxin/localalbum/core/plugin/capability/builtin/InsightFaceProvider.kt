@@ -34,6 +34,7 @@ class InsightFaceProvider(
         const val EMBEDDING_DIM = 512
         private const val DET_CONF_THRESHOLD = 0.5f
         private const val DET_NMS_THRESHOLD = 0.4f
+        private const val MAX_FACES_PER_IMAGE = 8
     }
 
     override val providerId = "model:insightface"
@@ -72,12 +73,20 @@ class InsightFaceProvider(
             detectFacesOnnx(original, detSession)
         } ?: return@withContext emptyList()
 
+        // 群像、海报或误检可能使单图人脸数异常膨胀。仅保留面积最大的有限人脸，
+        // 控制 ArcFace 调用次数与临时 Bitmap/仿射矩阵的峰值内存。
+        val facesForRecognition = faces
+            .sortedByDescending { face -> face.box.width() * face.box.height() }
+            .take(MAX_FACES_PER_IMAGE)
+        if (facesForRecognition.size < faces.size) {
+            Log.i(TAG, "人脸识别限流: detected=${faces.size}, selected=${facesForRecognition.size}")
+        }
         val recResult = modelManager.ensureModelReady(REC_MODEL_ID)
         if (recResult.isFailure) {
-            return@withContext faces.map { FaceProvider.DetectedFace(it.box, FloatArray(EMBEDDING_DIM)) }
+            return@withContext facesForRecognition.map { FaceProvider.DetectedFace(it.box, FloatArray(EMBEDDING_DIM)) }
         }
         val results = mutableListOf<FaceProvider.DetectedFace>()
-        for (face in faces) {
+        for (face in facesForRecognition) {
             // 通过 session 池获取独立 rec session（独立 intra-op 线程池），实现多核并行
             val emb = modelManager.withOnnxSession(REC_MODEL_ID) { recSession ->
                 // ArcFace 嵌入必须基于 5 关键点对齐到 112×112（ReActor ArcFaceONNX.get 的 norm_crop）。

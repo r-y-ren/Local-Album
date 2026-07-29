@@ -41,6 +41,9 @@ class PaddleOCRProvider(
         private const val REC_IMG_W = 320
         private const val DET_THRESH = 0.3f
         private const val MIN_BOX_AREA = 100
+        private const val MIN_REC_BOX_WIDTH = 12
+        private const val MIN_REC_BOX_HEIGHT = 10
+        private const val MAX_TEXT_REGIONS = 12
 
         // 检测使用 ImageNet 归一化
         private val DET_MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
@@ -116,8 +119,18 @@ class PaddleOCRProvider(
             }
             if (regions.isEmpty()) return@withContext OcrProvider.OcrResult("")
 
+            // 识别模型调用次数是 OCR 的主要成本。检测结果按阅读顺序排列后，跳过极小
+            // 噪声框，并保留面积最大的有限数量，避免海报/漫画中的碎片框拖慢整批扫描。
+            val recognitionRegions = regions
+                .filter { region ->
+                    region[2] - region[0] >= MIN_REC_BOX_WIDTH &&
+                        region[3] - region[1] >= MIN_REC_BOX_HEIGHT
+                }
+                .sortedByDescending { region -> (region[2] - region[0]) * (region[3] - region[1]) }
+                .take(MAX_TEXT_REGIONS)
+                .sortedWith(compareBy({ it[1] }, { it[0] }))
             val lines = mutableListOf<String>()
-            for (region in regions) {
+            for (region in recognitionRegions) {
                 val crop = safeCrop(bitmap, region) ?: continue
                 val text = modelManager.withOnnxSession(REC_MODEL_ID) { recSession ->
                     recognizeText(crop, recSession)

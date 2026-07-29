@@ -17,6 +17,7 @@ import com.renyxin.localalbum.core.recommendation.RecommendationEngine
 import com.renyxin.localalbum.core.search.SemanticSearcher
 import com.renyxin.localalbum.data.backup.DatabaseExporter
 import com.renyxin.localalbum.data.backup.DatabaseImporter
+import com.renyxin.localalbum.data.db.AppDatabase
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.FaceClusterSummary
@@ -130,6 +131,7 @@ enum class SemanticSearchState {
 class AlbumRepository(
     private val settingsRepository: SettingsRepository,
     private val mediaDao: MediaDao,
+    private val database: AppDatabase? = null,
     private val faceDao: FaceDao? = null,
     private val embeddingDao: EmbeddingDao? = null,
     private val mediaSource: MediaSource = MediaSource(),
@@ -711,7 +713,7 @@ class AlbumRepository(
 
     /** 数据库导入器（Phase 4.2） */
     private val databaseImporter: DatabaseImporter? by lazy {
-        DatabaseImporter(mediaDao, faceDao, embeddingDao)
+        DatabaseImporter(mediaDao, faceDao, embeddingDao, database)
     }
 
     /**

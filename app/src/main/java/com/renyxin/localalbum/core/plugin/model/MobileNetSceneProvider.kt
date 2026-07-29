@@ -80,27 +80,31 @@ class MobileNetSceneProvider(
         modelManager.registerConsumer(MODEL_ID, "MobileNetSceneProvider")
         try {
             val inputBuffer = preprocess(bitmap)
-            val outputArray = Array(1) { FloatArray(NUM_CLASSES) }
-            // 通过 Interpreter 池获取线程安全实例，支持文件级并发推理
+            // 模型实际输出为 1000 类，而旧常量为兼容旧 V2 模型保留的 1001 类。
+            // 必须依据 Interpreter 的真实输出 Tensor 分配，否则 TFLite 会因输出容器尺寸不匹配
+            // 而在 CPU 和 NNAPI 两条路径上均失败，造成“后端失败”的假象。
+            lateinit var scores: FloatArray
             modelManager.withInterpreter(MODEL_ID) { interpreter ->
-                android.util.Log.i("CrashDebug", ">> MobileNet interpreter.run (线程=${Thread.currentThread().name})")
+                val outputShape = interpreter.getOutputTensor(0).shape()
+                val outputCount = outputShape.fold(1) { acc, dimension -> acc * dimension }
+                require(outputCount > 0) { "MobileNet 输出张量为空: ${outputShape.contentToString()}" }
+                val outputArray = Array(1) { FloatArray(outputCount) }
                 interpreter.run(inputBuffer, outputArray)
-                android.util.Log.i("CrashDebug", "<< MobileNet interpreter.run 完成")
+                scores = outputArray[0]
             }
 
-            val scores = outputArray[0]
             val topIndex = scores.indices.maxByOrNull { scores[it] } ?: 0
             val topConfidence = scores[topIndex]
 
-            // MobileNetV3 输出 1000 类（无 background），ImageNetLabels 有 1001 条（index 0 = background）。
-            // 运行时检测输出维度：若为 1000 则标签索引偏移 +1 对齐到 1001 条标签表。
-            val labelIndex = topIndex + 1
+            // 1000 类 V3 没有 background；1001 类旧模型保留 background，故仅前者偏移。
+            val labelOffset = if (scores.size == NUM_CLASSES - 1) 1 else 0
+            val labelIndex = topIndex + labelOffset
 
             val top5 = scores.indices
                 .sortedByDescending { scores[it] }
                 .take(5)
                 .associate { idx ->
-                    val sceneLabel = ImageNetLabels.toSceneLabel(idx + 1, scores[idx])
+                    val sceneLabel = ImageNetLabels.toSceneLabel(idx + labelOffset, scores[idx])
                     sceneLabel to scores[idx]
                 }
 

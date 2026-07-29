@@ -4,6 +4,7 @@ import com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import kotlin.math.sqrt
 
 /**
@@ -256,15 +257,26 @@ class SemanticSearcher(
      * 将向量序列化为逗号分隔的字符串（用于数据库存储）。
      */
     fun serialize(vec: FloatArray): String {
-        return vec.joinToString(",") { "%.6f".format(it) }
+        require(vec.all { it.isFinite() }) { "语义向量包含非有限数值" }
+        // 持久化格式必须与设备语言无关：部分 Locale 使用逗号作小数分隔符，
+        // 会与本格式的元素分隔符冲突，导致之后出现维度错误或静默丢失结果。
+        return vec.joinToString(",") { "%.6f".format(Locale.US, it) }
     }
 
     /**
      * 从逗号分隔的字符串反序列化为向量。
+     *
+     * 损坏数据不应被 mapNotNull 静默缩短，否则调用方只会看到难以定位的维度不匹配；
+     * 遇到空值、非法数值或非有限数值时明确抛出异常，由搜索调用点隔离该条记录。
      */
     fun deserialize(str: String): FloatArray {
-        return str.split(",").mapNotNull { it.trim().toFloatOrNull() }
-            .toFloatArray()
+        require(str.isNotBlank()) { "语义向量为空" }
+        return str.split(",").mapIndexed { index, raw ->
+            val value = raw.trim().toFloatOrNull()
+                ?: throw IllegalArgumentException("语义向量第 $index 项不是有效浮点数")
+            require(value.isFinite()) { "语义向量第 $index 项不是有限数值" }
+            value
+        }.toFloatArray()
     }
 
     /**

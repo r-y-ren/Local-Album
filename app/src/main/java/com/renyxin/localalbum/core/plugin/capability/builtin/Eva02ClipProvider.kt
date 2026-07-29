@@ -2,12 +2,14 @@ package com.renyxin.localalbum.core.plugin.capability.builtin
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Build
 import android.graphics.BitmapFactory
 import android.util.Log
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import com.renyxin.localalbum.core.concurrent.InferenceDispatchers
+import com.renyxin.localalbum.core.concurrent.InferenceMetrics
 import com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -19,6 +21,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.LongBuffer
+import java.util.EnumSet
 import java.util.concurrent.ConcurrentLinkedDeque
 
 /**
@@ -92,30 +95,61 @@ class Eva02ClipProvider(
     // ---- 视觉 session 池（多核并行）----
     // 单 session 的 intra-op 线程池为 session 级共享，intra=1 时并发 run 被串行化（单核瓶颈）。
     // 本池为每个并发 worker 提供独立 session（独立线程池），实现多核并行。
-    // EVA02-L 内存占用远低于 bigG，池上限放宽至 4。
+    // MT6991 实测 EVA02 visual 的 NNAPI 路径显著慢于 CPU，默认使用 CPU 多 session 池；
+    // 仅在后续模型转换或驱动更新后重新开启 NNAPI 候选时才降为单飞。
     private val visualPoolSize: Int = minOf(InferenceDispatchers.cpuCores, 4)
     private val visualSessionPool = ConcurrentLinkedDeque<OrtSession>()
     private val visualSemaphore = Semaphore(visualPoolSize)
     private val visualPoolMutex = Mutex()
     @Volatile private var visualModelPath: String? = null
-    @Volatile private var visualSessionOptions: OrtSession.SessionOptions? = null
 
     /**
      * 模型在 filesDir 中的工作目录（ONNX 从 assets 复制到此）。
      */
     private val workDir: File by lazy { File(context.filesDir, "models/eva02_clip") }
 
+    private val accelerationPrefs by lazy {
+        context.getSharedPreferences("acceleration_policy", Context.MODE_PRIVATE)
+    }
+
     /**
-     * 创建 ONNX SessionOptions（启用 XNNPACK 加速）。
+     * 真机结果：MT6991 上 EVA02 visual 的 NNAPI 单图约 2.16s，远慢于原 CPU 路径，
+     * 故默认熔断。保留探测与回退实现，待模型转换/驱动版本变化后以新实验版本复测。
      */
-    private fun createSessionOptions(): OrtSession.SessionOptions {
+    private fun isVisualNnapiEnabled(): Boolean = false
+
+    private fun disableVisualNnapi() {
+        accelerationPrefs.edit().putBoolean("eva02_visual_nnapi_disabled:v1", true).apply()
+    }
+
+    /** 视觉模型独立尝试 NNAPI；文本编码器继续使用 CPU，避免扩大未验证的图覆盖范围。 */
+    private fun createSessionOptions(useNnapi: Boolean): OrtSession.SessionOptions {
         return OrtSession.SessionOptions().apply {
             setIntraOpNumThreads(1)
             setInterOpNumThreads(1)
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            runCatching { addXnnpack(emptyMap()) }
-                .onFailure { Log.w(TAG, "XNNPACK 启用失败: ${it.message}") }
+            if (useNnapi) {
+                addNnapi(
+                    EnumSet.of(
+                        ai.onnxruntime.providers.NNAPIFlags.USE_FP16,
+                        ai.onnxruntime.providers.NNAPIFlags.CPU_DISABLED,
+                    ),
+                )
+                Log.i(TAG, "EVA02 visual ONNX NNAPI 候选后端已启用")
+            } else {
+                runCatching { addXnnpack(emptyMap()) }
+                    .onFailure { Log.w(TAG, "XNNPACK 启用失败: ${it.message}") }
+            }
         }
+    }
+
+    private fun createVisualSession(path: String): OrtSession = try {
+        env.createSession(path, createSessionOptions(isVisualNnapiEnabled()))
+    } catch (error: Throwable) {
+        if (!isVisualNnapiEnabled()) throw error
+        Log.w(TAG, "EVA02 visual NNAPI 初始化失败，熔断并回退 CPU", error)
+        disableVisualNnapi()
+        env.createSession(path, createSessionOptions(false))
     }
 
     /**
@@ -144,18 +178,16 @@ class Eva02ClipProvider(
                 tokenizer = tk
                 Log.i(TAG, "分词器就绪: vocabSize=${tk.vocabSize}")
 
-                // 3. 创建会话（纯 CPU，不使用 XNNPACK）
-                val opts = createSessionOptions()
-                visualSessionOptions = opts
+                // 3. 视觉模型单独尝试 NNAPI；文本模型保持 CPU。
                 visualModelPath = visualFile.absolutePath
 
                 Log.i("CrashDebug", ">> EVA02 createSession visual (${visualFile.length()}B, 线程=${Thread.currentThread().name})")
-                val vs = env.createSession(visualModelPath!!, opts)
+                val vs = createVisualSession(visualModelPath!!)
                 Log.i("CrashDebug", "<< EVA02 createSession visual 完成")
                 Log.i(TAG, "视觉编码器会话就绪: inputs=${vs.inputNames}")
 
                 Log.i("CrashDebug", ">> EVA02 createSession text (${textFile.length()}B, 线程=${Thread.currentThread().name})")
-                val ts = env.createSession(textFile.absolutePath, opts)
+                val ts = env.createSession(textFile.absolutePath, createSessionOptions(false))
                 Log.i("CrashDebug", "<< EVA02 createSession text 完成")
                 Log.i(TAG, "文本编码器会话就绪: inputs=${ts.inputNames}")
 
@@ -200,19 +232,27 @@ class Eva02ClipProvider(
         val bitmap = decodeBitmap(file) ?: return@withContext null
         try {
             val input = preprocessImage(bitmap)
-            // 通过视觉 session 池获取独立 session（独立 intra-op 线程池），实现多核并行
+            // 视觉模型是语义扫描主瓶颈；统一记录 CPU/NNAPI 的 P50/P95 对照数据。
             withVisualSession { session ->
                 val tensor = OnnxTensor.createTensor(
                     env, input,
                     longArrayOf(1, 3, IMAGE_SIZE.toLong(), IMAGE_SIZE.toLong()),
                 )
-                Log.i("CrashDebug", ">> EVA02 visual session.run (线程=${Thread.currentThread().name})")
-                val result = session.run(mapOf(visualInputName to tensor))
-                Log.i("CrashDebug", "<< EVA02 visual session.run 完成")
-                tensor.close()
-                val vec = extractPooledVector(result, EMBED_DIM)
-                result.close()
-                vec?.let { l2Normalize(it) }
+                val backend = if (isVisualNnapiEnabled()) {
+                    InferenceMetrics.Backend.ONNX_NNAPI
+                } else {
+                    InferenceMetrics.Backend.CPU_DEFAULT
+                }
+                val result = InferenceMetrics.measure("model:eva02_visual:onnx", backend) {
+                    session.run(mapOf(visualInputName to tensor))
+                }
+                try {
+                    val vec = extractPooledVector(result, EMBED_DIM)
+                    vec?.let { l2Normalize(it) }
+                } finally {
+                    result.close()
+                    tensor.close()
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "EVA02 图像嵌入失败: ${file.name}", e)
@@ -226,17 +266,23 @@ class Eva02ClipProvider(
      * 从视觉 session 池获取一个独立实例执行推理（多核并行）。
      * 池大小 [visualPoolSize]，每个 session 独立 intra-op 线程池。
      */
-    private suspend fun <T> withVisualSession(block: (OrtSession) -> T): T {
+    private suspend fun <T> withVisualSession(block: suspend (OrtSession) -> T): T {
         val path = visualModelPath ?: throw IllegalStateException("EVA02 visual 未加载")
-        val opts = visualSessionOptions ?: throw IllegalStateException("EVA02 session options 未初始化")
         return visualSemaphore.withPermit {
-            val session = visualSessionPool.poll() ?: visualPoolMutex.withLock {
-                visualSessionPool.poll() ?: env.createSession(path, opts)
+            var reusableSession = visualSessionPool.poll() ?: visualPoolMutex.withLock {
+                visualSessionPool.poll() ?: createVisualSession(path)
             }
             try {
-                block(session)
+                block(reusableSession)
+            } catch (error: Throwable) {
+                if (!isVisualNnapiEnabled()) throw error
+                Log.w(TAG, "EVA02 visual NNAPI 推理失败，熔断并以 CPU 重试", error)
+                runCatching { reusableSession.close() }
+                disableVisualNnapi()
+                reusableSession = createVisualSession(path)
+                block(reusableSession)
             } finally {
-                visualSessionPool.add(session)
+                visualSessionPool.add(reusableSession)
             }
         }
     }
@@ -281,7 +327,6 @@ class Eva02ClipProvider(
         visualSessionPool.forEach { runCatching { it.close() } }
         visualSessionPool.clear()
         visualModelPath = null
-        visualSessionOptions = null
         textSession?.close()
         textSession = null
         tokenizer = null

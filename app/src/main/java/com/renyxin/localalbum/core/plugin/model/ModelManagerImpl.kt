@@ -5,8 +5,11 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.util.Log
-import com.renyxin.localalbum.core.concurrent.InferenceDispatchers
+import com.renyxin.localalbum.core.concurrent.AccelerationBackend
+import com.renyxin.localalbum.core.concurrent.AccelerationPolicyRegistry
+import com.renyxin.localalbum.core.concurrent.InferenceMetrics
 import com.renyxin.localalbum.core.plugin.PluginManifest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,6 +24,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.io.File
 import java.io.FileInputStream
 import java.nio.MappedByteBuffer
@@ -92,8 +96,23 @@ class ModelManagerImpl(
     /** 每个 modelId 的信号量，限制并发推理数 = 池大小。 */
     private val tfliteSemaphores = java.util.concurrent.ConcurrentHashMap<String, Semaphore>()
 
-    /** 池大小，等于推理并发度。 */
-    private val tflitePoolSize: Int = InferenceDispatchers.inferenceConcurrency
+    /**
+     * CPU 模型保持多实例并行；未来通过真机验证启用的硬件后端固定从单飞开始，
+     * 避免多个 session 争用同一 NPU。
+     */
+    private fun tflitePolicy(modelId: String) = AccelerationPolicyRegistry.forTflite(context, modelId)
+
+    private fun tflitePoolSize(modelId: String): Int = tflitePolicy(modelId).poolSize
+
+    private fun onnxPolicy(modelId: String) = AccelerationPolicyRegistry.forOnnx(context, modelId)
+
+    private fun onnxPoolSize(modelId: String): Int = onnxPolicy(modelId).poolSize
+
+    private fun tfliteMetricsBackend(modelId: String): InferenceMetrics.Backend =
+        tflitePolicy(modelId).effectiveBackend.metricsBackend
+
+    private fun onnxMetricsBackend(modelId: String): InferenceMetrics.Backend =
+        onnxPolicy(modelId).effectiveBackend.metricsBackend
 
     /** 池操作互斥锁（仅保护「取出或创建」的检查-创建原子性，run 不持锁）。 */
     private val tflitePoolMutex = Mutex()
@@ -136,26 +155,70 @@ class ModelManagerImpl(
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             setIntraOpNumThreads(1)
             setInterOpNumThreads(1)
-            // XNNPACK 不兼容模型黑名单：禁用 XNNPACK 以避免原生层崩溃
-            val xnnpackBlocklist = setOf(
-                "model:insightface_det",   // SCRFD det_10g createSession abort
-                "model:paddleocr_det",     // PP-OCRv6 det（预防性禁用，与 rec 保持一致）
-                "model:paddleocr_rec",     // PP-OCRv5 rec session.run SIGSEGV（已通过诊断日志确认）
-            )
-            if (modelId !in xnnpackBlocklist) {
-                runCatching { addXnnpack(emptyMap()) }
-                    .onFailure { Log.w(TAG, "XNNPACK 启用失败，回退默认 EP: ${it.message}") }
+            if (onnxPolicy(modelId).effectiveBackend == AccelerationBackend.ONNX_NNAPI) {
+                // CPU_DISABLED 防止模型仅部分分区后把未支持算子静默留在 CPU，确保本轮
+                // smoke test 测到的是实际 NNAPI 图覆盖；失败会触发 CPU session 回退。
+                addNnapi(
+                    java.util.EnumSet.of(
+                        ai.onnxruntime.providers.NNAPIFlags.USE_FP16,
+                        ai.onnxruntime.providers.NNAPIFlags.CPU_DISABLED,
+                    ),
+                )
+                Log.i(TAG, "ONNX NNAPI 候选后端已启用: $modelId")
             } else {
-                Log.i(TAG, "模型 $modelId 禁用 XNNPACK（XNNPACK EP 兼容性，回退默认 CPU EP）")
+                // XNNPACK 不兼容模型黑名单：禁用 XNNPACK 以避免原生层崩溃
+                val xnnpackBlocklist = setOf(
+                    "model:insightface_det",
+                    "model:paddleocr_det",
+                    "model:paddleocr_rec",
+                )
+                if (modelId !in xnnpackBlocklist) {
+                    runCatching { addXnnpack(emptyMap()) }
+                        .onFailure { Log.w(TAG, "XNNPACK 启用失败，回退默认 EP: ${it.message}") }
+                } else {
+                    Log.i(TAG, "模型 $modelId 禁用 XNNPACK（XNNPACK EP 兼容性，回退默认 CPU EP）")
+                }
             }
         }
+
+    private fun createOnnxSession(modelPath: String, modelId: String): OrtSession = try {
+        ortEnv.createSession(modelPath, createOnnxSessionOptions(modelId))
+    } catch (error: Throwable) {
+        if (onnxPolicy(modelId).effectiveBackend != AccelerationBackend.ONNX_NNAPI) throw error
+        Log.w(TAG, "ONNX NNAPI 初始化失败，熔断并回退 CPU: $modelId", error)
+        AccelerationPolicyRegistry.disableOnnxNnapi(context, modelId)
+        ortEnv.createSession(modelPath, createOnnxSessionOptions(modelId))
+    }
 
     /**
      * 创建配置好的 TFLite Interpreter.Options：单线程（配合文件级并行）+ XNNPACK。
      */
-    private fun createTfliteOptions(): Interpreter.Options = Interpreter.Options().apply {
+    private fun createTfliteOptions(modelId: String): Interpreter.Options = Interpreter.Options().apply {
+        val policy = tflitePolicy(modelId)
         setNumThreads(1)
-        setUseXNNPACK(true)
+        if (policy.effectiveBackend == AccelerationBackend.TFLITE_NNAPI) {
+            val cacheDir = File(context.codeCacheDir, "nnapi").apply { mkdirs() }
+            val delegate = NnApiDelegate(
+                NnApiDelegate.Options()
+                    .setExecutionPreference(NnApiDelegate.Options.EXECUTION_PREFERENCE_SUSTAINED_SPEED)
+                    .setAllowFp16(true)
+                    .setCacheDir(cacheDir.absolutePath)
+                    .setModelToken(modelId.replace(Regex("[^A-Za-z0-9_.-]"), "_")),
+            )
+            addDelegate(delegate)
+            Log.i(TAG, "TFLite NNAPI 候选后端已启用: $modelId")
+        } else {
+            setUseXNNPACK(true)
+        }
+    }
+
+    private fun createTfliteInterpreter(buffer: MappedByteBuffer, modelId: String): Interpreter = try {
+        Interpreter(buffer, createTfliteOptions(modelId))
+    } catch (error: Throwable) {
+        if (tflitePolicy(modelId).effectiveBackend != AccelerationBackend.TFLITE_NNAPI) throw error
+        Log.w(TAG, "TFLite NNAPI 初始化失败，熔断并回退 XNNPACK: $modelId", error)
+        AccelerationPolicyRegistry.disableTfliteNnapi(context, modelId)
+        Interpreter(buffer, createTfliteOptions(modelId))
     }
 
     // ---- 下载管理 ----
@@ -251,22 +314,22 @@ class ModelManagerImpl(
                         // 缓存共享只读 buffer，供 Interpreter 池创建多实例
                         tfliteBuffers[modelId] = tfliteBuffer
                         tfliteFreePools[modelId] = ConcurrentLinkedDeque()
-                        tfliteSemaphores[modelId] = Semaphore(tflitePoolSize)
+                        tfliteSemaphores[modelId] = Semaphore(tflitePoolSize(modelId))
                         // 首个实例放入池（单线程 + XNNPACK，配合文件级并行）
-                        val interpreter = Interpreter(tfliteBuffer, createTfliteOptions())
+                        val interpreter = createTfliteInterpreter(tfliteBuffer, modelId)
                         interpreters[modelId] = interpreter
                         tfliteFreePools[modelId]!!.add(interpreter)
                     }
                     ModelManager.ModelRuntime.ONNX -> {
                         // intra/inter op = 1 + XNNPACK，配合文件级并行避免 oversubscription
                         Log.i("CrashDebug", ">> ensureModelReady createSession: $modelId (文件=${modelFile.name}, ${modelFile.length()}B, 线程=${Thread.currentThread().name})")
-                        val session = ortEnv.createSession(modelFile.absolutePath, createOnnxSessionOptions(modelId))
+                        val session = createOnnxSession(modelFile.absolutePath, modelId)
                         Log.i("CrashDebug", "<< ensureModelReady createSession 完成: $modelId")
                         onnxSessions[modelId] = session
                         // 初始化 session 池：缓存路径 + 首个实例入池 + 信号量
                         onnxModelPaths[modelId] = modelFile.absolutePath
                         onnxFreePools[modelId] = ConcurrentLinkedDeque<OrtSession>().apply { add(session) }
-                        onnxSemaphores[modelId] = Semaphore(tflitePoolSize)
+                        onnxSemaphores[modelId] = Semaphore(onnxPoolSize(modelId))
                     }
                 }
                 totalMemoryBytes += descriptor.memoryFootprintBytes
@@ -310,15 +373,41 @@ class ModelManagerImpl(
             val session = freePool.poll() ?: onnxPoolMutex.withLock {
                 freePool.poll() ?: {
                     Log.i("CrashDebug", ">> withOnnxSession 池扩容 createSession: $modelId (线程=${Thread.currentThread().name})")
-                    val s = ortEnv.createSession(path, createOnnxSessionOptions(modelId))
+                    val s = createOnnxSession(path, modelId)
                     Log.i("CrashDebug", "<< withOnnxSession 池扩容 createSession 完成: $modelId")
                     s
                 }()
             }
+            var reusableSession = session
             try {
-                block(session)
+                InferenceMetrics.measure(
+                    operation = "model:$modelId:onnx",
+                    backend = onnxMetricsBackend(modelId),
+                ) {
+                    block(session)
+                }
+            } catch (error: Throwable) {
+                if (error is CancellationException ||
+                    onnxPolicy(modelId).effectiveBackend != AccelerationBackend.ONNX_NNAPI
+                ) {
+                    throw error
+                }
+
+                // CPU_DISABLED 的 NNAPI smoke test 遇到图覆盖或驱动错误时，立即熔断
+                // 并在当前请求内创建 CPU session 重试，避免单个候选模型中断整批扫描。
+                Log.w(TAG, "ONNX NNAPI 推理失败，熔断并以 CPU 重试: $modelId", error)
+                runCatching { session.close() }
+                AccelerationPolicyRegistry.disableOnnxNnapi(context, modelId)
+                reusableSession = createOnnxSession(path, modelId)
+                onnxSessions[modelId] = reusableSession
+                InferenceMetrics.measure(
+                    operation = "model:$modelId:onnx:fallback",
+                    backend = InferenceMetrics.Backend.CPU_DEFAULT,
+                ) {
+                    block(reusableSession)
+                }
             } finally {
-                freePool.add(session)
+                freePool.add(reusableSession)
             }
         }
     }
@@ -337,12 +426,37 @@ class ModelManagerImpl(
         return semaphore.withPermit {
             // 优先取空闲实例；无则从共享 buffer 创建新实例（池未满时）
             val interpreter = freePool.poll() ?: tflitePoolMutex.withLock {
-                freePool.poll() ?: Interpreter(buffer, createTfliteOptions())
+                freePool.poll() ?: createTfliteInterpreter(buffer, modelId)
             }
+            var reusableInterpreter = interpreter
             try {
-                block(interpreter)
+                InferenceMetrics.measure(
+                    operation = "model:$modelId:tflite",
+                    backend = tfliteMetricsBackend(modelId),
+                ) {
+                    block(interpreter)
+                }
+            } catch (error: Throwable) {
+                if (error is CancellationException ||
+                    tflitePolicy(modelId).effectiveBackend != AccelerationBackend.TFLITE_NNAPI
+                ) {
+                    throw error
+                }
+
+                // NNAPI 的运行时失败不能让 Provider 降级成启发式结果：熔断该模型后在
+                // 同一请求内用 XNNPACK 重试，并将替换后的 CPU Interpreter 放回对象池。
+                Log.w(TAG, "TFLite NNAPI 推理失败，熔断并以 XNNPACK 重试: $modelId", error)
+                runCatching { interpreter.close() }
+                AccelerationPolicyRegistry.disableTfliteNnapi(context, modelId)
+                reusableInterpreter = createTfliteInterpreter(buffer, modelId)
+                InferenceMetrics.measure(
+                    operation = "model:$modelId:tflite:fallback",
+                    backend = InferenceMetrics.Backend.CPU_XNNPACK,
+                ) {
+                    block(reusableInterpreter)
+                }
             } finally {
-                freePool.add(interpreter)
+                freePool.add(reusableInterpreter)
             }
         }
     }

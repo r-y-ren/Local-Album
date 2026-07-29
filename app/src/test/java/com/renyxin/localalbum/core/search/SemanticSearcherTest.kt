@@ -1,6 +1,7 @@
 package com.renyxin.localalbum.core.search
 
 import com.renyxin.localalbum.core.plugin.capability.builtin.ConceptEmbedProvider
+import java.util.Locale
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
 import kotlinx.coroutines.runBlocking
@@ -175,6 +176,30 @@ class SemanticSearcherTest {
         val stats = searcher.getStats()
         assertEquals(2, stats.totalEmbeddings)
         assertEquals(provider.embeddingDim, stats.embeddingDim)
+    }
+
+    @Test
+    fun `serialize remains parseable when device locale uses comma decimal separator`() {
+        val searcher = newSearcher(FakeEmbeddingDao())
+        val originalLocale = Locale.getDefault()
+        try {
+            Locale.setDefault(Locale.GERMANY)
+            val serialized = searcher.serialize(floatArrayOf(1.25f, -0.5f, 0f))
+            assertEquals("1.250000,-0.500000,0.000000", serialized)
+            assertTrue(searcher.deserialize(serialized).contentEquals(floatArrayOf(1.25f, -0.5f, 0f)))
+        } finally {
+            Locale.setDefault(originalLocale)
+        }
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `deserialize rejects malformed vector instead of silently dropping values`() {
+        newSearcher(FakeEmbeddingDao()).deserialize("0.1,not-a-number,0.3")
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `serialize rejects non finite vector values`() {
+        newSearcher(FakeEmbeddingDao()).serialize(floatArrayOf(0f, Float.NaN))
     }
 
     @Test

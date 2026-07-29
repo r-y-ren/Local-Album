@@ -209,9 +209,48 @@ class HybridIndexer(
             }.awaitAll()
         }
 
+        // 全量枚举仍会对同一路径执行 REPLACE；若直接写入新实体，会清空既有 AI 结果，
+        // 但分析断点可能仍将该文件标为 DONE。对内容未变化的记录保留派生字段，
+        // 对内容变化的记录则在下方失效断点并重新分析。
+        val existingByPath = mediaDao.getAll().associateBy { it.filePath }
+        val entitiesToUpsert = entities.map { fresh ->
+            val existing = existingByPath[fresh.filePath]
+            if (
+                existing != null &&
+                existing.modifiedAtMs == fresh.modifiedAtMs &&
+                existing.fingerprintHead == fresh.fingerprintHead
+            ) {
+                // 直接以非空分支中的 existing 作为智能转换条件，供 Kotlin 正确收窄可空类型。
+                fresh.copy(
+                    isFavorite = existing.isFavorite,
+                    isTrashed = existing.isTrashed,
+                    thumbnailPath = existing.thumbnailPath,
+                    sceneType = existing.sceneType,
+                    perceptualHash = existing.perceptualHash,
+                    ocrText = existing.ocrText,
+                    qualityScore = existing.qualityScore,
+                    deletedAtMs = existing.deletedAtMs,
+                    isCorrupted = existing.isCorrupted,
+                    faceClusterId = existing.faceClusterId,
+                )
+            } else {
+                fresh
+            }
+        }
+        val changedPaths = entitiesToUpsert.asSequence()
+            .filter { entity ->
+                val existing = existingByPath[entity.filePath]
+                existing != null &&
+                    (existing.modifiedAtMs != entity.modifiedAtMs ||
+                        existing.fingerprintHead != entity.fingerprintHead)
+            }
+            .map { it.filePath }
+            .toList()
+        changedPaths.chunked(500).forEach { chunk -> analysisStateDao?.deleteByPaths(chunk) }
+
         // P2-4: 先插入新数据（REPLACE 策略），再删除孤儿记录，避免全量扫描期间 UI 空窗
-        mediaDao.insertAll(entities)
-        val newPaths = entities.map { it.filePath }.toSet()
+        mediaDao.insertAll(entitiesToUpsert)
+        val newPaths = entitiesToUpsert.map { it.filePath }.toSet()
         val orphaned = mediaDao.getAllPaths().toSet() - newPaths
         if (orphaned.isNotEmpty()) {
             // 修复：分块删除，避免 SQLite IN 查询变量数超过 999 限制
@@ -227,11 +266,11 @@ class HybridIndexer(
         }
 
         // 1.1: 重建 FTS 索引（fileName/make/model），OCR 文本由 OCR 阶段后续补充
-        entities.map { it.filePath }.chunked(500).forEach { chunk ->
+        entitiesToUpsert.map { it.filePath }.chunked(500).forEach { chunk ->
             mediaDao.deleteFtsEntries(chunk)
         }
-        mediaDao.insertFtsAll(entities.map {
-            MediaFts(it.filePath, it.fileName, null, it.make, it.model)
+        mediaDao.insertFtsAll(entitiesToUpsert.map {
+            MediaFts(it.filePath, it.fileName, it.ocrText, it.make, it.model)
         })
 
         // === P0-A: 全量扫描完成后异步触发 AI 分析管道 ===
@@ -242,8 +281,8 @@ class HybridIndexer(
         // 视频过滤：AI 识别管道（人脸/场景/OCR/质量/语义）全部基于 BitmapFactory.decodeFile，
         // 仅支持图片解码。视频文件传入后 decodeFile 返回 null，产生无谓的失败计数与日志噪音。
         // 此处仅将图片路径传入分析管道，视频跳过。
-        val allPaths = entities.filter { it.mediaType == MediaType.IMAGE }.map { it.filePath }
-        val skippedVideoCount = entities.size - allPaths.size
+        val allPaths = entitiesToUpsert.filter { it.mediaType == MediaType.IMAGE }.map { it.filePath }
+        val skippedVideoCount = entitiesToUpsert.size - allPaths.size
         if (skippedVideoCount > 0) {
             Log.i(TAG, "全量扫描: 跳过 $skippedVideoCount 个视频文件（AI 识别仅支持图片）")
         }
@@ -273,10 +312,10 @@ class HybridIndexer(
         }
 
         val elapsed = System.currentTimeMillis() - startTime
-        val throughput = if (elapsed > 0) entities.size * 60_000L / elapsed else 0
-        Log.i(TAG, "全量扫描完成: ${entities.size} 个媒体, 耗时 ${elapsed}ms, 吞吐约 $throughput 文件/分钟")
+        val throughput = if (elapsed > 0) entitiesToUpsert.size * 60_000L / elapsed else 0
+        Log.i(TAG, "全量扫描完成: ${entitiesToUpsert.size} 个媒体, 耗时 ${elapsed}ms, 吞吐约 $throughput 文件/分钟")
 
-        entities.size
+        entitiesToUpsert.size
     }
 
     /**

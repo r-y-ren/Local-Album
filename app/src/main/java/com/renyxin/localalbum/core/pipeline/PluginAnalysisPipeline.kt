@@ -1,6 +1,7 @@
 package com.renyxin.localalbum.core.pipeline
 
 import android.util.Log
+import com.renyxin.localalbum.core.concurrent.InferenceMetrics
 import com.renyxin.localalbum.core.plugin.capability.CapabilityRegistryV2
 import com.renyxin.localalbum.core.plugin.capability.FaceProvider
 import com.renyxin.localalbum.core.plugin.capability.SceneProvider
@@ -270,7 +271,11 @@ class PluginAnalysisPipeline(
                 Log.i(TAG, "[${stage.stageId}] 断点续跑：${targetPaths.size} 个文件全部已完成，跳过")
                 StageResult(successCount = 0, failedCount = 0)
             } else {
-                stage.executeEnhanced(pendingPaths) { processed, total, filePath, status ->
+                InferenceMetrics.measure(
+                    operation = "pipeline:stage:${stage.stageId}",
+                    backend = InferenceMetrics.Backend.CPU_DEFAULT,
+                ) {
+                    stage.executeEnhanced(pendingPaths) { processed, total, filePath, status ->
                     // 将 pending 维度的进度映射回 targetPaths 维度，含已跳过文件
                     val overallProcessed = skippedCount + processed
                     _stageProgress.tryEmit(
@@ -291,6 +296,7 @@ class PluginAnalysisPipeline(
                         }
                         progressManager.onFileStatusChange(stage.stageId, filePath, status)
                     }
+                }
                 }
             }
 
@@ -411,6 +417,7 @@ class PluginAnalysisPipeline(
 
         _pipelineResults.value = results.toMap()
         _pipelineStatus.value = Status.COMPLETED
+        InferenceMetrics.logSnapshot("full-scan")
         Log.i(TAG, "全量扫描完成：${results.size} 个阶段")
 
         return results
