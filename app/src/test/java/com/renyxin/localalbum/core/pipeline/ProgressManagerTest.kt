@@ -88,6 +88,52 @@ class ProgressManagerTest {
     }
 
     @Test
+    fun `out of order concurrent progress callbacks never decrease processed files`() {
+        val mgr = ProgressManager()
+        mgr.beginPipeline(totalFiles = 100, stageIds = listOf("a"))
+        mgr.onStageStart("a", "Stage A", 100)
+
+        // 并发工作线程可能先递增 AtomicInteger，再较晚执行回调；模拟 8 先于 3 到达。
+        mgr.onFileProgress(8, 100)
+        mgr.onFileProgress(3, 100)
+
+        val progress = mgr.progress.value
+        assertEquals(8, progress.processedFiles)
+        assertEquals(8f / 100f, progress.percent)
+    }
+
+    @Test
+    fun `out of order file status callback never decreases processed files`() {
+        val mgr = ProgressManager()
+        mgr.beginPipeline(totalFiles = 100, stageIds = listOf("a"))
+        mgr.onStageStart("a", "Stage A", 100)
+        mgr.onFileProgress(8, 100)
+
+        // 尚未收到其余完成状态时，状态快照不能覆盖更高的进度回调值。
+        mgr.onFileStatusChange("a", "file-1", FileProcessingStatus.COMPLETED)
+
+        assertEquals(8, mgr.progress.value.processedFiles)
+    }
+
+    @Test
+    fun `parallel stages aggregate progress without resetting displayed files`() {
+        val mgr = ProgressManager()
+        mgr.beginPipeline(totalFiles = 100, stageIds = listOf("face", "scene"))
+        mgr.onStageStart("face", "Face", 100)
+        mgr.onStageStart("scene", "Scene", 100)
+
+        mgr.onFileProgress("face", 80, 100)
+        assertEquals(40, mgr.progress.value.processedFiles)
+
+        // 场景阶段从 0 开始时，已完成的人脸阶段进度必须仍保留在全局显示中。
+        mgr.onFileProgress("scene", 1, 100)
+        assertEquals(40, mgr.progress.value.processedFiles)
+
+        mgr.onFileProgress("scene", 20, 100)
+        assertEquals(50, mgr.progress.value.processedFiles)
+    }
+
+    @Test
     fun `onStageError sets hasError and preserves extra info`() {
         val mgr = ProgressManager()
         mgr.beginPipeline(totalFiles = 30, stageIds = listOf("a", "b"))

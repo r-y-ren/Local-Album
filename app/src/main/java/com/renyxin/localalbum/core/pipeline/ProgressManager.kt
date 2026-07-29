@@ -117,51 +117,42 @@ class ProgressManager(
      */
     fun onStageStart(stageId: String, displayName: String, totalFilesInStage: Int) = synchronized(lock) {
         currentStageId = stageId
-        ownedStageFilesCompleted[stageId] = 0
+        ownedStageFilesCompleted.putIfAbsent(stageId, 0)
         ownedStageFilesTotal[stageId] = totalFilesInStage
         stageDisplayNames[stageId] = displayName
 
         // 初始化该阶段的 per-file 追踪
-        perFileStatus[stageId] = mutableMapOf()
+        perFileStatus.putIfAbsent(stageId, mutableMapOf())
 
         // P2-BUGFIX: 每阶段重置 ETA 计时基准，避免跨阶段累计导致估算失真
         pipelineStartTimeMs = System.currentTimeMillis()
         lastProcessedFiles = 0
         lastProgressTimeMs = pipelineStartTimeMs
 
-        _progress.value = _progress.value.copy(
-            currentStageName = displayName,
-            processedFiles = 0,
-            percent = (_progress.value.completedStages.toFloat() / ownedStageCount.coerceAtLeast(1)),
-        )
+        // 同一 DAG 层的多个阶段可以并行启动。不能把全局 UI 的已处理数重置为 0，
+        // 否则另一个仍在执行的阶段会使数字在两个局部计数之间来回跳动。
+        publishProgress(currentStageName = displayName)
     }
 
     /**
      * 单文件进度回执。
      *
-     * P2-BUGFIX: 文件计数不跨阶段累加，每阶段独立计数。全局进度基于阶段完成比例。
+     * 必须携带阶段 ID：同一 DAG 层可并发执行多个阶段，不能再依赖可被其他协程覆盖的
+     * [currentStageId]。对 UI 显示的文件数使用所有阶段的加权完成度折算到本次扫描总文件数，
+     * 因而跨阶段与并发阶段均保持单调递增。
      */
-    fun onFileProgress(processed: Int, total: Int) = synchronized(lock) {
-        ownedStageFilesCompleted[currentStageId] = processed
-
-        val fullyCompletedStages = countFullyCompletedStages()
-        val currentTotal = ownedStageFilesTotal[currentStageId] ?: total
-
-        val stageFraction = if (ownedStageCount > 0) {
-            (fullyCompletedStages + (processed.toFloat() / currentTotal.coerceAtLeast(1))) / ownedStageCount
-        } else 0f
-
-        val percent = stageFraction.coerceIn(0f, 1f)
-        val etaMs = estimateEta(processed, currentTotal)
-
-        _progress.value = _progress.value.copy(
-            completedStages = fullyCompletedStages,
-            processedFiles = processed,  // 仅当前阶段计数
-            totalFiles = currentTotal,   // 仅当前阶段总数
-            percent = percent,
-            etaMs = etaMs,
+    fun onFileProgress(stageId: String, processed: Int, total: Int) = synchronized(lock) {
+        val stageTotal = ownedStageFilesTotal[stageId] ?: total
+        val stableProcessed = maxOf(
+            ownedStageFilesCompleted[stageId] ?: 0,
+            processed.coerceIn(0, stageTotal.coerceAtLeast(0)),
         )
+        ownedStageFilesCompleted[stageId] = stableProcessed
+        publishProgress()
     }
+
+    /** 兼容仅串行阶段的既有调用；新管道调用应使用带 [stageId] 的重载。 */
+    fun onFileProgress(processed: Int, total: Int) = onFileProgress(currentStageId, processed, total)
 
     /**
      * 单文件状态变更回执（Phase 6.1 新增）。
@@ -183,17 +174,19 @@ class ProgressManager(
         val stageMap = perFileStatus.getOrPut(stageId) { mutableMapOf() }
         stageMap[filePath] = status
 
-        // P2-BUGFIX: 仅更新当前阶段的完成计数，不跨阶段累加
+        // P2-BUGFIX: 仅更新当前阶段的完成计数，不跨阶段累加。
+        // 状态回调同样可能晚于进度回调到达，不能用较小的状态统计覆盖已上报进度。
         if (status == FileProcessingStatus.COMPLETED || status == FileProcessingStatus.FAILED) {
             val currentCount = stageMap.count {
                 it.value == FileProcessingStatus.COMPLETED || it.value == FileProcessingStatus.FAILED
             }
-            ownedStageFilesCompleted[stageId] = currentCount
+            ownedStageFilesCompleted[stageId] = maxOf(
+                ownedStageFilesCompleted[stageId] ?: 0,
+                currentCount,
+            )
         }
 
-        // 使用当前阶段计数调用 updateProgress
-        val currentProcessed = ownedStageFilesCompleted[stageId] ?: 0
-        updateProgress(processedFiles = currentProcessed)
+        publishProgress()
     }
 
     /**
@@ -211,10 +204,7 @@ class ProgressManager(
             done >= expected
         }
 
-        updateProgress(
-            processedFiles = totalInStage,  // 仅当前阶段计数
-            completedStages = ownedCompletedStages,
-        )
+        publishProgress()
     }
 
     /**
@@ -230,9 +220,7 @@ class ProgressManager(
             done >= expected
         }
 
-        updateProgress(
-            processedFiles = totalInStage,  // 仅当前阶段计数
-            completedStages = ownedCompletedStages,
+        publishProgress(
             hasError = true,
             extra = mapOf("error" to error, "failedStage" to stageId),
         )
@@ -310,45 +298,36 @@ class ProgressManager(
         )
     }
 
-    /**
-     * P2-BUGFIX: 统一进度计算。使用 only the current stage fraction approach。
-     * 不跨阶段累加文件数，避免多阶段导致 processedFiles 超过 totalFiles。
-     */
-    private fun updateProgress(
-        processedFiles: Int,
-        completedStages: Int = _progress.value.completedStages,
+    /** 发布跨阶段聚合进度，避免并行阶段争夺“当前阶段”而覆盖 UI。 */
+    private fun publishProgress(
+        currentStageName: String = _progress.value.currentStageName,
         hasError: Boolean = _progress.value.hasError,
         extra: Map<String, String> = _progress.value.extra,
     ) = synchronized(lock) {
-        val stageFraction = if (ownedStageCount > 0) {
-            completedStages.toFloat() / ownedStageCount
-        } else {
-            0f
+        val completedStages = ownedStageFilesCompleted.count { (stageId, completed) ->
+            completed >= (ownedStageFilesTotal[stageId] ?: ownedTotalFiles)
         }
-        // 当前阶段的文件进度（单阶段占比 / 总阶段数）
-        val fileProgress = if (ownedStageCount > 0) {
-            val currentStageTotal = ownedStageFilesTotal[currentStageId] ?: ownedTotalFiles
-            if (currentStageTotal > 0) {
-                (processedFiles.toFloat() / currentStageTotal) / ownedStageCount
-            } else 0f
+        val aggregateFraction = if (ownedStageCount > 0) {
+            ownedStageFilesCompleted.entries.sumOf { (stageId, completed) ->
+                val total = ownedStageFilesTotal[stageId] ?: ownedTotalFiles
+                if (total > 0) completed.toDouble() / total else 0.0
+            }.toFloat() / ownedStageCount
         } else 0f
-
-        // 全局进度 = 已完成阶段占比 + 当前阶段文件进度
-        val mixedPercent = (stageFraction + fileProgress).coerceIn(0f, 1f)
-
+        val percent = aggregateFraction.coerceIn(0f, 1f)
+        val displayProcessed = (percent * ownedTotalFiles).toInt().coerceIn(0, ownedTotalFiles)
         val currentStageTotal = ownedStageFilesTotal[currentStageId] ?: ownedTotalFiles
-        val etaMs = estimateEta(processedFiles, currentStageTotal)
-        val perStage = buildPerStageFileProgress()
+        val currentStageProcessed = ownedStageFilesCompleted[currentStageId] ?: 0
 
         _progress.value = _progress.value.copy(
+            currentStageName = currentStageName,
             completedStages = completedStages,
-            processedFiles = processedFiles,
-            totalFiles = currentStageTotal,
-            percent = mixedPercent,
-            etaMs = etaMs,
+            processedFiles = displayProcessed,
+            totalFiles = ownedTotalFiles,
+            percent = percent,
+            etaMs = estimateEta(currentStageProcessed, currentStageTotal),
             hasError = hasError,
             extra = extra,
-            perStageFiles = perStage,
+            perStageFiles = buildPerStageFileProgress(),
         )
     }
 

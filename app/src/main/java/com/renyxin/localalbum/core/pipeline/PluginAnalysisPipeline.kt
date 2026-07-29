@@ -266,6 +266,10 @@ class PluginAnalysisPipeline(
             val pendingPaths = if (donePaths.isEmpty()) targetPaths else targetPaths - donePaths
             val skippedCount = targetPaths.size - pendingPaths.size
             val completedPaths = java.util.Collections.synchronizedSet(HashSet<String>())
+            // ParallelFileProcessor 的多个 worker 会并发回调。AtomicInteger 自增顺序与
+            // 回调实际执行顺序不同，直接转发会让 SharedFlow 及通知 UI 收到倒退的数字。
+            val progressLock = Any()
+            var lastOverallProcessed = skippedCount
 
             val stageResult: StageResult = if (pendingPaths.isEmpty()) {
                 // 全部已完成（断点续跑命中），无需推理
@@ -277,27 +281,38 @@ class PluginAnalysisPipeline(
                     backend = InferenceMetrics.Backend.CPU_DEFAULT,
                 ) {
                     stage.executeEnhanced(pendingPaths) { processed, _, filePath, status ->
-                    // 将 pending 维度的进度映射回 targetPaths 维度，含已跳过文件
-                    val overallProcessed = skippedCount + processed
-                    _stageProgress.tryEmit(
-                        StageProgress(
-                            stageId = stage.stageId,
-                            displayName = stage.displayName,
-                            stageIndex = stageIdx,
-                            totalStages = totalStages,
-                            stageStatus = StageProgress.StageStatus.RUNNING,
-                            processedFiles = overallProcessed,
-                            totalFiles = targetPaths.size,
-                        ),
-                    )
-                    progressManager.onFileProgress(overallProcessed, targetPaths.size)
-                    if (filePath != null && status != null) {
-                        if (status == FileProcessingStatus.COMPLETED) {
-                            completedPaths.add(filePath)
+                        // 将 pending 维度的进度映射回 targetPaths 维度，含已跳过文件。
+                        // 同步计算与发布，确保旧回调不会在新回调之后写入较小的进度。
+                        synchronized(progressLock) {
+                            val overallProcessed = maxOf(
+                                lastOverallProcessed,
+                                (skippedCount + processed).coerceIn(0, targetPaths.size),
+                            )
+                            lastOverallProcessed = overallProcessed
+                            _stageProgress.tryEmit(
+                                StageProgress(
+                                    stageId = stage.stageId,
+                                    displayName = stage.displayName,
+                                    stageIndex = stageIdx,
+                                    totalStages = totalStages,
+                                    stageStatus = StageProgress.StageStatus.RUNNING,
+                                    processedFiles = overallProcessed,
+                                    totalFiles = targetPaths.size,
+                                ),
+                            )
+                            progressManager.onFileProgress(
+                                stageId = stage.stageId,
+                                processed = overallProcessed,
+                                total = targetPaths.size,
+                            )
+                            if (filePath != null && status != null) {
+                                if (status == FileProcessingStatus.COMPLETED) {
+                                    completedPaths.add(filePath)
+                                }
+                                progressManager.onFileStatusChange(stage.stageId, filePath, status)
+                            }
                         }
-                        progressManager.onFileStatusChange(stage.stageId, filePath, status)
                     }
-                }
                 }
             }
 

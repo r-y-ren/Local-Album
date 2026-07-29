@@ -540,13 +540,14 @@ class AppContainer(context: Context) {
      */
     private fun startScanProgressNotification() {
         appScope.launch {
-            pluginAnalysisPipeline.stageProgressFlow.collect { progress ->
-                if (progress.stageStatus ==
-                    com.renyxin.localalbum.core.pipeline.StageProgress.StageStatus.RUNNING
-                ) {
+            // 不直接订阅 stageProgressFlow：同一 DAG 层可并行执行多个阶段，其局部计数
+            // （例如 A: 800/1000 与 B: 20/1000）会交替写入同一通知，表现为数字倒退。
+            // 统一使用 ProgressManager 汇聚后的全局计数。
+            pluginAnalysisPipeline.progressManager.progress.collect { progress ->
+                if (!progress.isCompleted && progress.processedFiles > 0) {
                     val text = appContext.getString(
                         com.renyxin.localalbum.R.string.scan_notif_stage,
-                        progress.displayName,
+                        progress.currentStageName.ifEmpty { "正在分析" },
                         progress.processedFiles,
                         progress.totalFiles,
                     )
