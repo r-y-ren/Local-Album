@@ -50,6 +50,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -105,6 +106,11 @@ fun MediaViewerScreen(
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showExifDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
+
+    // 乐观收藏状态覆盖表：点击收藏时即时翻转本地状态，
+    // 无需等待 DB 写入完成即可变色，提供即时视觉反馈。
+    // key = filePath，value = 用户最新点击后的收藏状态。
+    val favoriteOverrides = remember { mutableStateMapOf<String, Boolean>() }
     val hapticFeedback = androidx.compose.ui.platform.LocalHapticFeedback.current
 
     // --- Swipe-to-dismiss state（Google Photos 风格）---
@@ -353,14 +359,20 @@ fun MediaViewerScreen(
                         )
                     }
                     // Favorite button
+                    // 乐观更新：点击后即时翻转本地状态，星标立即变色，
+                    // 无需等待 DB 写入完成。DB 写入在后台异步进行。
+                    val isFavorite = favoriteOverrides[currentItem.filePath] ?: currentItem.isFavorite
                     IconButton(onClick = {
                         hapticFeedback.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                        // 即时翻转本地覆盖状态，触发重组使星标立即变色
+                        favoriteOverrides[currentItem.filePath] = !isFavorite
+                        // 后台异步写入 DB（不阻塞 UI）
                         onToggleFavorite(currentItem.filePath)
                     }) {
                         Icon(
-                            imageVector = if (currentItem.isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
-                            contentDescription = if (currentItem.isFavorite) "取消收藏" else "收藏",
-                            tint = if (currentItem.isFavorite) MaterialTheme.colorScheme.primary else Color.White,
+                            imageVector = if (isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
+                            contentDescription = if (isFavorite) "取消收藏" else "收藏",
+                            tint = if (isFavorite) MaterialTheme.colorScheme.primary else Color.White,
                         )
                     }
                 }
