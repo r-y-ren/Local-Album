@@ -1,363 +1,239 @@
-# LocalAlbum 代码审查报告
+# LocalAlbum 代码审查与整改状态报告
 
-> 审查日期：2026-07-29  
-> 审查范围：Android 配置、媒体索引、Room 数据层、AI 分析调度、插件加载、备份恢复、搜索与后台任务。  
-> 审查方式：静态代码审阅；**未执行构建、单元测试、迁移测试或真机验证**。
-
-## 1. 结论摘要
-
-项目已经具备较完整的本地相册能力：MediaStore 与文件系统混合扫描、分阶段 AI 分析、模型后端回退、Room 持久化、前台服务保活以及插件机制。现有性能报告也表明团队已关注端侧推理稳定性，见 [`plans/optimization-plan.md`](optimization-plan.md)。
-
-建议暂缓将动态插件与备份恢复能力作为默认对外功能，优先处理以下问题：
-
-1. 外部 APK 插件默认可不验签并在宿主进程执行，属于高风险任意代码执行入口。
-2. 全量扫描以 REPLACE 重写媒体行，却没有同步失效分析断点，可能出现数据库 AI 字段已清空、管道却跳过重算的不一致状态。
-3. 覆盖式导入跨多个 DAO 逐步清库和写库，没有全局事务，失败会留下部分恢复或空库。
-4. 语义搜索每次加载并解析全部字符串向量，规模增长后会显著拖慢搜索并造成 GC 和内存压力；向量序列化还依赖默认 Locale，存在部分地区的格式错误。
-
-## 2. 优先级定义
-
-| 级别 | 含义                                                             |
-| ---- | ---------------------------------------------------------------- |
-| P0   | 安全边界、隐私泄露或不可逆数据损失，应在公开发布前修复           |
-| P1   | 常规使用中可见的数据一致性、稳定性或可扩展性问题，应排入近期迭代 |
-| P2   | 性能、可维护性、兼容性和测试完善项，可按产品节奏推进             |
-
-## 3. 发现与整改建议
-
-### P0-1：动态插件的验签是可选的，宿主进程会执行任意导入 APK 的代码
-
-**证据**
-
-- [`PluginLoader.loadInternal()`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:135) 会从应用私有目录枚举 APK，随后通过 [`DexClassLoader`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:245) 和 [`Class.forName()`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:195) 加载并实例化入口类。
-- [`PluginLoader.verifySignature()`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:323) 在 manifest 没有 `authorizedCertificateFingerprint` 时直接返回通过，见 [`PluginLoader.kt`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:324)。
-- 已加载插件可获得宿主 [`AiPlugin`](../app/src/main/java/com/renyxin/localalbum/core/plugin/AiPlugin.kt) API，并与相册数据、模型和进程处于同一信任边界。
-
-**影响**
-
-用户从不可信来源导入 APK 时，攻击者可在宿主应用 UID 内执行代码，读取应用可访问的照片元数据、网络数据和私有文件。manifest 自我声明的指纹不是可信根，不能作为授权依据。
-
-**建议方案**
-
-1. 将生产环境改为**默认拒绝未签名插件**，使用内置信任列表或由服务端签名的插件目录，而不是由插件自身声明允许证书。
-2. 校验签名方案、证书轮换链、插件包哈希、插件 ID 与版本单调性；安装前完成校验，加载前再次校验。
-3. 将实验插件入口只保留在 debug 或明确的开发者模式，UI 显示不可绕过的风险确认。
-4. 长期将第三方推理能力转为受限的模型配置或独立进程/独立应用 IPC，避免加载第三方 dex 到主进程。
-5. 新增篡改 APK、缺失签名、错误签名、旧版本回滚和重复插件 ID 的自动化测试。
+> **更新时间**：2026-07-29
+>
+> **审查范围**：Android 构建、媒体索引、Room 数据、备份恢复、AI 推理、搜索、并发、插件边界、文档与发布流程。
+>
+> **验证状态**：已完成真机 release 构建、签名、R8 压缩与安装；未完成真实 Room 迁移测试、超大媒体库压测和跨设备恢复验证。
 
 ---
 
-### P0-2：备份导入不是原子操作，错误或中断可破坏现有索引
+## 1. 当前结论
 
-**证据**
+项目已具备可发布验证的本地相册主链路：目录媒体扫描、时间线/相册/回收站、图片端侧 AI 分析、关键词与语义搜索、模型管理、前台进度通知，以及 JSON 索引导入导出。
 
-- [`DatabaseImporter.importFromJson()`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseImporter.kt:77) 在解析完成后先调用 [`MediaDao.clearAll()`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/MediaDao.kt:105)、FTS 清理、人脸清理和嵌入清理，见 [`DatabaseImporter.kt`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseImporter.kt:96)。
-- 后续媒体、FTS、人脸、嵌入按 DAO 分批写入；尤其 FTS 逐条调用 [`MediaDao.insertFtsEntry()`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/MediaDao.kt:184)，见 [`DatabaseImporter.kt`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseImporter.kt:106)。
-- DAO 方法的 [`@Transaction`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/MediaDao.kt:93) 仅覆盖单一 DAO 方法，不覆盖上述整个跨表恢复流程。
+本轮已完成先前高优先级的数据一致性与构建告警整改：
 
-**影响**
+- 覆盖式索引导入已由单一 Room 事务保护，并改为批量恢复 FTS。
+- 全量扫描会保留内容未变化媒体的派生 AI 字段；内容变化时会失效分析断点。
+- 语义向量序列化已固定 Locale，并拒绝损坏或非有限数值。
+- PaddleOCR 与 InsightFace 的 ONNX 输出已改为运行时结构校验，移除了未检查的多维数组强制转换。
+- release 构建中原有的 Room、未使用变量、Flow Preview、Compose 动画弃用等 Kotlin 警告已清除。
 
-磁盘满、进程被杀、SQLite 异常或某条脏记录导致后半段失败时，用户原有数据已经被删除，恢复结果可能只包含部分表。逐条 FTS 写入也会使大型备份恢复时间显著增加。
-
-**建议方案**
-
-1. 在 [`AppDatabase`](../app/src/main/java/com/renyxin/localalbum/data/db/AppDatabase.kt:36) 暴露仓储级恢复入口，并用 Room [`withTransaction`](../app/src/main/java/com/renyxin/localalbum/data/db/AppDatabase.kt:255) 包住清理与所有插入。
-2. 导入前做完整预检：格式版本、最大文件大小、数组上限、必填字段、枚举值、重复主键、引用完整性和向量维度。
-3. 使用 [`MediaDao.insertFtsAll()`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/MediaDao.kt:188) 分块批量写入，统一采用 500 或受 SQLite 变量限制保护的批次。
-4. 事务提交成功后才更新 UI/进度；失败时保留原库，返回可读的失败原因。
-5. 为异常注入、重复项、磁盘写失败和大备份建立真实 Room 集成测试，而非仅 Fake DAO 往返测试。
+当前不建议把外部 APK/Dex 动态插件作为正式用户能力开放。该路径仍应保持隐藏，优先完成声明式模型包方案设计与安全边界建设。
 
 ---
 
-### P1-1：全量扫描可能清空 AI 字段，但断点状态使分析阶段跳过重算
+## 2. 已验证的构建结果
 
-**证据**
+在连接的 OnePlus PLC110（Android 16）设备上，已执行：
 
-- [`HybridIndexer.fullScan()`](../app/src/main/java/com/renyxin/localalbum/core/index/HybridIndexer.kt:177) 将新枚举实体通过 [`MediaDao.insertAll()`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/MediaDao.kt:93) 写入；该方法采用 `OnConflictStrategy.REPLACE`，见 [`HybridIndexer.kt`](../app/src/main/java/com/renyxin/localalbum/core/index/HybridIndexer.kt:213)。新实体的 OCR、质量、场景和聚类等字段通常是默认值，实体字段见 [`MediaEntity`](../app/src/main/java/com/renyxin/localalbum/data/db/entity/MediaEntity.kt:23)。
-- 管道会按 [`AnalysisStateDao.getDonePaths()`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/PluginAnalysisPipeline.kt:260) 跳过已完成媒体；但全量扫描路径未调用 [`HybridIndexer.clearAnalysisState()`](../app/src/main/java/com/renyxin/localalbum/core/index/HybridIndexer.kt:59)。
+```bash
+./gradlew installRelease --warning-mode all
+```
 
-**影响**
+结果：**构建、R8、签名、APK 安装均成功**。
 
-用户重新执行全量扫描时，REPLACE 有机会覆盖已有分析结果；之后各阶段命中旧的 DONE 状态而不再处理，从而长期显示空 OCR、无场景、无质量分和不完整的人物数据。
+当前构建输出仅剩一项 Gradle 9 兼容性告警：
 
-**建议方案**
+> `Configuration.fileCollection(Spec)` 已弃用，将在 Gradle 9 移除。
 
-1. 明确全量扫描语义：若为重建索引，则在写入前清理相关分析状态和关联的特征表；若为刷新元数据，则改为字段级 UPSERT，保留分析字段。
-2. 为每个分析状态增加输入版本，例如 `modifiedAtMs`、`fileSize`、指纹、Provider ID、模型版本和预处理版本；状态匹配才允许跳过。
-3. 对删除、更新、Provider 切换、模型升级、全量重建分别定义失效矩阵，并在单元测试中覆盖。
-4. 在 UI 显示全量扫描是仅索引还是索引加重分析，避免用户误判完成度。
+该告警来自构建依赖或插件调用链，不影响当前 APK 的生成、签名和安装；应作为 AGP/第三方构建插件升级专项处理，不能通过盲目替换业务代码消除。
 
 ---
 
-### P1-2：语义搜索采用全量字符串向量扫描，存在规模、内存和区域化正确性问题
+## 3. 已完成整改
 
-**证据**
+### 3.1 P0：覆盖式备份导入改为原子恢复
 
-- [`SemanticSearcher.search()`](../app/src/main/java/com/renyxin/localalbum/core/search/SemanticSearcher.kt:95) 与 [`SemanticSearcher.findSimilar()`](../app/src/main/java/com/renyxin/localalbum/core/search/SemanticSearcher.kt:213) 都通过 [`EmbeddingDao.getAll()`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/EmbeddingDao.kt) 将全部嵌入读入内存。
-- 每个向量再经 [`SemanticSearcher.deserialize()`](../app/src/main/java/com/renyxin/localalbum/core/search/SemanticSearcher.kt:265) 使用 `split`、字符串转换和 `FloatArray` 重建，之后进行全量排序。
-- [`SemanticSearcher.serialize()`](../app/src/main/java/com/renyxin/localalbum/core/search/SemanticSearcher.kt:258) 使用默认 Locale 的 `format`，在小数分隔符为逗号的地区可产生与逗号分隔协议冲突的内容。
+**状态：已完成，待真实数据库故障注入测试。**
 
-**影响**
+[`DatabaseImporter`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseImporter.kt:37) 现在接收真实 [`AppDatabase`](../app/src/main/java/com/renyxin/localalbum/data/db/AppDatabase.kt:36)，并在 [`DatabaseImporter.importFromJson()`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseImporter.kt:86) 中使用 [`withTransaction()`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseImporter.kt:121) 将清理与恢复放在同一事务中。
 
-媒体规模和嵌入维度提高后，搜索延迟与峰值内存线性增长，并触发大量字符串分配与 GC。某些系统语言环境下，保存的向量可能无法按预期解析，导致结果丢失或向量维度错误。
+改进内容：
 
-**建议方案**
+1. 清理媒体、FTS、人脸和嵌入数据与写入数据在同一事务内完成。
+2. FTS 恢复使用 [`MediaDao.insertFtsAll()`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/MediaDao.kt:188) 按 500 条分块写入，替代逐行提交。
+3. [`CancellationException`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseImporter.kt:73) 不再被转换为普通导入失败，避免协程取消语义丢失。
+4. [`AlbumRepository`](../app/src/main/java/com/renyxin/localalbum/data/repo/AlbumRepository.kt:131) 与 [`AppContainer`](../app/src/main/java/com/renyxin/localalbum/AppContainer.kt:511) 已传递真实数据库实例。
 
-1. 短期将格式化固定为 `Locale.US`，为序列化/反序列化增加严格维度校验和损坏向量隔离。
-2. 将向量存为 BLOB 或定长二进制格式，避免文本体积和解析开销；迁移时保留格式版本。
-3. 中期以批量/分页遍历替代一次性加载，并在计算 Top-K 时使用最小堆，避免对全部命中排序。
-4. 长期在端侧引入 ANN 索引或按数据规模设定精确搜索与 ANN 的切换阈值；索引必须和模型版本、归一化规则绑定。
-5. 使用 1 万、5 万、10 万媒体的基准测试记录 P50/P95、峰值内存、耗电和召回一致性。
+**仍需补齐**：真实 SQLite 下的写入失败、进程终止、磁盘空间不足、超大备份与重复主键集成测试。现有 [`DatabaseExporterTest`](../app/src/test/java/com/renyxin/localalbum/data/backup/DatabaseExporterTest.kt:28) 主要使用 Fake DAO，不能证明 SQLite 回滚行为。
 
----
+### 3.2 P1：全量扫描与 AI 断点状态一致性
 
-### P1-3：文件并行器为每个文件创建协程，超大图库下调度开销不受限
+**状态：已完成核心修复，待全链路回归。**
 
-**证据**
+[`HybridIndexer.fullScan()`](../app/src/main/java/com/renyxin/localalbum/core/index/HybridIndexer.kt:177) 在写入前读取现有媒体记录。对内容未变化的文件，会保留收藏、缩略图、OCR、场景、质量、感知哈希、损坏标记与人脸聚类等派生字段，见 [`HybridIndexer`](../app/src/main/java/com/renyxin/localalbum/core/index/HybridIndexer.kt:215)。
 
-[`ParallelFileProcessor.mapParallel()`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/ParallelFileProcessor.kt:63) 对整个 `filePaths` 调用 [`async()`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/ParallelFileProcessor.kt:77)，Semaphore 仅在协程内部限制实际处理数，见 [`ParallelFileProcessor.kt`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/ParallelFileProcessor.kt:73)。
+当修改时间或文件头指纹变化时，代码会删除对应 [`AnalysisStateEntity`](../app/src/main/java/com/renyxin/localalbum/data/db/entity/AnalysisStateEntity.kt) 记录，迫使管道重新分析，见 [`HybridIndexer`](../app/src/main/java/com/renyxin/localalbum/core/index/HybridIndexer.kt:240)。全量 FTS 重建也会保留已有 OCR 文本，见 [`HybridIndexer`](../app/src/main/java/com/renyxin/localalbum/core/index/HybridIndexer.kt:268)。
 
-**影响**
+**仍需补齐**：针对“未变更保留”“变更重跑”“模型版本升级重跑”“Provider 切换重跑”“删除关联数据清理”的自动化回归矩阵。
 
-数万张照片会产生数万个等待协程、结果对象和闭包。即使实际推理并发受限，内存、调度和取消响应仍会恶化；与 Bitmap、ONNX 和 OCR 并存时提升 OOM 风险。
+### 3.3 P1：语义向量的区域化与损坏数据保护
 
-**建议方案**
+**状态：已完成正确性修复，性能扩展性未完成。**
 
-1. 用固定数量 worker 加 `Channel`，或按 100 至 500 个路径分块处理并增量汇总结果。
-2. 不需要保留全部结果的 Stage 改为流式处理，仅维护成功/失败计数与必要输出。
-3. 并发度改为按模型内存、图片尺寸、热状态和后端能力配置，而不是默认等于 CPU 核数。
-4. 对 5 万路径验证取消延迟、峰值 RSS、失败重试及结果顺序约束。
+[`SemanticSearcher.serialize()`](../app/src/main/java/com/renyxin/localalbum/core/search/SemanticSearcher.kt:259) 使用 [`Locale.US`](../app/src/main/java/com/renyxin/localalbum/core/search/SemanticSearcher.kt:263) 固化持久化格式，并拒绝 NaN/Infinity。[`SemanticSearcher.deserialize()`](../app/src/main/java/com/renyxin/localalbum/core/search/SemanticSearcher.kt:272) 会显式拒绝空值、非法浮点数和非有限数值，不再通过静默过滤缩短向量。
 
----
+回归测试已加入 [`SemanticSearcherTest`](../app/src/test/java/com/renyxin/localalbum/core/search/SemanticSearcherTest.kt:16)，覆盖逗号小数分隔 Locale、非法向量项和非有限数值。
 
-### P1-4：推理并发配置在调度器初始化后不会生效，配置 API 容易误导调用方
+### 3.4 P1：ONNX 输出契约校验
 
-**证据**
+**状态：已完成，建议随模型升级补充 golden sample。**
 
-[`InferenceDispatchers.configureConcurrency()`](../app/src/main/java/com/renyxin/localalbum/core/concurrent/InferenceDispatchers.kt:85) 更新 `inferenceConcurrency`，但 [`InferenceDispatchers.cpuBound`](../app/src/main/java/com/renyxin/localalbum/core/concurrent/InferenceDispatchers.kt:57) 是 lazy 创建的固定 `limitedParallelism` dispatcher；源码注释也确认首次访问后不会重建，见 [`InferenceDispatchers.kt`](../app/src/main/java/com/renyxin/localalbum/core/concurrent/InferenceDispatchers.kt:77)。
+- [`PaddleOCRProvider`](../app/src/main/java/com/renyxin/localalbum/core/plugin/capability/builtin/PaddleOCRProvider.kt:28) 现在分别校验检测输出 `[1, 1, H, W]` 与识别输出 `[1, W, C]` 的数组层级和元素类型，见 [`PaddleOCRProvider`](../app/src/main/java/com/renyxin/localalbum/core/plugin/capability/builtin/PaddleOCRProvider.kt:172) 与 [`PaddleOCRProvider`](../app/src/main/java/com/renyxin/localalbum/core/plugin/capability/builtin/PaddleOCRProvider.kt:290)。
+- [`InsightFaceProvider`](../app/src/main/java/com/renyxin/localalbum/core/plugin/capability/builtin/InsightFaceProvider.kt:23) 会校验 ArcFace 输出维度与 SCRFD 的 `[N,C]` 或 `[1,N,C]` 输出，见 [`InsightFaceProvider`](../app/src/main/java/com/renyxin/localalbum/core/plugin/capability/builtin/InsightFaceProvider.kt:343)。
 
-**影响**
+不符合预期的模型输出会安全降级为空结果并记录失败，不会因未检查的数组转换直接触发 Kotlin 类型转换异常。
 
-低内存降级、热保护或用户性能设置即使成功保存，也可能不改变真实并发数。
+### 3.5 P2：构建与代码质量告警治理
 
-**建议方案**
+**状态：已完成低风险清理；AGP/Gradle 升级待专项处理。**
 
-- 将并发控制从固定 dispatcher 移到可更新 Semaphore/调度器工厂，或把 API 限定为启动前配置且返回失败状态。
-- 在诊断页记录请求并发和实际 worker 数，加入初始化前后配置的测试。
+已完成：
 
----
-
-### P2-1：备份承诺跨设备恢复，但备份内容主要是绝对路径且包含高敏感数据
-
-**证据**
-
-- [`DatabaseExporter`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseExporter.kt:20) 的说明将 JSON 用于换设备恢复。
-- 实际导出包含 [`MediaEntity.filePath`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseExporter.kt:140)、OCR 文本、人脸 embedding 和语义 embedding，见 [`DatabaseExporter.kt`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseExporter.kt:180)。
-- 导入会不加路径映射地恢复该字段，见 [`DatabaseImporter.parseMediaItems()`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseImporter.kt:152)。
-
-**影响**
-
-新设备目录不同或媒体未迁移时，导入后会产生大量失效记录；未加密 JSON 泄露照片目录、拍摄位置、OCR 内容、人脸向量及语义特征。
-
-**建议方案**
-
-1. 定义导入策略：仅导入索引、选择源根目录到目标根目录映射、按内容指纹重新关联，并向用户报告匹配/失效数量。
-2. 默认不导出人脸和语义向量，或提供单独的显式隐私选项。
-3. 使用 SAF 输出和加密容器，密钥由用户口令或 Android Keystore 派生；提供完整性校验和恢复前摘要预览。
-4. 在导入后验证媒体存在性，将失效记录隔离而非直接展示为正常媒体。
+- [`MediaDao.getModifiedTimeForPath()`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/MediaDao.kt:113) 已查询 `fingerprintHead`，消除 Room Cursor 投影与 [`PathModifiedTime`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/MediaDao.kt:309) 不一致问题。
+- [`AppContainer.startModelStatusSync()`](../app/src/main/java/com/renyxin/localalbum/AppContainer.kt:357) 已显式标注 [`FlowPreview`](../app/src/main/java/com/renyxin/localalbum/AppContainer.kt:358)，并移除未参与结果计算的状态变量。
+- [`ThumbnailWorker`](../app/src/main/java/com/renyxin/localalbum/data/worker/ThumbnailWorker.kt:52)、[`PluginAnalysisStage`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/PluginAnalysisStage.kt:66)、[`TimelineGrouper`](../app/src/main/java/com/renyxin/localalbum/core/timeline/TimelineGrouper.kt:170) 与各分析 Stage 已清理明确无效的局部变量与参数。
+- [`LocalAlbumApp`](../app/src/main/java/com/renyxin/localalbum/ui/LocalAlbumApp.kt:1378) 已将弃用动画 API 替换为 [`animateItem()`](../app/src/main/java/com/renyxin/localalbum/ui/LocalAlbumApp.kt:1378)。
 
 ---
 
-### P2-2：Android 自动备份与敏感本地索引的隐私策略未定义
+## 4. 当前未解决问题与优先级
 
-**证据**
+### P0-1：外部 APK/Dex 插件仍是高风险代码执行边界
 
-[`AndroidManifest.xml`](../app/src/main/AndroidManifest.xml:26) 将 `android:allowBackup` 设为 `true`。数据库包含位置、OCR、人脸与语义特征，字段定义见 [`MediaEntity`](../app/src/main/java/com/renyxin/localalbum/data/db/entity/MediaEntity.kt:23) 及导出字段见 [`DatabaseExporter`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseExporter.kt:136)。
+**状态：未修复；当前已隐藏，不应对普通用户开放。**
 
-**影响**
+[`PluginLoader.loadInternal()`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:135) 可通过 [`DexClassLoader`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:245) 和反射加载外部 APK。[`PluginLoader.verifySignature()`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:323) 在 manifest 未声明指纹时会通过验证，因此插件自身的 manifest 不是可信根。
 
-在不同 OEM、系统备份或设备传输流程中，敏感索引可能被自动复制。即使系统传输受保护，产品仍应明确用户授权范围和数据最小化策略。
+**风险**：不可信 APK 可在宿主 UID 和进程内执行，访问应用有权访问的媒体索引、模型和私有数据。
 
-**建议方案**
+**决策**：继续保持隐藏；禁止在 README、正式 UI 或发布说明中宣传为可用扩展能力。若未来恢复，应先采用签名声明式模型包或独立进程隔离，详见第 7 节。
 
-- 产品若不需要自动迁移，设置 `allowBackup=false`。
-- 若需要迁移，增加 Android 数据提取规则，只允许必要的设置，排除数据库、缩略图、模型、插件和日志；在隐私声明及 UI 中解释。
-- 将手动加密备份作为唯一可控的数据迁移路径。
+### P1-1：语义搜索仍全量加载与解析字符串嵌入
+
+[`SemanticSearcher.search()`](../app/src/main/java/com/renyxin/localalbum/core/search/SemanticSearcher.kt:95) 和 [`SemanticSearcher.findSimilar()`](../app/src/main/java/com/renyxin/localalbum/core/search/SemanticSearcher.kt:213) 仍通过 [`EmbeddingDao.getAll()`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/EmbeddingDao.kt:30) 一次加载全部嵌入，并逐条 `split` 和排序。
+
+**影响**：图库数量与向量维度增长时，延迟、内存与 GC 压力线性上升。
+
+**建议**：短期采用分批查询与 Top-K 最小堆；中期转为 BLOB 向量；长期按数据规模引入 ANN 索引，并记录模型版本与归一化契约。
+
+### P1-2：文件并行器对超大图库的协程创建数无上限
+
+[`ParallelFileProcessor.mapParallel()`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/ParallelFileProcessor.kt:63) 对所有路径创建 [`async`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/ParallelFileProcessor.kt:77)，Semaphore 仅限制实际推理数量。
+
+**影响**：数万媒体时会积累等待协程、闭包和结果对象；与 Bitmap 和 ONNX 内存占用叠加时可能放大 OOM 风险。
+
+**建议**：改用固定 worker 加 Channel，或 100–500 条分块调度；不需要完整结果的 Stage 应采用流式统计。
+
+### P1-3：运行时推理并发配置没有真正动态生效
+
+[`InferenceDispatchers.configureConcurrency()`](../app/src/main/java/com/renyxin/localalbum/core/concurrent/InferenceDispatchers.kt:85) 更新变量，但 [`InferenceDispatchers.cpuBound`](../app/src/main/java/com/renyxin/localalbum/core/concurrent/InferenceDispatchers.kt:57) 是首次访问后固定的 lazy dispatcher。
+
+**影响**：内存降级、热保护和用户配置可能只改变表面值，未改变实际并行度。
+
+**建议**：以可重设 Semaphore 或 dispatcher 工厂实现真正的运行时控制，或者将 API 明确限制为首次推理前配置。
+
+### P2-1：跨设备恢复仍依赖绝对路径且导出包含敏感特征
+
+[`DatabaseExporter`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseExporter.kt:47) 会导出路径、OCR、人脸与语义数据；[`DatabaseImporter`](../app/src/main/java/com/renyxin/localalbum/data/backup/DatabaseImporter.kt:152) 不做根目录映射或文件存在性重关联。
+
+**建议**：增加根目录映射、内容指纹关联、导入后失效记录隔离、加密容器与人脸/语义特征的显式导出开关。
+
+### P2-2：自动备份与敏感索引的产品策略尚未收敛
+
+[`AndroidManifest.xml`](../app/src/main/AndroidManifest.xml:26) 仍启用 `allowBackup=true`，而数据库可包含位置、OCR、人脸与语义数据。
+
+**建议**：明确产品是否允许系统迁移；若允许，使用数据提取规则排除数据库、缩略图、模型、插件和日志；若不允许，关闭自动备份并仅提供可控的加密手动导出。
+
+### P2-3：Room schema 与迁移测试仍不足
+
+[`AppDatabase`](../app/src/main/java/com/renyxin/localalbum/data/db/AppDatabase.kt:23) 版本为 13 且 `exportSchema=false`。尤其 [`MIGRATION_12_13`](../app/src/main/java/com/renyxin/localalbum/data/db/AppDatabase.kt:179) 会重建 `media_items` 表。
+
+**建议**：开启 schema 导出、提交历史 schema，并使用 `MigrationTestHelper` 覆盖每个升级路径、索引与数据保留。
+
+### P2-4：Gradle 9 与构建 API 迁移待专项治理
+
+[`app/build.gradle.kts`](../app/build.gradle.kts:143) 使用 [`AppExtension`](../app/build.gradle.kts:2) 和内部 APK 输出实现类命名产物。最新构建还显示第三方依赖/插件调用 [`Configuration.fileCollection(Spec)`](../build.gradle.kts:7)，该 API 将在 Gradle 9 移除。
+
+**建议**：将 APK 输出命名迁移到 Android Components 公共 Variant API；建立 AGP、Kotlin、Gradle 和第三方插件升级矩阵后再升级到 Gradle 9。不要在发布窗口直接替换构建插件。
 
 ---
 
-### P2-3：数据库迁移未导出 schema，且现有测试未覆盖真实迁移
+## 5. 当前积极实践
 
-**证据**
-
-[`AppDatabase`](../app/src/main/java/com/renyxin/localalbum/data/db/AppDatabase.kt:23) 当前版本为 13，且 `exportSchema = false`，见 [`AppDatabase.kt`](../app/src/main/java/com/renyxin/localalbum/data/db/AppDatabase.kt:33)。迁移 12 到 13 会重建 `media_items`，见 [`AppDatabase.kt`](../app/src/main/java/com/renyxin/localalbum/data/db/AppDatabase.kt:179)。当前备份测试采用 Fake DAO，见 [`DatabaseExporterTest`](../app/src/test/java/com/renyxin/localalbum/data/backup/DatabaseExporterTest.kt:32)，不能验证 SQLite schema、索引或迁移数据保留。
-
-**建议方案**
-
-1. 开启 schema 导出并提交历史 schema JSON。
-2. 为每条迁移建立 `MigrationTestHelper` Android instrumentation 测试，校验表结构、索引、历史数据、FTS 和关联特征数据。
-3. 对重建表迁移加入升级前后行数、关键字段和索引存在性的断言。
+- [`PluginAnalysisPipeline`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/PluginAnalysisPipeline.kt:397) 使用分层 DAG 与 [`supervisorScope`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/PluginAnalysisPipeline.kt:404)，避免独立 Stage 失败级联取消。
+- [`ParallelFileProcessor`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/ParallelFileProcessor.kt:99) 会重新抛出取消异常，避免将用户取消误报为文件失败。
+- [`HybridIndexer`](../app/src/main/java/com/renyxin/localalbum/core/index/HybridIndexer.kt:255) 对 SQLite `IN` 查询分块，并同步清理 FTS、人脸、嵌入与分析状态孤儿数据。
+- [`LocalAlbumApplication`](../app/src/main/java/com/renyxin/localalbum/LocalAlbumApplication.kt:77) 不会在所有 Activity 停止时销毁进程级容器，避免回前台后后台链路永久失效。
+- [`ScanWorker`](../app/src/main/java/com/renyxin/localalbum/data/worker/ScanWorker.kt:44) 正确区分协程取消与可重试错误。
+- [`README.md`](../README.md) 、[`CONTRIBUTING.md`](../CONTRIBUTING.md) 和 [`SECURITY.md`](../SECURITY.md) 已更新为当前实现边界，并明确隐藏实验插件不是正式用户功能。
 
 ---
 
-### P2-4：构建脚本依赖 Android Gradle Plugin 内部 API，影响升级稳定性
-
-**证据**
-
-[`app/build.gradle.kts`](../app/build.gradle.kts:1) 导入 [`AppExtension`](../app/build.gradle.kts:2)，APK 命名通过内部类型 `ApkVariantOutputImpl` 强制转换，见 [`app/build.gradle.kts`](../app/build.gradle.kts:143)。
-
-**建议方案**
-
-迁移到 Android Components 公共 Variant API 完成输出命名，并在 CI 固定执行 debug/release 构建、lint 与单元测试。该项应与 AGP/Kotlin 升级单独提交，避免和业务改动耦合。
-
-## 4. 已观察到的积极实践
-
-- [`PluginAnalysisPipeline`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/PluginAnalysisPipeline.kt:397) 使用分层 DAG 和 [`supervisorScope`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/PluginAnalysisPipeline.kt:404)，避免同层独立 Stage 的失败级联。
-- [`ParallelFileProcessor`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/ParallelFileProcessor.kt:99) 会重新抛出取消异常，避免把用户取消误报为任务失败。
-- [`HybridIndexer`](../app/src/main/java/com/renyxin/localalbum/core/index/HybridIndexer.kt:217) 对 SQLite `IN` 参数按批次处理，并同步清理 FTS、人脸和嵌入孤儿记录。
-- [`LocalAlbumApplication`](../app/src/main/java/com/renyxin/localalbum/LocalAlbumApplication.kt:77) 已纠正所有 Activity 停止时错误关闭整个容器的问题，保留进程级资源生命周期。
-- [`ScanWorker`](../app/src/main/java/com/renyxin/localalbum/data/worker/ScanWorker.kt:44) 正确区分 `CancellationException` 与可重试错误。
-
-## 5. 建议实施顺序与验收
+## 6. 后续实施顺序与发布门禁
 
 ```mermaid
 flowchart TD
-    A[P0 插件信任边界] --> B[P0 原子导入]
-    B --> C[P1 扫描与分析状态一致性]
-    C --> D[P1 有界并发和可配置调度]
-    D --> E[P1 语义向量存储和检索]
-    E --> F[P2 备份隐私和路径映射]
-    F --> G[P2 迁移与发布自动化]
+    A[隐藏外部 APK 插件] --> B[真实 Room 迁移与导入故障测试]
+    B --> C[大图库有界调度]
+    C --> D[语义检索 BLOB 与 Top-K 优化]
+    D --> E[加密备份与跨设备路径映射]
+    E --> F[Gradle 9 / AGP 升级专项]
 ```
 
-1. **安全和数据安全**：收紧插件信任策略；实现事务化导入及导入前预检；为原库保留、失败回滚和恶意插件建立回归测试。
-2. **一致性**：定义扫描重建与增量刷新语义，修复分析状态失效；以真实 Room 数据库验证全量扫描后各 AI 字段和状态一致。
-3. **性能与稳定性**：将文件调度改为有界 worker；修复并发配置语义；测量大图库扫描内存、取消和热稳定性。
-4. **搜索可扩展性**：先修 Locale/向量格式和 Top-K 算法，再设计 BLOB 与 ANN 迁移方案；保留旧数据兼容与可回滚路径。
-5. **发布工程化**：限制自动备份，补充加密备份设计、真实迁移测试和 CI 发布门禁。
+### 近期
 
-## 6. 建议的发布门禁
+1. 为导入事务、扫描状态失效和 ONNX 输出契约加入真实数据库及 golden sample 测试。
+2. 使用 1 万、5 万媒体样本测试 [`ParallelFileProcessor`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/ParallelFileProcessor.kt:63) 的峰值内存、取消延迟和吞吐。
+3. 明确自动备份与手动导出的隐私策略。
 
-- Debug 与 release 构建、lint、单元测试、Room 迁移 instrumentation 测试全部通过。
-- 插件：无签名、篡改、错误证书和回滚插件全部被拒绝。
-- 导入：解析失败、写入失败和进程中断后，原数据库可完整读取；成功导入后各表计数和引用一致。
-- 扫描：全量、增量、模型升级和 Provider 切换后，分析状态与媒体 AI 字段一致。
-- 性能：以目标设备和大图库样本记录扫描/搜索 P50、P95、峰值内存、温度和失败率。
-- 隐私：自动备份规则、手动备份加密、导入权限和用户告知均经过产品及安全评审。
+### 中期
+
+1. 重构语义向量存储与 Top-K 计算，控制大图库检索内存。
+2. 建立跨设备导入映射、失效路径隔离和可选加密备份。
+3. 导出 Room schema 并添加迁移 instrumentation 测试。
+
+### 发布门禁
+
+- [`./gradlew installRelease --warning-mode all`](../gradlew) 通过，且目标真机完成安装与基础启动验证。
+- 全量扫描、增量扫描、模型升级、Provider 切换后，AI 字段与分析状态一致。
+- 导入发生解析失败、写入失败或协程取消时，原数据库保持可用。
+- OCR、人脸和语义模型以固定 golden sample 验证输出结构与结果容差。
+- 插件路径保持隐藏；在安全架构获批前，不接受外部 APK/Dex 作为正式扩展输入。
+
+---
 
 ## 7. 动态插件可行性分析与保留建议
 
 ### 7.1 结论
 
-**可以实现，但不建议保留当前的外部 APK 动态代码插件方案作为面向普通用户的产品能力。**
+**不同模型的参数差异完全可以支持，但不应以“外部 APK 在宿主进程执行代码”作为主要实现方式。**
 
-你的真实需求是让不同模型以不同参数运行，而不是让第三方在宿主进程执行任意 Kotlin/Java 代码。对这一需求，更合适、风险显著更低的实现是：**受宿主控制的声明式模型包**。
+更合适的演进路线是**受宿主控制的声明式模型包**：用户导入模型、标签、tokenizer、manifest 和校验信息；宿主根据白名单 `adapterId` 执行固定的预处理、推理和后处理。模型包不包含 dex、native so 或可执行脚本。
 
-也就是说，保留模型导入、模型参数配置、运行时选择和结果持久化；移除或持续隐藏 [`PluginLoader`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:40) 的 APK/Dex 动态加载路径。模型包只包含模型、标签、tokenizer、manifest 和可校验的资源，所有预处理、推理和后处理均由宿主的受限适配器执行。
+现有基础可复用：[`PluginManifest`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginManifest.kt:31)、[`PluginJsonCodec`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginJsonCodec.kt:17)、[`TensorMetadataParser`](../app/src/main/java/com/renyxin/localalbum/core/plugin/TensorMetadataParser.kt)、[`ModelManagerImpl`](../app/src/main/java/com/renyxin/localalbum/core/plugin/model/ModelManagerImpl.kt:44)、[`CapabilityRegistryV2`](../app/src/main/java/com/renyxin/localalbum/core/plugin/capability/CapabilityRegistryV2.kt:1) 和 [`FeatureSchema`](../app/src/main/java/com/renyxin/localalbum/core/plugin/FeatureSchema.kt:17)。
 
-现有代码已经具备可复用基础：
+### 7.2 建议的模型包契约
 
-- [`PluginManifest`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginManifest.kt:31) 已描述模型格式、张量、预处理及后处理。
-- [`PluginJsonCodec`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginJsonCodec.kt:17) 已提供 JSON 编解码和基础校验。
-- [`TensorMetadataParser`](../app/src/main/java/com/renyxin/localalbum/core/plugin/TensorMetadataParser.kt) 可用于自动探测部分模型张量元信息。
-- [`ModelManagerImpl`](../app/src/main/java/com/renyxin/localalbum/core/plugin/model/ModelManagerImpl.kt:44) 已集中管理部分模型加载与对象池。
-- [`CapabilityRegistryV2`](../app/src/main/java/com/renyxin/localalbum/core/plugin/capability/CapabilityRegistryV2.kt:1) 及 [`PluginAnalysisPipeline.create()`](../app/src/main/java/com/renyxin/localalbum/core/pipeline/PluginAnalysisPipeline.kt:69) 已支持由能力槽位组装分析阶段。
-- [`FeatureSchema`](../app/src/main/java/com/renyxin/localalbum/core/plugin/FeatureSchema.kt:17) 和 [`FeatureStoreEntity`](../app/src/main/java/com/renyxin/localalbum/data/db/entity/FeatureStoreEntity.kt) 可承接未被核心业务消费的通用输出。
+| 配置域     | 关键字段                                                                                | 用途                                          |
+| ---------- | --------------------------------------------------------------------------------------- | --------------------------------------------- |
+| 身份与安全 | packageId、version、publisher、sha256、signature、minimumAppVersion                     | 可信来源、升级与回滚控制                      |
+| 运行时     | format、runtime、inputBindings、outputBindings、delegatePolicy                          | 选择 ONNX/TFLite 与回退策略                   |
+| 适配器     | adapterId、adapterVersion                                                               | 仅选择宿主内置的分类、CLIP、检测或 OCR 解码器 |
+| 预处理     | resizeMode、interpolation、cropMode、colorOrder、layout、dtype、quantization、normalize | 完整描述输入变换                              |
+| 后处理     | decoderId、activation、labelOffset、threshold、nms、boxFormat                           | 复用经过测试的宿主解析器                      |
+| 资源       | labels、vocabulary、merges、tokenizer、auxiliaryModels                                  | 绑定附属文件及其哈希                          |
+| 输出       | featureSchema、resultType、modelVersion                                                 | 持久化与缓存失效                              |
 
-因此，这不是从零设计，而是一次将 API 从代码扩展插件收敛为数据驱动模型适配器的架构调整。
+### 7.3 决策建议
 
-### 7.2 当前方案为何难以解决参数差异
+| 方案                        | 参数灵活性 | 安全性 | 建议                   |
+| --------------------------- | ---------- | ------ | ---------------------- |
+| 保持隐藏或删除 APK/Dex 加载 | 低         | 高     | 适合只维护内置模型     |
+| 恢复 APK/Dex 动态插件       | 最高       | 低     | 不建议面向普通用户开放 |
+| 声明式模型包 + 内置适配器   | 高         | 高     | **推荐**               |
+| 仅允许替换既有模型族权重    | 中等       | 很高   | 适合作为第一阶段       |
 
-[`PluginManifest.PreprocessingConfig`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginManifest.kt:127) 当前只覆盖 resize、均值/方差、颜色通道和正方形裁剪；[`PluginManifest.PostprocessingConfig`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginManifest.kt:144) 只覆盖阈值、NMS、标签和 Top-K。这些字段不足以准确表达真实模型的全部契约，例如：
-
-| 模型类别     | 常见额外差异                                                         | 仅靠现有 manifest 是否足够 |
-| ------------ | -------------------------------------------------------------------- | -------------------------- |
-| 图像分类     | resize 算法、中心裁剪、通道顺序、量化、输出激活、label 偏移          | 部分不足                   |
-| 图像语义向量 | 图像归一化、tokenizer、文本 prompt 模板、L2 归一化、图文双编码器配对 | 不足                       |
-| 人脸检测     | anchor、stride、decode 公式、landmark 顺序、多输出张量和 NMS 规则    | 不足                       |
-| OCR          | 检测框解码、旋转校正、候选框限流、字符字典、CTC/attention 解码       | 不足                       |
-| 分割或生成   | 多输入、mask 后处理、调度器、随机种子、输出合成方式                  | 明显不足                   |
-
-直接允许每个模型提供 APK 代码，确实能覆盖这些差异，但同时把模型兼容问题转化为安全、崩溃隔离、ABI、依赖冲突、版本兼容和审计问题。这也是当前方案被隐藏后仍不宜直接恢复的根因。
-
-### 7.3 推荐目标架构：声明式模型包加有限适配器
-
-```mermaid
-flowchart LR
-    A[用户导入模型包] --> B[校验哈希和签名]
-    B --> C[解析模型清单]
-    C --> D[选择宿主适配器]
-    D --> E[受控预处理]
-    E --> F[TFLite 或 ONNX 运行时]
-    F --> G[受控后处理]
-    G --> H[核心表或通用特征库]
-```
-
-模型包建议为 ZIP 或应用私有目录中的受控文件集合，不包含 dex、native so 或可执行脚本：
-
-```text
-package.json
-model.onnx 或 model.tflite
-labels.txt
-vocab.json 或 tokenizer.json
-checksums.json
-```
-
-其中 `package.json` 不应再使用含有 `entryClass` 的 [`PluginManifest`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginManifest.kt:39) 原样结构，而应新增或演进为 `ModelPackageManifest`：
-
-| 配置域     | 建议字段                                                                                | 目的                                                                                                           |
-| ---------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| 身份与安全 | packageId、version、publisher、sha256、signature、minimumAppVersion                     | 建立可信模型来源与升级/回滚策略                                                                                |
-| 运行时     | format、runtime、inputBindings、outputBindings、delegatePolicy                          | 让宿主可选择 ONNX 或 TFLite 和回退策略                                                                         |
-| 适配器     | adapterId、adapterVersion                                                               | 限定为宿主内置白名单，例如 image_classification_v1、clip_embedding_v1、yolo_detection_v1、paddle_ocr_v1        |
-| 预处理     | resizeMode、interpolation、cropMode、colorOrder、layout、dtype、quantization、normalize | 完整描述通用输入变换                                                                                           |
-| 后处理     | decoderId、activation、labelOffset、threshold、nms、boxFormat、normalization            | 复用可测试的宿主解码器                                                                                         |
-| 资源绑定   | labels、vocabulary、merges、tokenizer、auxiliaryModels                                  | 明确附属文件及校验                                                                                             |
-| 输出契约   | featureSchema、resultType、modelVersion                                                 | 驱动 [`FeatureSchema`](../app/src/main/java/com/renyxin/localalbum/core/plugin/FeatureSchema.kt:17) 和缓存失效 |
-| 能力声明   | capabilitySlot、batchSupport、maxInputPixels、estimatedMemory                           | 防止不兼容模型进入错误的管道槽位                                                                               |
-
-关键原则是：模型包只能选择经过应用发布和测试的 `adapterId` 与 `decoderId`，不能注入表达式、反射类名、脚本或任意类名。这样仍可通过版本化适配器覆盖新的模型家族，同时保持推理路径可审计。
-
-### 7.4 产品选择对比
-
-| 方案                            | 模型参数灵活性       | 安全性               | 维护成本 | 推荐程度             |
-| ------------------------------- | -------------------- | -------------------- | -------- | -------------------- |
-| 继续隐藏并最终删除 APK 动态插件 | 无新增能力           | 高                   | 低       | 适合只维护内置模型   |
-| 恢复 APK/Dex 动态插件           | 最高                 | 很低，需要高成本隔离 | 很高     | 不建议面向用户开放   |
-| 声明式模型包加内置适配器        | 高，覆盖主流模型家族 | 高                   | 中等     | **推荐**             |
-| 仅允许用户替换同一模型族的权重  | 中等                 | 很高                 | 低       | 适合第一阶段快速落地 |
-
-### 7.5 分阶段可行路径
-
-1. **第一阶段：模型替换，不开放任意任务**
-   - 仅允许在现有 `scene`、`semantic`、`ocr`、`face` 槽位中替换预定义模型族的权重。
-   - 以 [`CapabilityRegistryV2`](../app/src/main/java/com/renyxin/localalbum/core/plugin/capability/CapabilityRegistryV2.kt:1) 的 Provider 为宿主适配器，导入的仅是受校验的模型资源和参数。
-   - UI 复用 [`ModelImportWizardScreen`](../app/src/main/java/com/renyxin/localalbum/ui/screens/ModelImportWizardScreen.kt) 与 [`ModelJsonEditorScreen`](../app/src/main/java/com/renyxin/localalbum/ui/screens/ModelJsonEditorScreen.kt:61)，但编辑器只暴露白名单字段和枚举选项。
-
-2. **第二阶段：通用视觉模型包**
-   - 增加分类、单向 embedding 和标准检测三个稳定适配器。
-   - 通过模型探测预填张量 shape，再以测试图片验证输入输出和后处理；不允许只凭 JSON 校验即启用。
-   - 非核心能力的输出写入 [`FeatureStoreDao`](../app/src/main/java/com/renyxin/localalbum/data/db/dao/FeatureStoreDao.kt)，核心能力必须通过专属适配器和质量门禁才可接入主界面。
-
-3. **第三阶段：受控发行与兼容矩阵**
-   - 建立签名模型源、兼容设备、模型哈希、适配器版本和基准结果的目录。
-   - 对每个模型包完成正确性样本、内存上限、取消、异常回退和端侧性能测试后才可推荐给用户。
-
-4. **不建议纳入近期范围**
-   - 任意 APK/Dex、原生库、Python 脚本、可执行图后处理。
-   - 任意未知 OCR、人脸检测、生成式工作流直接接入批量扫描。这些工作负载需要专用解码器和更严格的资源隔离。
-
-### 7.6 保留或移除的决策建议
-
-- 如果目标是个人本地相册、主要服务内置模型：**移除 APK 动态加载代码，保留模型包导入能力**。这会明显减少攻击面和维护成本。
-- 如果目标是可扩展的模型实验平台：**保留插件领域模型、清单、通用特征库和能力槽位；弃用 APK 插件加载器，转向签名声明式模型包**。
-- 只有在你愿意维护第三方开发者生态、插件签名基础设施、进程隔离、兼容性测试矩阵和安全响应机制时，才考虑恢复 APK 级动态插件；即使如此，也应以独立进程服务为前提，而不是 [`DexClassLoader`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:253) 直接加载到主进程。
-
-### 7.7 决策前验证清单
-
-1. 选定首批明确支持的模型族和用户场景，不以所有 ONNX/TFLite 模型可导入作为承诺。
-2. 为每个模型族完成一份 manifest 示例、输入输出 golden sample 和错误提示规范。
-3. 制定模型包安全策略：来源、哈希、签名、最大文件大小、最大张量维度和最大内存。
-4. 定义导入失败后无副作用的事务语义，避免覆盖当前已可用 Provider。
-5. 在至少一台中端和一台目标高端设备验证加载、推理、热稳定性、取消和 CPU 回退。
-6. 在完成上述验证前，继续保持 APK 动态插件入口隐藏或移除。
+在完成签名来源、哈希校验、导入事务、兼容矩阵、golden sample、内存上限、取消回退和多设备性能验证之前，继续保持 [`PluginLoader`](../app/src/main/java/com/renyxin/localalbum/core/plugin/PluginLoader.kt:40) 的 APK/Dex 路径隐藏。
