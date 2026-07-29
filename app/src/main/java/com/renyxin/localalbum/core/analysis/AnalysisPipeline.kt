@@ -40,6 +40,33 @@ class AnalysisPipeline(
         private const val FACE_BATCH_SIZE = 16
         /** 语义嵌入批次大小（图像采样较重，减小批次） */
         private const val EMBEDDING_BATCH_SIZE = 16
+
+        /**
+         * 视频文件扩展名集合。AI 识别管道基于 BitmapFactory.decodeFile，
+         * 仅支持图片解码，视频文件需在入口处过滤掉。
+         */
+        private val VIDEO_EXTENSIONS = setOf(
+            "mp4", "mkv", "mov", "avi", "webm", "3gp", "m4v", "flv", "ts",
+        )
+
+        /**
+         * 防御性过滤：排除视频文件，仅保留图片路径。
+         *
+         * 上游调用方（HybridIndexer / AlbumRepository）已通过 mediaType 过滤，
+         * 此方法作为最后一道防线，确保即使有视频路径漏入也不会触发无效的图片解码。
+         */
+        fun filterImageOnly(filePaths: List<String>): List<String> {
+            if (filePaths.isEmpty()) return filePaths
+            val filtered = filePaths.filter { path ->
+                val ext = path.substringAfterLast('.', "").lowercase()
+                ext !in VIDEO_EXTENSIONS
+            }
+            val skipped = filePaths.size - filtered.size
+            if (skipped > 0) {
+                Log.i(TAG, "过滤视频文件: 跳过 $skipped 个（共 ${filePaths.size} 个）")
+            }
+            return filtered
+        }
     }
 
     private val qualityAnalyzer = QualityAnalyzer()
@@ -77,11 +104,15 @@ class AnalysisPipeline(
     ): AnalysisResult = withContext(Dispatchers.IO) {
         if (filePaths.isEmpty()) return@withContext AnalysisResult()
 
-        Log.i(TAG, "开始分析管道: ${filePaths.size} 个文件")
+        // 防御性过滤：排除视频文件（AI 识别仅支持图片）
+        val imagePaths = filterImageOnly(filePaths)
+        if (imagePaths.isEmpty()) return@withContext AnalysisResult()
+
+        Log.i(TAG, "开始分析管道: ${imagePaths.size} 个文件")
         val startTime = System.currentTimeMillis()
 
         val result = AnalysisResult()
-        val batches = filePaths.chunked(BATCH_SIZE)
+        val batches = imagePaths.chunked(BATCH_SIZE)
         var failedCount = 0
 
         for ((batchIndex, batch) in batches.withIndex()) {
@@ -114,7 +145,7 @@ class AnalysisPipeline(
         // 所有批次完成后运行人脸检测 + 聚类（Phase 3.3）
         if (faceDetector != null && faceDao != null) {
             try {
-                analyzeFaces(filePaths)
+                analyzeFaces(imagePaths)
             } catch (e: Exception) {
                 Log.w(TAG, "人脸检测/聚类失败: ${e.message}", e)
             }
@@ -123,14 +154,14 @@ class AnalysisPipeline(
         // 所有批次完成后运行语义嵌入生成（Phase 4.1）
         if (semanticEmbedder != null && embeddingDao != null) {
             try {
-                analyzeSemanticEmbeddings(filePaths)
+                analyzeSemanticEmbeddings(imagePaths)
             } catch (e: Exception) {
                 Log.w(TAG, "语义嵌入生成失败: ${e.message}", e)
             }
         }
 
         val elapsed = System.currentTimeMillis() - startTime
-        Log.i(TAG, "分析管道完成: ${filePaths.size} 个文件, 失败 $failedCount, 耗时 ${elapsed}ms")
+        Log.i(TAG, "分析管道完成: ${imagePaths.size} 个文件, 失败 $failedCount, 耗时 ${elapsed}ms")
 
         result
     }
@@ -153,15 +184,19 @@ class AnalysisPipeline(
         }
         val dao = faceDao!!
 
-        Log.i(TAG, "开始人脸检测: ${filePaths.size} 个文件")
+        // 防御性过滤：排除视频文件
+        val imagePaths = filterImageOnly(filePaths)
+        if (imagePaths.isEmpty()) return@withContext FaceAnalysisResult()
+
+        Log.i(TAG, "开始人脸检测: ${imagePaths.size} 个文件")
         val faceStartTime = System.currentTimeMillis()
 
         // 1. 清除旧的人脸记录（这些文件可能重新检测）
-        dao.deleteByFilePaths(filePaths)
+        dao.deleteByFilePaths(imagePaths)
 
         // 2. 分批检测人脸
         val allFaceEntities = mutableListOf<FaceEntity>()
-        val batches = filePaths.chunked(FACE_BATCH_SIZE)
+        val batches = imagePaths.chunked(FACE_BATCH_SIZE)
 
         for ((batchIdx, batch) in batches.withIndex()) {
             Log.v(TAG, "人脸检测批次 ${batchIdx + 1}/${batches.size} (${batch.size} 个文件)")
@@ -269,17 +304,21 @@ class AnalysisPipeline(
             }
             val dao = embeddingDao!!
 
-            Log.i(TAG, "开始语义嵌入生成: ${filePaths.size} 个文件")
+            // 防御性过滤：排除视频文件
+            val imagePaths = filterImageOnly(filePaths)
+            if (imagePaths.isEmpty()) return@withContext SemanticAnalysisResult()
+
+            Log.i(TAG, "开始语义嵌入生成: ${imagePaths.size} 个文件")
             val embStartTime = System.currentTimeMillis()
 
             // 1. 清除旧嵌入
-            dao.deleteByFilePaths(filePaths)
+            dao.deleteByFilePaths(imagePaths)
 
             // 2. 分批生成嵌入
             val embeddings = mutableListOf<MediaEmbedding>()
             var successCount = 0
             var failedCount = 0
-            val batches = filePaths.chunked(EMBEDDING_BATCH_SIZE)
+            val batches = imagePaths.chunked(EMBEDDING_BATCH_SIZE)
 
             for ((batchIdx, batch) in batches.withIndex()) {
                 Log.v(TAG, "语义嵌入批次 ${batchIdx + 1}/${batches.size} (${batch.size} 个文件)")

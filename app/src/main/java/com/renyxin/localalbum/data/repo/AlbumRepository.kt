@@ -400,9 +400,11 @@ class AlbumRepository(
     suspend fun forceReanalyzeAll() = withContext(Dispatchers.IO) {
         // 修复：与 rescan 共用 scanMutex 串行化，避免并发分析造成数据竞态
         scanMutex.withLock {
-        val allPaths = mediaDao.getAllPaths()
+        // 视频过滤：AI 识别管道仅支持图片，使用 getImagePaths() 排除视频文件，
+        // 避免视频传入后 BitmapFactory.decodeFile 返回 null 产生无谓失败计数与日志噪音。
+        val allPaths = mediaDao.getImagePaths()
         if (allPaths.isEmpty()) {
-            Log.i(TAG, "forceReanalyzeAll: 无媒体文件，跳过")
+            Log.i(TAG, "forceReanalyzeAll: 无图片文件，跳过")
             return@withLock
         }
 
@@ -447,7 +449,8 @@ class AlbumRepository(
             AnalysisResumePrefs.setPending(ctx, false)
             return@withContext
         }
-        val allPaths = mediaDao.getAllPaths()
+        // 视频过滤：AI 识别管道仅支持图片，使用 getImagePaths() 排除视频文件。
+        val allPaths = mediaDao.getImagePaths()
         if (allPaths.isEmpty()) {
             AnalysisResumePrefs.setPending(ctx, false)
             return@withContext

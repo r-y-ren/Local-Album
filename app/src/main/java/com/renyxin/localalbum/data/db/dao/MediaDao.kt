@@ -116,6 +116,16 @@ interface MediaDao {
     @Query("SELECT filePath FROM media_items")
     suspend fun getAllPaths(): List<String>
 
+    /**
+     * 查询所有图片类型（非视频）的文件路径。
+     *
+     * AI 识别管道（人脸/场景/OCR/质量/语义）全部基于 [android.graphics.BitmapFactory.decodeFile]，
+     * 仅支持图片解码，对视频文件必然返回 null 并产生无谓的失败计数与日志噪音。
+     * 此方法供分析管道入口过滤视频文件使用。
+     */
+    @Query("SELECT filePath FROM media_items WHERE mediaType = 'IMAGE'")
+    suspend fun getImagePaths(): List<String>
+
     // ---- 时间线查询 (v2) ----
     @Query("SELECT * FROM media_items WHERE isTrashed = 0 ORDER BY capturedAtMs DESC")
     suspend fun getAllTimelineItems(): List<MediaEntity>

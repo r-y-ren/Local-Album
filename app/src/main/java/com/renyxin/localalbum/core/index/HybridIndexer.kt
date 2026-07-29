@@ -238,7 +238,15 @@ class HybridIndexer(
         // 修复：原实现同步调用 runFullScan，对所有文件串行执行 5 个 AI 阶段（每阶段内 for 循环串行），
         // 导致扫描「完成」要等 AI 分析跑完才返回，UI 长时间显示扫描中。
         // 现改为 fire-and-forget：扫描入库后立即返回，AI 分析在后台协程执行，不阻塞扫描状态。
-        val allPaths = entities.map { it.filePath }
+        //
+        // 视频过滤：AI 识别管道（人脸/场景/OCR/质量/语义）全部基于 BitmapFactory.decodeFile，
+        // 仅支持图片解码。视频文件传入后 decodeFile 返回 null，产生无谓的失败计数与日志噪音。
+        // 此处仅将图片路径传入分析管道，视频跳过。
+        val allPaths = entities.filter { it.mediaType == MediaType.IMAGE }.map { it.filePath }
+        val skippedVideoCount = entities.size - allPaths.size
+        if (skippedVideoCount > 0) {
+            Log.i(TAG, "全量扫描: 跳过 $skippedVideoCount 个视频文件（AI 识别仅支持图片）")
+        }
         if (allPaths.isNotEmpty()) {
             // Phase 0: 分析侧前台服务引用，在 launch 前同步 acquire（避免与扫描侧 release 之间的空窗），
             // 在协程结束时 finally release。扫描侧引用在 rescan 返回后释放，二者独立计数。
@@ -370,12 +378,22 @@ class HybridIndexer(
         }
 
         // ---- 分析管道：对新文件和更新文件进行智能分析 ----
-        val newFilePaths = toInsert.map { it.filePath }
-        val updatedFilePaths = toUpdate.map { it.filePath }
-        val filesToAnalyze = newFilePaths + updatedFilePaths
+        // 视频过滤：AI 识别管道仅支持图片（BitmapFactory.decodeFile），视频传入必然失败。
+        // 仅将图片类型的新增/更新文件路径传入分析管道，视频跳过。
+        val newImagePaths = toInsert.filter { it.type == MediaType.IMAGE }.map { it.filePath }
+        val updatedImagePaths = toUpdate.filter { it.type == MediaType.IMAGE }.map { it.filePath }
+        val filesToAnalyze = newImagePaths + updatedImagePaths
+        val skippedVideoCount = (toInsert + toUpdate).size - filesToAnalyze.size
+        if (skippedVideoCount > 0) {
+            Log.i(TAG, "增量扫描: 跳过 $skippedVideoCount 个视频文件（AI 识别仅支持图片）")
+        }
         // 1.1: 刷新新增/更新文件的 FTS 索引（fileName/make/model）
-        if (filesToAnalyze.isNotEmpty()) {
-            filesToAnalyze.chunked(500).forEach { chunk ->
+        // 注意：FTS 索引仍需覆盖全部文件（含视频），搜索功能需检索视频文件名
+        val allNewFilePaths = toInsert.map { it.filePath }
+        val allUpdatedFilePaths = toUpdate.map { it.filePath }
+        val allFilesToIndex = allNewFilePaths + allUpdatedFilePaths
+        if (allFilesToIndex.isNotEmpty()) {
+            allFilesToIndex.chunked(500).forEach { chunk ->
                 mediaDao.deleteFtsEntries(chunk)
             }
             mediaDao.insertFtsAll((toInsert + toUpdate).map {
@@ -385,7 +403,7 @@ class HybridIndexer(
         if (filesToAnalyze.isNotEmpty()) {
             // 异步执行 AI 分析，不阻塞增量扫描完成状态（与 fullScan 一致）
             val pathsToAnalyze = filesToAnalyze.toList()
-            val allPathsSnapshot = mediaDao.getAllPaths()
+            val allPathsSnapshot = mediaDao.getImagePaths()
             // Phase 0: 分析侧前台服务引用（见 fullScan 注释）
             ScanServiceController.acquire(context, "正在分析 AI 特征…")
             analysisScope.launch {
