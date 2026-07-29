@@ -17,7 +17,11 @@ Thank you for your interest in contributing! This document outlines the process 
 
 ### Model Files
 
-Most AI features require ONNX/TFLite model files placed in `app/src/main/assets/models/`. See [Model Setup](#model-files) in the README.
+Most AI features require ONNX/TFLite model files in [`app/src/main/assets/models/`](app/src/main/assets/models/). Run [`scripts/download_models.sh`](scripts/download_models.sh) after cloning to fetch binary models excluded from Git. See the [README](README.md#下载模型) for the current model and privacy notes.
+
+### Scope of Extensions
+
+The supported extension path is an **in-tree capability Provider or built-in interactive extension**, registered through [`AppContainer`](app/src/main/java/com/renyxin/localalbum/AppContainer.kt). External APK/Dex loading remains hidden and experimental; do not add product documentation, UI, or tests that present it as a public end-user plugin API without an approved security design.
 
 ## Development Workflow
 
@@ -58,10 +62,10 @@ docs: update plugin API documentation
 
 Write tests for:
 
-- New DAO queries
-- Plugin lifecycle methods
-- Pipeline stage execution
-- Data transformation logic
+- New DAO queries and Room migrations where schema changes are involved
+- Capability Provider behavior and model input/output contracts
+- Pipeline stage execution, cancellation, checkpoint invalidation, and failure isolation
+- Data transformation, backup/import, and locale-sensitive serialization logic
 
 ### Pull Request Process
 
@@ -72,6 +76,12 @@ Write tests for:
 5. Submit PR with a clear description of changes
 
 ## Architecture Guidelines
+
+### Data Safety Rules
+
+- Keep a complete index import inside one Room transaction; do not clear one table and commit before related tables are restored.
+- Treat media paths, EXIF/GPS, OCR text, face embeddings, and semantic embeddings as sensitive data. Do not add them to logs, telemetry, fixtures, or public examples.
+- Preserve or explicitly invalidate cached AI results when an index operation replaces a [`MediaEntity`](app/src/main/java/com/renyxin/localalbum/data/db/entity/MediaEntity.kt); checkpoint state must agree with persisted result fields.
 
 ### Adding a New Analysis Stage
 

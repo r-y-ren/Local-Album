@@ -10,9 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Restore missing `emap_512.bin` (face-swap emap matrix) — regenerated from `inswapper_128.onnx` via `scripts/extract_emap.py`; its absence silently degraded face-swap output to ≈ input.
+- Make JSON index import atomic across media, FTS, face, and semantic-embedding tables; FTS records are now restored in batches instead of one row at a time.
+- Preserve unchanged media-derived fields during a full scan and invalidate analysis checkpoints when media content changes, preventing completed analysis from being skipped after its result fields were replaced.
+- Serialize semantic vectors with a locale-invariant decimal format and reject malformed/non-finite vector values instead of silently shortening a vector.
 
 ### Changed
 
+- Documentation now describes the current local-media, on-device AI, model-download, import/export, and permission behavior.
+- External APK/Dex plugin loading remains hidden and experimental; it is no longer documented as a supported end-user extension mechanism.
 - Documentation: replace outdated Git LFS model workflow with `scripts/download_models.sh` / `extract_emap.py`; correct the model inventory and repository URLs.
 
 ## [0.1.0] - 2026-07-27

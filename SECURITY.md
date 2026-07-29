@@ -30,12 +30,20 @@ The following are considered in-scope for security reports:
 - Data leakage or privacy bypasses
 - SQL injection (via FTS4 queries)
 - Path traversal in file operations
-- Plugin sandbox escape
+- Unsafe handling of model packages or hidden experimental plugin loading
 - Authentication/authorization bypass
+
+## Data handled by the app
+
+The local index can contain media paths, EXIF/GPS metadata, OCR text, face embeddings, semantic embeddings, thumbnails, and model state. JSON exports can include media records, FTS entries, face records, and embeddings. Treat these files as sensitive and do not share them publicly.
+
+## Experimental extension boundary
+
+External APK/Dex plugin loading is hidden and experimental, and is **not** a supported end-user extension mechanism. Do not import plugin APKs from untrusted sources. If you find a path that enables, bypasses, or escalates the experimental loader, report it as a security issue.
 
 ## Best Practices for Users
 
-- LocalAlbum processes all data **locally** on-device. No data is transmitted to remote servers.
-- Review plugin APKs before loading them. Only install plugins from trusted sources.
-- The app requests only the minimum necessary Android permissions (storage access for media indexing).
-- Model files (ONNX/TFLite) are executed entirely on-device via ONNX Runtime / TensorFlow Lite / PyTorch Mobile.
+- LocalAlbum performs media indexing and supported AI inference **on-device**. Network access is used only for model downloads and remote model-catalog requests initiated by the app.
+- Protect JSON exports and imported model files as private data.
+- The app requests media access to index user-selected local media and an optional notification permission to display long-running scan progress.
+- Model files (ONNX/TFLite/PyTorch) are executed locally through the bundled runtimes; download models only from the documented project source.
