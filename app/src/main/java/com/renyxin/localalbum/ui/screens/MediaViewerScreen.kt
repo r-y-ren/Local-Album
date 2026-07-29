@@ -657,6 +657,8 @@ private fun VideoContent(
     var currentPosition by remember { mutableStateOf(0L) }
     var duration by remember { mutableStateOf(0L) }
     var playbackSpeed by remember { mutableFloatStateOf(1f) }
+    // 标记用户是否正在拖拽进度条，避免轮询与手动拖拽冲突导致位置跳变
+    var isUserSeeking by remember { mutableStateOf(false) }
 
     // P1-4: 以 filePath 为 remember key，确保切换视频时重建播放器
     val player = remember(filePath) {
@@ -682,12 +684,29 @@ private fun VideoContent(
                 if (state == androidx.media3.common.Player.STATE_READY) {
                     duration = player.duration
                 }
+                // 播放结束时重置进度条到起点
+                if (state == androidx.media3.common.Player.STATE_ENDED) {
+                    currentPosition = 0L
+                }
             }
         }
         player.addListener(listener)
         onDispose {
             player.removeListener(listener)
             player.release()
+        }
+    }
+
+    // 修复：周期性轮询播放器当前位置，驱动进度条实时移动。
+    // 原实现缺少此机制，currentPosition 仅在用户手动拖拽时更新，
+    // 导致播放时进度条纹丝不动。仅在播放中且非用户拖拽时更新，
+    // 避免与手动 seek 操作冲突。
+    LaunchedEffect(isPlaying) {
+        while (isPlaying) {
+            kotlinx.coroutines.delay(200)
+            if (!isUserSeeking) {
+                currentPosition = player.currentPosition
+            }
         }
     }
 
@@ -750,10 +769,15 @@ private fun VideoContent(
                 androidx.compose.material3.Slider(
                     value = if (duration > 0) currentPosition.toFloat() / duration else 0f,
                     onValueChange = { fraction ->
+                        // 用户拖拽时暂停轮询，避免位置跳变
+                        isUserSeeking = true
                         currentPosition = (fraction * duration).toLong()
                     },
                     onValueChangeFinished = {
                         player.seekTo(currentPosition)
+                        // 松手后恢复轮询，并立即同步一次真实位置
+                        isUserSeeking = false
+                        currentPosition = player.currentPosition
                     },
                     modifier = Modifier.fillMaxWidth(),
                     colors = androidx.compose.material3.SliderDefaults.colors(
