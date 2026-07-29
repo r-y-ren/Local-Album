@@ -165,7 +165,6 @@ class DatabaseExporter(
             obj.putOpt("fingerprintHead", item.fingerprintHead)
             obj.put("perceptualHash", item.perceptualHash)
             obj.putOpt("ocrText", item.ocrText)
-            obj.putOpt("geoClusterId", item.geoClusterId)
             obj.put("qualityScore", item.qualityScore)
             obj.put("deletedAtMs", item.deletedAtMs)
             obj.put("isCorrupted", item.isCorrupted)

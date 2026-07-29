@@ -6,7 +6,6 @@ import kotlinx.coroutines.cancel
 
 import android.util.Log
 import com.renyxin.localalbum.core.album.AlbumBuilder
-import com.renyxin.localalbum.core.analysis.ReverseGeocoder
 import com.renyxin.localalbum.core.index.HybridIndexer
 import com.renyxin.localalbum.core.model.Album
 import com.renyxin.localalbum.core.model.DirectoryNode
@@ -21,7 +20,6 @@ import com.renyxin.localalbum.data.backup.DatabaseImporter
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.FaceClusterSummary
-import com.renyxin.localalbum.data.db.dao.GeoClusterSummary
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.entity.FaceEntity
 import com.renyxin.localalbum.data.db.entity.MediaEntity
@@ -93,35 +91,6 @@ data class FaceCluster(
 )
 
 /**
- * 地理聚类（Phase 3.4），用于地图视图界面。
- * @param clusterId 聚类 ID
- * @param photoCount 该聚类包含的照片数量
- * @param centerLatitude 聚类中心纬度
- * @param centerLongitude 聚类中心经度
- * @param representativeThumb 代表缩略图路径
- * @param placeName 地名（反向地理编码结果，未解析时为 null）
- * @param filePaths 该聚类包含的照片路径列表
- */
-data class GeoCluster(
-    val clusterId: String,
-    val photoCount: Int,
-    val centerLatitude: Double,
-    val centerLongitude: Double,
-    val representativeThumb: String?,
-    val placeName: String?,
-    val filePaths: List<String>,
-)
-
-/**
- * 地理统计信息（Phase 3.4）。
- */
-data class GeoStats(
-    val totalGeoItems: Int = 0,
-    val clusterCount: Int = 0,
-    val noiseCount: Int = 0,
-)
-
-/**
  * 语义搜索结果（Phase 4.1），用于自然语言搜索界面。
  * @param mediaItem 匹配的媒体项
  * @param similarity 与查询的余弦相似度（0~1）
@@ -180,9 +149,6 @@ class AlbumRepository(
     }
     /** 与 Repository 生命周期绑定的协程作用域，替代 GlobalScope */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    /** 反向地理编码器（Phase 3.5），用于将 GPS 坐标解析为地名 */
-    private val reverseGeocoder: ReverseGeocoder? = context?.let { ReverseGeocoder(it) }
 
     /** 应用上下文（用于构造分析管道） */
     private val appContext: android.content.Context? = context
@@ -944,66 +910,6 @@ class AlbumRepository(
             totalFaces = dao.getCount(),
             clusteredFaces = dao.getClusteredCount(),
             clusterCount = dao.getClusterCount(),
-        )
-    }
-
-    // ---- 地理聚类管理 (Phase 3.4) ----
-
-    /**
-     * 获取所有地理聚类（供地图视图界面分组展示）。
-     * 返回 clusterId → 聚类信息列表，按照片数量降序。
-     * 同时执行反向地理编码，填充 placeName 字段。
-     */
-    suspend fun getGeoClusters(): List<GeoCluster> = withContext(Dispatchers.IO) {
-        val summaries = mediaDao.getGeoClusterSummaries()
-        if (summaries.isEmpty()) return@withContext emptyList()
-
-        // 批量反向地理编码聚类中心坐标
-        val geocoder = reverseGeocoder
-        val coordinates = summaries.mapNotNull { s ->
-            if (s.centerLatitude != null && s.centerLongitude != null) {
-                Pair(s.centerLatitude, s.centerLongitude)
-            } else null
-        }
-        val geoNames = if (geocoder != null && coordinates.isNotEmpty()) {
-            geocoder.batchReverseGeocode(coordinates)
-        } else {
-            emptyMap()
-        }
-
-        summaries.map { summary ->
-            val photos = mediaDao.getByGeoCluster(summary.clusterId)
-            val coord = if (summary.centerLatitude != null && summary.centerLongitude != null) {
-                Pair(summary.centerLatitude, summary.centerLongitude)
-            } else null
-            val placeName = coord?.let { geoNames[it]?.shortName }
-            GeoCluster(
-                clusterId = summary.clusterId,
-                photoCount = summary.photoCount,
-                centerLatitude = summary.centerLatitude ?: 0.0,
-                centerLongitude = summary.centerLongitude ?: 0.0,
-                representativeThumb = summary.representativeThumb,
-                placeName = placeName,
-                filePaths = photos.map { it.filePath },
-            )
-        }
-    }
-
-    /** 获取某个地理聚类内的完整媒体项 */
-    suspend fun getPhotosInGeoCluster(clusterId: String): List<MediaItem> = withContext(Dispatchers.IO) {
-        mediaDao.getByGeoCluster(clusterId).map { it.toMediaItem() }
-    }
-
-    /** 获取地理统计信息 */
-    suspend fun getGeoStats(): GeoStats = withContext(Dispatchers.IO) {
-        val totalGeoItems = mediaDao.getWithLocation().size
-        // P1-5: 一次聚合查询各聚类数量，避免 N+1
-        val counts = mediaDao.getGeoClusterCounts()
-        val clustered = counts.sumOf { it.photoCount }
-        GeoStats(
-            totalGeoItems = totalGeoItems,
-            clusterCount = counts.size,
-            noiseCount = (totalGeoItems - clustered).coerceAtLeast(0),
         )
     }
 

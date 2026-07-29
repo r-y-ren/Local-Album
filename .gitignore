@@ -6,6 +6,7 @@
 *.ap_
 *.aab_
 # ── plan ──
+plans/
 plan/
 # ── Gradle ──
 .gradle/

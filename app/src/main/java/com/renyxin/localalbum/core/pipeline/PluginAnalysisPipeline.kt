@@ -25,7 +25,7 @@ import com.renyxin.localalbum.data.db.entity.AnalysisStateEntity
 /**
  * 分析管道核心编排器（Phase 2 重构）。
  *
- * 统一调度核心分析阶段（人脸、场景、语义、质量、OCR、地理、相似度），
+ * 统一调度核心分析阶段（人脸、场景、语义、质量、OCR、相似度），
  * 按 DAG 拓扑排序后顺序执行。扩展 AI 插件（换脸、风格迁移等）不再参与批处理管道，
  * 改为交互式调用。
  *
@@ -56,7 +56,7 @@ class PluginAnalysisPipeline(
          * 工厂方法（Phase 2 重构）：从 [CapabilityRegistry] 获取激活的 Provider，
          * 组装核心分析阶段。
          *
-         * Geo 和 Similarity 保持固定实现，不参与 Provider 槽位。
+         * Similarity 保持固定实现，不参与 Provider 槽位。
          * 扩展插件（换脸、风格迁移等）不再纳入批处理管道。
          *
          * @param mediaDao 媒体 DAO
@@ -130,9 +130,6 @@ class PluginAnalysisPipeline(
                 if (stage != null) stages.add(stage)
             }
 
-            // 地理信息 — 固定实现
-            stages.add(com.renyxin.localalbum.core.pipeline.stages.BuiltinGeoStage(mediaDao))
-
             return PluginAnalysisPipeline(
                 stages = stages,
                 analysisStateDao = analysisStateDao,
@@ -162,7 +159,6 @@ class PluginAnalysisPipeline(
                 com.renyxin.localalbum.core.pipeline.stages.BuiltinSceneStage(mediaDao),
                 com.renyxin.localalbum.core.pipeline.stages.BuiltinSemanticStage(mediaDao, embeddingDao),
                 com.renyxin.localalbum.core.pipeline.stages.BuiltinOcrStage(context, mediaDao),
-                com.renyxin.localalbum.core.pipeline.stages.BuiltinGeoStage(mediaDao),
             )
             return PluginAnalysisPipeline(stages = builtinStages)
         }

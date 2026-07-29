@@ -183,7 +183,6 @@ class DatabaseImporter(
                     fingerprintHead = obj.optStringOrNull("fingerprintHead"),
                     perceptualHash = obj.optLong("perceptualHash", 0L),
                     ocrText = obj.optStringOrNull("ocrText"),
-                    geoClusterId = obj.optStringOrNull("geoClusterId"),
                     qualityScore = obj.optDouble("qualityScore", 0.0).toFloat(),
                     deletedAtMs = obj.optLong("deletedAtMs", 0L),
                     isCorrupted = obj.optBoolean("isCorrupted", false),

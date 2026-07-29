@@ -85,14 +85,6 @@ class DatabaseExporterTest {
         override suspend fun insertFtsAll(entries: List<MediaFts>) {
             for (e in entries) ftsStore[e.filePath] = e
         }
-        override suspend fun updateGeoClusterId(paths: List<String>, clusterId: String) {}
-        override suspend fun setGeoClusterId(path: String, clusterId: String) {}
-        override suspend fun clearGeoClusterId(paths: List<String>) {}
-        override suspend fun clearAllGeoClusterIds() {}
-        override suspend fun getByGeoCluster(clusterId: String): List<MediaEntity> = emptyList()
-        override suspend fun getGeoClusterIds(): List<String> = emptyList()
-        override suspend fun getGeoClusterCounts(): List<com.renyxin.localalbum.data.db.dao.GeoClusterCount> = emptyList()
-        override suspend fun getGeoClusterSummaries(): List<com.renyxin.localalbum.data.db.dao.GeoClusterSummary> = emptyList()
         override suspend fun updateQualityScore(path: String, score: Float) {}
         override suspend fun setQualityScore(path: String, score: Float) {}
         override suspend fun updatePerceptualHash(path: String, hash: Long) {}
@@ -424,7 +416,6 @@ class DatabaseExporterTest {
             model = null,
             sceneType = null,
             ocrText = null,
-            geoClusterId = null,
             faceClusterId = null,
         )
         mediaDao.insertAll(listOf(entity))

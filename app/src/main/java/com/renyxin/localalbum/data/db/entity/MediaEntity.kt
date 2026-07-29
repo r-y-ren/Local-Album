@@ -14,7 +14,6 @@ import com.renyxin.localalbum.core.model.MediaType
         Index(value = ["isTrashed"]),
         Index(value = ["mediaType"]),
         Index(value = ["sceneType"]),
-        Index(value = ["geoClusterId"]),
         Index(value = ["fileSize"]),
         Index(value = ["modifiedAtMs"]),
         Index(value = ["isCorrupted"]),
@@ -52,8 +51,6 @@ data class MediaEntity(
     @androidx.room.ColumnInfo(defaultValue = "0") val perceptualHash: Long = 0L, // 感知哈希
     // ---- v2 新增: OCR 文本 ----
     val ocrText: String? = null,
-    // ---- v2 新增: 地理聚类 ID ----
-    val geoClusterId: String? = null,
     // ---- v2 新增: 质量评分 ----
     @androidx.room.ColumnInfo(defaultValue = "0.0") val qualityScore: Float = 0f,
     // ---- v2 新增: 回收站时间戳 ----

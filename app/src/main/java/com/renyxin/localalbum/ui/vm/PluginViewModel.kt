@@ -641,15 +641,6 @@ class PluginViewModel(
                 actionable = false,
             ),
             CoreFeatureStatus(
-                featureId = "geo",
-                displayName = "地图聚类",
-                icon = "🗺️",
-                description = "基于 GPS 坐标的 DBSCAN 地理聚类（内置算法，无需模型）",
-                readiness = ModelReadiness.ALWAYS_READY,
-                modelDetail = "内置算法",
-                actionable = false,
-            ),
-            CoreFeatureStatus(
                 featureId = "semantic",
                 displayName = "语义识别",
                 icon = "🔍",

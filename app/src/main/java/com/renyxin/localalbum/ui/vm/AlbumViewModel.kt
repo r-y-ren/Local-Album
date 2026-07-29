@@ -18,8 +18,6 @@ import com.renyxin.localalbum.data.repo.AlbumStats
 import com.renyxin.localalbum.data.repo.FaceCluster
 import com.renyxin.localalbum.data.repo.FaceStats
 import com.renyxin.localalbum.data.repo.DuplicateGroup
-import com.renyxin.localalbum.data.repo.GeoCluster
-import com.renyxin.localalbum.data.repo.GeoStats
 import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.data.repo.SemanticSearchResult
 import com.renyxin.localalbum.data.repo.SemanticSearchState
@@ -83,13 +81,6 @@ class AlbumViewModel(
         ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StageFileProgress.EMPTY)
         ?: MutableStateFlow(StageFileProgress.EMPTY).asStateFlow()
 
-    /** 地理聚类阶段的 per-file 进度 */
-    val geoFileProgress: StateFlow<StageFileProgress> = progressManager?.progress
-        ?.debounce(80L)
-        ?.map { it.perStageFiles[AnalysisStage.STAGE_GEO] ?: StageFileProgress.EMPTY }
-        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StageFileProgress.EMPTY)
-        ?: MutableStateFlow(StageFileProgress.EMPTY).asStateFlow()
-
     /** 场景识别阶段的 per-file 进度（修复：使用与 SceneStage 一致的 stageId 常量） */
     val sceneFileProgress: StateFlow<StageFileProgress> = progressManager?.progress
         ?.debounce(80L)
@@ -148,9 +139,8 @@ class AlbumViewModel(
         scanJob?.cancel()
         scanJob = viewModelScope.launch {
             repository.forceReanalyzeAll()
-            // 分析完成后刷新人脸/地图/语义数据
+            // 分析完成后刷新人脸/语义数据
             loadFaceClusters()
-            loadGeoClusters()
             loadSemanticStats()
         }
     }
@@ -367,32 +357,6 @@ class AlbumViewModel(
         viewModelScope.launch {
             repository.setPersonName(clusterId, name)
             _faceClusters.value = repository.getFaceClusters()
-        }
-    }
-
-    // ---- 地理聚类管理 (Phase 3.4) ----
-
-    private val _geoClusters = MutableStateFlow<List<GeoCluster>>(emptyList())
-    val geoClusters: StateFlow<List<GeoCluster>> = _geoClusters.asStateFlow()
-
-    private val _geoClusterPhotos = MutableStateFlow<List<MediaItem>>(emptyList())
-    val geoClusterPhotos: StateFlow<List<MediaItem>> = _geoClusterPhotos.asStateFlow()
-
-    private val _geoStats = MutableStateFlow(GeoStats())
-    val geoStats: StateFlow<GeoStats> = _geoStats.asStateFlow()
-
-    /** 加载所有地理聚类（供地图视图界面分组展示） */
-    fun loadGeoClusters() {
-        viewModelScope.launch {
-            _geoClusters.value = repository.getGeoClusters()
-            _geoStats.value = repository.getGeoStats()
-        }
-    }
-
-    /** 加载某个地理聚类内的完整媒体项 */
-    fun loadPhotosInGeoCluster(clusterId: String) {
-        viewModelScope.launch {
-            _geoClusterPhotos.value = repository.getPhotosInGeoCluster(clusterId)
         }
     }
 

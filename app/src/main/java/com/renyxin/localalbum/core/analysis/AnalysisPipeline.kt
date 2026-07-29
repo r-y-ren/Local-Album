@@ -49,7 +49,6 @@ class AnalysisPipeline(
         if (faceDao != null) FaceDetector(context) else null
     }
     private val faceClusterer = FaceClusterer()
-    private val geoClusterer = GeoClusterer()
     private val semanticEmbedder: SemanticEmbedder? by lazy {
         if (embeddingDao != null) SemanticEmbedder() else null
     }
@@ -119,13 +118,6 @@ class AnalysisPipeline(
             } catch (e: Exception) {
                 Log.w(TAG, "人脸检测/聚类失败: ${e.message}", e)
             }
-        }
-
-        // 所有批次完成后运行地理聚类（Phase 3.4）
-        try {
-            analyzeGeoClusters()
-        } catch (e: Exception) {
-            Log.w(TAG, "地理聚类失败: ${e.message}", e)
         }
 
         // 所有批次完成后运行语义嵌入生成（Phase 4.1）
@@ -256,58 +248,6 @@ class AnalysisPipeline(
         }
 
         return result
-    }
-
-    /**
-     * 地理聚类（Phase 3.4）。
-     *
-     * 工作流：
-     * 1. 读取所有含 GPS 坐标的媒体记录
-     * 2. 清除旧的 geoClusterId
-     * 3. 执行 DBSCAN 地理聚类（Haversine 距离）
-     * 4. 将聚类 ID 回写 media_items.geoClusterId
-     *
-     * @return 聚类结果汇总
-     */
-    suspend fun analyzeGeoClusters(): GeoAnalysisResult = withContext(Dispatchers.IO) {
-        Log.i(TAG, "开始地理聚类…")
-        val geoStartTime = System.currentTimeMillis()
-
-        // 1. 读取所有含 GPS 坐标的媒体
-        val geoItems = mediaDao.getWithLocation()
-        if (geoItems.isEmpty()) {
-            Log.i(TAG, "无 GPS 坐标的媒体，跳过地理聚类")
-            return@withContext GeoAnalysisResult()
-        }
-
-        // 2. 清除旧的 geoClusterId
-        mediaDao.clearAllGeoClusterIds()
-
-        // 3. 构建 GeoSample 列表并执行 DBSCAN 聚类
-        val samples = geoItems.map { entity ->
-            GeoClusterer.GeoSample(
-                id = entity.filePath,
-                latitude = entity.latitude!!,
-                longitude = entity.longitude!!,
-            )
-        }
-
-        val result = geoClusterer.cluster(samples)
-
-        // 4. 回写聚类 ID 到数据库
-        for (cluster in result.clusters) {
-            mediaDao.updateGeoClusterId(cluster.sampleIds, cluster.clusterId)
-        }
-
-        val elapsed = System.currentTimeMillis() - geoStartTime
-        Log.i(TAG, "地理聚类完成: ${geoItems.size} 个坐标, ${result.clusterCount} 个聚类, " +
-                "${result.noiseCount} 噪声, 耗时 ${elapsed}ms")
-
-        GeoAnalysisResult(
-            totalGeoItems = geoItems.size,
-            clusterCount = result.clusterCount,
-            noiseCount = result.noiseCount,
-        )
     }
 
     /**
@@ -496,15 +436,6 @@ class AnalysisPipeline(
      */
     data class FaceAnalysisResult(
         val totalFaces: Int = 0,
-        val clusterCount: Int = 0,
-        val noiseCount: Int = 0,
-    )
-
-    /**
-     * 地理聚类结果汇总（Phase 3.4）。
-     */
-    data class GeoAnalysisResult(
-        val totalGeoItems: Int = 0,
         val clusterCount: Int = 0,
         val noiseCount: Int = 0,
     )

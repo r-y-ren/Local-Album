@@ -211,9 +211,6 @@ dependencies {
     // ML Kit Face Detection (人脸聚类)
     add("implementation", "com.google.mlkit:face-detection:16.1.7")
 
-    // osmdroid — 开源地图 SDK（无需 API Key，Phase 3.4 地图视图）
-    add("implementation", "org.osmdroid:osmdroid-android:6.1.20")
-
     // TensorFlow Lite — 设备端 ML 推理（Phase 4.1 语义搜索，Phase 2.3 插件模型运行时）
     add("implementation", "org.tensorflow:tensorflow-lite:2.14.0")
     add("implementation", "org.tensorflow:tensorflow-lite-support:0.4.4")

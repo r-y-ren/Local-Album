@@ -53,8 +53,8 @@ import com.renyxin.localalbum.ui.vm.PluginViewModel
 /**
  * AI 插件管理主界面。
  *
- * 改造为单页核心功能状态看板：仅展示人脸聚类、地图聚类、语义识别、换脸功能
- * 四大核心功能的模型可用性。去除下载、模型市场与扩展插件管理功能；
+ * 改造为单页核心功能状态看板：仅展示人脸聚类、语义识别、换脸功能
+ * 三大核心功能的模型可用性。去除下载、模型市场与扩展插件管理功能；
  * 换脸功能卡片提供「进入换脸」入口跳转到 [FaceSwapScreen]。
  */
 @OptIn(ExperimentalMaterial3Api::class)

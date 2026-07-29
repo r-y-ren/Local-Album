@@ -209,7 +209,6 @@ abstract class AppDatabase : RoomDatabase() {
                         fingerprintHead TEXT,
                         perceptualHash INTEGER NOT NULL DEFAULT 0,
                         ocrText TEXT,
-                        geoClusterId TEXT,
                         qualityScore REAL NOT NULL DEFAULT 0.0,
                         deletedAtMs INTEGER NOT NULL DEFAULT 0,
                         isCorrupted INTEGER NOT NULL DEFAULT 0,
@@ -223,7 +222,7 @@ abstract class AppDatabase : RoomDatabase() {
                         parentPath, fileSize, isFavorite, isTrashed, width, height, mimeType,
                         durationMs, latitude, longitude, make, model, aperture, focalLength,
                         iso, exposureTime, orientation, sceneType, thumbnailPath, fingerprintHead,
-                        perceptualHash, ocrText, geoClusterId, qualityScore, deletedAtMs,
+                        perceptualHash, ocrText, qualityScore, deletedAtMs,
                         isCorrupted, faceClusterId
                     )
                     SELECT
@@ -231,7 +230,7 @@ abstract class AppDatabase : RoomDatabase() {
                         parentPath, fileSize, isFavorite, isTrashed, width, height, mimeType,
                         durationMs, latitude, longitude, make, model, aperture, focalLength,
                         iso, exposureTime, orientation, sceneType, thumbnailPath, fingerprintHead,
-                        perceptualHash, ocrText, geoClusterId, qualityScore, deletedAtMs,
+                        perceptualHash, ocrText, qualityScore, deletedAtMs,
                         isCorrupted, faceClusterId
                     FROM media_items
                 """.trimIndent())
@@ -246,7 +245,6 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_isTrashed ON media_items(isTrashed)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_mediaType ON media_items(mediaType)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_sceneType ON media_items(sceneType)")
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_geoClusterId ON media_items(geoClusterId)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_fileSize ON media_items(fileSize)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_modifiedAtMs ON media_items(modifiedAtMs)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_isCorrupted ON media_items(isCorrupted)")

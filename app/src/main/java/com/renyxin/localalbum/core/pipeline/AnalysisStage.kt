@@ -44,7 +44,6 @@ interface AnalysisStage {
         const val STAGE_SEMANTIC = "core:semantic"
         const val STAGE_QUALITY = "core:quality"
         const val STAGE_OCR = "core:ocr"
-        const val STAGE_GEO = "builtin:geo"
 
         /** 旧版 Builtin*Stage 使用的 stageId（保留用于兼容旧数据/旧管线） */
         const val STAGE_BUILTIN_FACE = "builtin:face"

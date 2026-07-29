@@ -698,7 +698,6 @@ class HybridIndexer(
             fingerprintHead = fingerprint,
             perceptualHash = 0L,
             ocrText = null,
-            geoClusterId = null,
             qualityScore = 0f,
             deletedAtMs = if (isTrashed) modifiedAtMs else 0L,
             isCorrupted = isCorrupted,

@@ -190,52 +190,6 @@ interface MediaDao {
     """)
     suspend fun searchWithOcr(query: String): List<MediaEntity>
 
-    // ---- 地理位置聚类 (v2 + Phase 3.4) ----
-    @Query("UPDATE media_items SET geoClusterId = :clusterId WHERE filePath IN (:paths)")
-    suspend fun updateGeoClusterId(paths: List<String>, clusterId: String)
-
-    @Query("UPDATE media_items SET geoClusterId = :clusterId WHERE filePath = :path")
-    suspend fun setGeoClusterId(path: String, clusterId: String)
-
-    @Query("UPDATE media_items SET geoClusterId = NULL WHERE filePath IN (:paths)")
-    suspend fun clearGeoClusterId(paths: List<String>)
-
-    @Query("UPDATE media_items SET geoClusterId = NULL")
-    suspend fun clearAllGeoClusterIds()
-
-    @Query("SELECT * FROM media_items WHERE isTrashed = 0 AND geoClusterId = :clusterId ORDER BY capturedAtMs DESC")
-    suspend fun getByGeoCluster(clusterId: String): List<MediaEntity>
-
-    @Query("SELECT DISTINCT geoClusterId FROM media_items WHERE isTrashed = 0 AND geoClusterId IS NOT NULL")
-    suspend fun getGeoClusterIds(): List<String>
-
-    /** 一次查询各地理聚类的照片数量，避免 getGeoStats 的 N+1 查询 */
-    @Query("SELECT geoClusterId AS clusterId, COUNT(*) AS photoCount FROM media_items WHERE isTrashed = 0 AND geoClusterId IS NOT NULL GROUP BY geoClusterId")
-    suspend fun getGeoClusterCounts(): List<GeoClusterCount>
-
-    /**
-     * 查询每个地理聚类的摘要信息（clusterId + 照片数量 + 中心坐标 + 代表缩略图）。
-     * 中心坐标取该聚类中最早拍摄的照片的 GPS 坐标。
-     */
-    @Query("""
-        SELECT geoClusterId AS clusterId,
-               COUNT(*) AS photoCount,
-               (SELECT latitude FROM media_items m2
-                WHERE m2.geoClusterId = m1.geoClusterId AND m2.isTrashed = 0
-                ORDER BY m2.capturedAtMs ASC LIMIT 1) AS centerLatitude,
-               (SELECT longitude FROM media_items m2
-                WHERE m2.geoClusterId = m1.geoClusterId AND m2.isTrashed = 0
-                ORDER BY m2.capturedAtMs ASC LIMIT 1) AS centerLongitude,
-               (SELECT thumbnailPath FROM media_items m3
-                WHERE m3.geoClusterId = m1.geoClusterId AND m3.isTrashed = 0
-                ORDER BY m3.capturedAtMs DESC LIMIT 1) AS representativeThumb
-        FROM media_items m1
-        WHERE isTrashed = 0 AND geoClusterId IS NOT NULL
-        GROUP BY geoClusterId
-        ORDER BY photoCount DESC
-    """)
-    suspend fun getGeoClusterSummaries(): List<GeoClusterSummary>
-
     // ---- 质量评分 (v2) ----
     @Query("UPDATE media_items SET qualityScore = :score WHERE filePath = :path")
     suspend fun updateQualityScore(path: String, score: Float)
@@ -356,21 +310,4 @@ data class TimelineBucket(
 data class SceneTypeStat(
     val sceneType: String,
     val cnt: Int
-)
-
-/**
- * 地理聚类摘要（Phase 3.4），用于地图视图分组展示。
- */
-data class GeoClusterSummary(
-    val clusterId: String,
-    val photoCount: Int,
-    val centerLatitude: Double?,
-    val centerLongitude: Double?,
-    val representativeThumb: String?,
-)
-
-/** 地理聚类计数投影，用于 getGeoStats 的一次性聚合查询 */
-data class GeoClusterCount(
-    val clusterId: String,
-    val photoCount: Int,
 )

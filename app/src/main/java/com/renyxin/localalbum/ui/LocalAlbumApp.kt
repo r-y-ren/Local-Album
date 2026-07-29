@@ -58,7 +58,6 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
@@ -133,7 +132,6 @@ import com.renyxin.localalbum.ui.screens.MediaViewerScreen
 import com.renyxin.localalbum.ui.screens.OnboardingScreen
 import com.renyxin.localalbum.ui.screens.SearchScreen
 import com.renyxin.localalbum.ui.screens.FacesScreen
-import com.renyxin.localalbum.ui.screens.MapScreen
 import com.renyxin.localalbum.ui.screens.DuplicatePhotosScreen
 import com.renyxin.localalbum.ui.screens.TrashScreen
 import com.renyxin.localalbum.ui.screens.ModelImportWizardScreen
@@ -187,7 +185,6 @@ sealed interface Screen {
     data object Trash : Screen
     data object DuplicatePhotos : Screen
     data object Faces : Screen
-    data object Map : Screen
     data object Favorites : Screen
     data object Recommendations : Screen
     data object PluginManager : Screen
@@ -469,39 +466,6 @@ fun LocalAlbumApp(
             )
         }
 
-        is Screen.Map -> {
-            val geoClusters by albumViewModel.geoClusters.collectAsStateWithLifecycle()
-            val geoStats by albumViewModel.geoStats.collectAsStateWithLifecycle()
-            val clusterPhotos by albumViewModel.geoClusterPhotos.collectAsStateWithLifecycle()
-            val geoProgress by albumViewModel.geoFileProgress.collectAsStateWithLifecycle()
-            val isPipelineRunning by albumViewModel.isPipelineRunning.collectAsStateWithLifecycle()
-            // 修复：扫描完成后自动刷新地理聚类，无需退出重进页面
-            var wasScanning by remember { mutableStateOf(false) }
-            LaunchedEffect(scanState) {
-                val isScanning = scanState is ScanState.Scanning
-                if (wasScanning && !isScanning) {
-                    albumViewModel.loadGeoClusters()
-                }
-                wasScanning = isScanning
-            }
-            MapScreen(
-                geoClusters = geoClusters,
-                geoStats = geoStats,
-                clusterPhotos = clusterPhotos,
-                isLoading = false,
-                onBack = { goBack() },
-                onClusterClick = { clusterId ->
-                    albumViewModel.loadPhotosInGeoCluster(clusterId)
-                },
-                onMediaClick = { items, index ->
-                    navigateTo(Screen.MediaViewer(items, index, returnTo = s))
-                },
-                onRefresh = { albumViewModel.forceReanalyzeAll() },
-                stageFileProgress = geoProgress,
-                isPipelineRunning = isPipelineRunning,
-            )
-        }
-
         is Screen.Search -> {
             val searchResults by albumViewModel.searchResults.collectAsStateWithLifecycle()
             val semanticResults by albumViewModel.semanticSearchResults.collectAsStateWithLifecycle()
@@ -726,10 +690,6 @@ private fun currentTabContent(
             onNavigateToFaces = {
                 albumViewModel.loadFaceClusters()
                 navigateTo(Screen.Faces)
-            },
-            onNavigateToMap = {
-                albumViewModel.loadGeoClusters()
-                navigateTo(Screen.Map)
             },
             onNavigateToRecommendations = {
                 navigateTo(Screen.Recommendations)
@@ -2429,7 +2389,6 @@ private fun PhotosTab(
     onNavigateToFavorites: () -> Unit,
     onNavigateToDuplicate: () -> Unit,
     onNavigateToFaces: () -> Unit,
-    onNavigateToMap: () -> Unit,
     onNavigateToRecommendations: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -2483,7 +2442,6 @@ private fun PhotosTab(
                 onNavigateToFavorites = onNavigateToFavorites,
                 onNavigateToDuplicate = onNavigateToDuplicate,
                 onNavigateToFaces = onNavigateToFaces,
-                onNavigateToMap = onNavigateToMap,
                 onNavigateToRecommendations = onNavigateToRecommendations,
             )
         },
@@ -2500,7 +2458,6 @@ private fun QuickAccessRow(
     onNavigateToFavorites: () -> Unit,
     onNavigateToDuplicate: () -> Unit,
     onNavigateToFaces: () -> Unit,
-    onNavigateToMap: () -> Unit,
     onNavigateToRecommendations: () -> Unit,
 ) {
     val scrollState = androidx.compose.foundation.lazy.rememberLazyListState()
@@ -2542,14 +2499,6 @@ private fun QuickAccessRow(
                 title = "人物",
                 subtitle = "按人脸分组",
                 onClick = onNavigateToFaces,
-            )
-        }
-        item(key = "map") {
-            QuickAccessCard(
-                icon = Icons.Filled.LocationOn,
-                title = "地图",
-                subtitle = "按地点浏览",
-                onClick = onNavigateToMap,
             )
         }
         item(key = "search") {
