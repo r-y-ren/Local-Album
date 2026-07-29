@@ -518,7 +518,6 @@ class HybridIndexer(
             null, null,
             MediaStore.Images.Media.DATE_TAKEN + " DESC"
         )?.use { cursor ->
-            val idCol = cursor.getColumnIndexSafe(MediaStore.Images.Media._ID)
             val dataCol = cursor.getColumnIndexSafe(MediaStore.Images.Media.DATA)
             val nameCol = cursor.getColumnIndexSafe(MediaStore.Images.Media.DISPLAY_NAME)
             val takenCol = cursor.getColumnIndexSafe(MediaStore.Images.Media.DATE_TAKEN)
@@ -567,7 +566,6 @@ class HybridIndexer(
             null, null,
             MediaStore.Video.Media.DATE_TAKEN + " DESC"
         )?.use { cursor ->
-            val idCol = cursor.getColumnIndexSafe(MediaStore.Video.Media._ID)
             val dataCol = cursor.getColumnIndexSafe(MediaStore.Video.Media.DATA)
             val nameCol = cursor.getColumnIndexSafe(MediaStore.Video.Media.DISPLAY_NAME)
             val takenCol = cursor.getColumnIndexSafe(MediaStore.Video.Media.DATE_TAKEN)

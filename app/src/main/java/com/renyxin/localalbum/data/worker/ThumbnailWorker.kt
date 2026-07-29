@@ -59,13 +59,9 @@ class ThumbnailWorker(
 
         return try {
             val processed = AtomicInteger(0)
-            var hasMore = true
-            while (hasMore) {
+            while (true) {
                 val batch = mediaDao.getMissingThumbnails(BATCH_SIZE)
-                if (batch.isEmpty()) {
-                    hasMore = false
-                    break
-                }
+                if (batch.isEmpty()) break
                 // 文件级并行生成缩略图（IO+轻计算混合，用 ioBound 调度器）
                 coroutineScope {
                     batch.map { entity ->
@@ -85,8 +81,8 @@ class ThumbnailWorker(
                         }
                     }.awaitAll()
                 }
-                // 如果本批不足 BATCH_SIZE，说明已无更多待处理记录
-                if (batch.size < BATCH_SIZE) hasMore = false
+                // 如果本批不足 BATCH_SIZE，说明已无更多待处理记录。
+                if (batch.size < BATCH_SIZE) break
             }
             val total = processed.get()
             Log.i(TAG, "缩略图补齐完成: 处理了 $total 个文件")

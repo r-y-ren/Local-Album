@@ -110,7 +110,7 @@ interface MediaDao {
     @Query("SELECT filePath, modifiedAtMs, fingerprintHead FROM media_items")
     suspend fun getModifiedTimeMap(): List<PathModifiedTime>
 
-    @Query("SELECT filePath, modifiedAtMs FROM media_items WHERE filePath = :path LIMIT 1")
+    @Query("SELECT filePath, modifiedAtMs, fingerprintHead FROM media_items WHERE filePath = :path LIMIT 1")
     suspend fun getModifiedTimeForPath(path: String): PathModifiedTime?
 
     @Query("SELECT filePath FROM media_items")

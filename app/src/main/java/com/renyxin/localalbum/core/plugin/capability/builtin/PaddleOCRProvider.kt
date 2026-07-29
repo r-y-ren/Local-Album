@@ -169,8 +169,12 @@ class PaddleOCRProvider(
             android.util.Log.i("CrashDebug", "<< PaddleOCR det session.run 完成")
             input.close()
 
-            // 输出 [1,1,H,W] 概率图
-            val probMap = (result.iterator().next().value.value as? Array<Array<Array<FloatArray>>>)?.getOrNull(0)?.getOrNull(0)
+            // 输出契约为 [1, 1, H, W]。逐层检查而非强制转换，避免模型文件或
+            // ONNX Runtime 输出类型改变时产生 ClassCastException / 未检查泛型转换。
+            val firstOutput = result.iterator().let { iterator ->
+                if (iterator.hasNext()) iterator.next() else null
+            }
+            val probMap = firstOutput?.value?.value?.let(::asDetectionProbabilityMap)
             result.close()
             if (probMap == null || probMap.isEmpty()) return emptyList()
 
@@ -268,16 +272,43 @@ class PaddleOCRProvider(
             android.util.Log.i("CrashDebug", "<< PaddleOCR rec session.run 完成")
             input.close()
 
-            // 输出 [1, W, C]
-            val out = result.iterator().next().value.value as? Array<Array<FloatArray>>
+            // 输出契约为 [1, W, C]。逐层验证数组层级和元素类型。
+            val firstOutput = result.iterator().let { iterator ->
+                if (iterator.hasNext()) iterator.next() else null
+            }
+            val timeSteps = firstOutput?.value?.value?.let(::asRecognitionTimeSteps)
             result.close()
-            if (out == null || out.isEmpty()) return ""
+            if (timeSteps.isNullOrEmpty()) return ""
 
-            ctcDecode(out[0])
+            ctcDecode(timeSteps)
         } catch (e: Exception) {
             Log.w(TAG, "文字识别失败", e)
             ""
         }
+    }
+
+    /** 将 ONNX 检测输出严格解析为 [H, W] 概率图。 */
+    private fun asDetectionProbabilityMap(value: Any): Array<FloatArray>? {
+        val batch = value as? Array<*> ?: return null
+        val channels = batch.singleOrNull() as? Array<*> ?: return null
+        val rows = channels.singleOrNull() as? Array<*> ?: return null
+        return rows.mapOrNull { it as? FloatArray }
+    }
+
+    /** 将 ONNX 识别输出严格解析为 batch=1 的 [W, C] logits。 */
+    private fun asRecognitionTimeSteps(value: Any): Array<FloatArray>? {
+        val batch = value as? Array<*> ?: return null
+        val rows = batch.singleOrNull() as? Array<*> ?: return null
+        return rows.mapOrNull { it as? FloatArray }
+    }
+
+    /** 当且仅当所有元素都是 FloatArray 时生成数组，避免部分损坏输出进入后处理。 */
+    private fun Array<*>.mapOrNull(transform: (Any?) -> FloatArray?): Array<FloatArray>? {
+        val mapped = ArrayList<FloatArray>(size)
+        for (element in this) {
+            mapped += transform(element) ?: return null
+        }
+        return mapped.toTypedArray()
     }
 
     /** 识别预处理：NCHW，归一化到 [-1,1] (x/127.5 - 1) */

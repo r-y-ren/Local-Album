@@ -145,6 +145,7 @@ class PluginAnalysisPipeline(
             message = "使用 create(MediaDao, FaceDao, EmbeddingDao, CapabilityRegistry) 替代",
             replaceWith = ReplaceWith("create(mediaDao, faceDao, embeddingDao, capabilityRegistry)"),
         )
+        @Suppress("UNUSED_PARAMETER")
         fun create(
             context: android.content.Context,
             mediaDao: com.renyxin.localalbum.data.db.dao.MediaDao,
@@ -275,7 +276,7 @@ class PluginAnalysisPipeline(
                     operation = "pipeline:stage:${stage.stageId}",
                     backend = InferenceMetrics.Backend.CPU_DEFAULT,
                 ) {
-                    stage.executeEnhanced(pendingPaths) { processed, total, filePath, status ->
+                    stage.executeEnhanced(pendingPaths) { processed, _, filePath, status ->
                     // 将 pending 维度的进度映射回 targetPaths 维度，含已跳过文件
                     val overallProcessed = skippedCount + processed
                     _stageProgress.tryEmit(

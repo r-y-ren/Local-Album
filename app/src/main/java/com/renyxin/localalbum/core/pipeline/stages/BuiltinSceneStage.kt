@@ -41,7 +41,6 @@ class BuiltinSceneStage(
         filePaths: List<String>,
         enhancedCallback: EnhancedProgressCallback,
     ): StageResult {
-        val total = filePaths.size
         val labelCounts = mutableMapOf<String, Int>()
 
         // 文件级并行分类

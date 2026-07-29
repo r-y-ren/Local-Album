@@ -171,12 +171,13 @@ class InsightFaceProvider(
             Log.i("CrashDebug", "<< InsightFace rec session.run 完成")
             tensor.close()
 
-            val value = result.iterator().next().value.value
+            val firstOutput = result.iterator().let { iterator ->
+                if (iterator.hasNext()) iterator.next() else null
+            }
+            val embedding = firstOutput?.value?.value?.let(::asSingleEmbedding)
             result.close()
 
-            @Suppress("UNCHECKED_CAST")
-            val arr = value as Array<FloatArray>
-            l2Normalize(arr[0])
+            embedding?.let(::l2Normalize)
         } catch (e: Exception) {
             Log.w(TAG, "ONNX embed failed", e)
             null
@@ -244,20 +245,11 @@ class InsightFaceProvider(
         val scoreCandidates = mutableListOf<Pair<Int, Array<FloatArray>>>()  // (N, scores) C=1
         val bboxCandidates = mutableListOf<Pair<Int, Array<FloatArray>>>()   // (N, bboxes) C=4
         val kpsCandidates = mutableListOf<Pair<Int, Array<FloatArray>>>()    // (N, kps) C=10
-        for ((name, tensor) in outputs) {
-            val arr = try {
-                @Suppress("UNCHECKED_CAST")
-                tensor.getValue() as? Array<FloatArray>
-            } catch (_: Exception) {
-                try {
-                    @Suppress("UNCHECKED_CAST")
-                    val nested = tensor.getValue() as? Array<Array<FloatArray>>
-                    nested?.firstOrNull()
-                } catch (_: Exception) { null }
-            } ?: continue
+        for ((_, tensor) in outputs) {
+            val arr = asRows(tensor.getValue()) ?: continue
             if (arr.isEmpty()) continue
             val n = arr.size
-            val c = arr[0]?.size ?: 0
+            val c = arr.first().size
             when (c) {
                 1 -> scoreCandidates.add(n to arr)
                 4 -> bboxCandidates.add(n to arr)
@@ -346,6 +338,30 @@ class InsightFaceProvider(
         val aA = (a.right - a.left) * (a.bottom - a.top)
         val aB = (b.right - b.left) * (b.bottom - b.top)
         return inter / (aA + aB - inter + 1e-6f)
+    }
+
+    /** 解析 [1, embeddingDim] 或直接 [embeddingDim] 的识别输出。 */
+    private fun asSingleEmbedding(value: Any): FloatArray? = when (value) {
+        is FloatArray -> value.takeIf { it.size == EMBEDDING_DIM }
+        is Array<*> -> (value.singleOrNull() as? FloatArray)?.takeIf { it.size == EMBEDDING_DIM }
+        else -> null
+    }
+
+    /** 解析 SCRFD [N, C] 或 [1, N, C] 输出，拒绝空行和不规则数组。 */
+    private fun asRows(value: Any): Array<FloatArray>? {
+        val rows: Array<*> = when (value) {
+            is Array<*> -> when (value.firstOrNull()) {
+                is FloatArray -> value
+                is Array<*> -> value.singleOrNull() as? Array<*> ?: return null
+                else -> return null
+            }
+            else -> return null
+        }
+        val parsed = ArrayList<FloatArray>(rows.size)
+        for (row in rows) {
+            parsed += (row as? FloatArray)?.takeIf { it.isNotEmpty() } ?: return null
+        }
+        return parsed.toTypedArray()
     }
 
     private fun l2Normalize(vec: FloatArray): FloatArray {

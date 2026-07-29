@@ -41,8 +41,6 @@ class BuiltinQualityStage(
         filePaths: List<String>,
         enhancedCallback: EnhancedProgressCallback,
     ): StageResult {
-        val total = filePaths.size
-
         // 文件级并行质量评估
         val results = ParallelFileProcessor.mapParallel(filePaths, enhancedCallback) { path ->
             val result = analyzer.analyze(File(path))

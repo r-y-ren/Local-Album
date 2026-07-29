@@ -50,6 +50,7 @@ import com.renyxin.localalbum.data.repo.SettingsRepository
 import com.renyxin.localalbum.data.source.MediaSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -354,6 +355,7 @@ class AppContainer(context: Context) {
      * 持续监听 [modelManager] 中所有模型的 [ModelManager.ModelState] 变化，
      * 并更新到对应槽位中 Provider 的 [ModelReadiness] 状态。
      */
+    @OptIn(FlowPreview::class)
     private fun startModelStatusSync() {
         appScope.launch {
             // 修复：debounce 合并下载期间高频进度回调，避免每次状态变更都触发
@@ -378,7 +380,6 @@ class AppContainer(context: Context) {
                         var hasError = false
                         var hasDownloading = false
                         var hasNotDownloaded = false
-                        var allLoaded = true
                         var totalProgress = 0f
                         var modelCount = 0
 
@@ -390,11 +391,11 @@ class AppContainer(context: Context) {
                             when (status) {
                                 com.renyxin.localalbum.core.plugin.model.ModelManager.ModelStatus.ERROR -> hasError = true
                                 com.renyxin.localalbum.core.plugin.model.ModelManager.ModelStatus.DOWNLOADING,
-                                com.renyxin.localalbum.core.plugin.model.ModelManager.ModelStatus.LOADING -> { hasDownloading = true; allLoaded = false }
-                                com.renyxin.localalbum.core.plugin.model.ModelManager.ModelStatus.NOT_DOWNLOADED -> { hasNotDownloaded = true; allLoaded = false }
-                                com.renyxin.localalbum.core.plugin.model.ModelManager.ModelStatus.DOWNLOADED -> { allLoaded = false }
-                                com.renyxin.localalbum.core.plugin.model.ModelManager.ModelStatus.LOADED -> {}
-                                null -> { hasNotDownloaded = true; allLoaded = false }
+                                com.renyxin.localalbum.core.plugin.model.ModelManager.ModelStatus.LOADING -> hasDownloading = true
+                                com.renyxin.localalbum.core.plugin.model.ModelManager.ModelStatus.NOT_DOWNLOADED,
+                                null -> hasNotDownloaded = true
+                                com.renyxin.localalbum.core.plugin.model.ModelManager.ModelStatus.DOWNLOADED,
+                                com.renyxin.localalbum.core.plugin.model.ModelManager.ModelStatus.LOADED -> Unit
                             }
                         }
 

@@ -44,8 +44,6 @@ class BuiltinOcrStage(
         filePaths: List<String>,
         enhancedCallback: EnhancedProgressCallback,
     ): StageResult {
-        val total = filePaths.size
-
         // 文件级并行 OCR 识别
         // 修复：使用 setOcrText 仅写入 ocrText 字段，避免覆盖同层并行执行的
         // SceneStage/QualityStage 已写入的 sceneType/qualityScore（DAG Layer 0 竞态）。

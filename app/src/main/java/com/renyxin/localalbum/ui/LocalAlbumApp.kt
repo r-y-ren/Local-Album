@@ -619,7 +619,6 @@ fun LocalAlbumApp(
                             currentTab = currentTab,
                             albumViewModel = albumViewModel,
                             settingsViewModel = settingsViewModel,
-                            pluginViewModel = pluginViewModel,
                             navigateTo = ::navigateTo,
                             onSwitchTab = { currentTab = it },
                         )
@@ -638,7 +637,6 @@ fun LocalAlbumApp(
                         currentTab = currentTab,
                         albumViewModel = albumViewModel,
                         settingsViewModel = settingsViewModel,
-                        pluginViewModel = pluginViewModel,
                         navigateTo = ::navigateTo,
                         onSwitchTab = { currentTab = it },
                     )
@@ -662,7 +660,6 @@ private fun currentTabContent(
     currentTab: Int,
     albumViewModel: AlbumViewModel,
     settingsViewModel: SettingsViewModel,
-    pluginViewModel: PluginViewModel,
     navigateTo: (Screen) -> Unit,
     onSwitchTab: (Int) -> Unit,
 ) {
@@ -742,7 +739,6 @@ private fun currentTabContent(
             onNavigateToTrash = { navigateTo(Screen.Trash) },
             onNavigateToRecommendations = { navigateTo(Screen.Recommendations) },
             onNavigateToPluginManager = { navigateTo(Screen.PluginManager) },
-            pluginViewModel = pluginViewModel,
         )
     }
 }
@@ -1376,7 +1372,7 @@ private fun AlbumsTab(
                     AlbumGridCard(
                         album = album,
                         onClick = { onAlbumClick(album) },
-                        modifier = Modifier.animateItemPlacement(),
+                        modifier = Modifier.animateItem(),
                     )
                 }
             }
@@ -1445,7 +1441,7 @@ private fun AlbumTreeView(
                         expandedIds[row.album.id] = !(expandedIds[row.album.id] ?: false)
                     }
                 },
-                modifier = Modifier.animateItemPlacement(),
+                modifier = Modifier.animateItem(),
             )
         }
     }
@@ -1733,7 +1729,6 @@ private fun SettingsTab(
     onNavigateToTrash: () -> Unit = {},
     onNavigateToRecommendations: () -> Unit = {},
     onNavigateToPluginManager: () -> Unit = {},
-    pluginViewModel: PluginViewModel,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()

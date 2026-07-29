@@ -84,7 +84,7 @@ class PluginAnalysisStage(
         // 2. 逐图推理
         val entities = mutableListOf<FeatureStoreEntity>()
 
-        for ((idx, path) in filePaths.withIndex()) {
+        for (path in filePaths) {
             try {
                 val file = File(path)
                 if (!file.exists()) {

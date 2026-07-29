@@ -89,7 +89,7 @@ class TimelineGrouper {
 
                 for (day in days) {
                     val dayItems = byDay[day] ?: continue
-                    val dayLabel = buildDayLabel(year, month, day, dayItems.first().capturedAtMs)
+                    val dayLabel = buildDayLabel(month, day, dayItems.first().capturedAtMs)
                     sections.add(TimelineSection(
                         year = year,
                         month = month,
@@ -136,7 +136,7 @@ class TimelineGrouper {
 
             for (dayKey in days) {
                 val dayItems = byDay[dayKey] ?: continue
-                val dayLabel = buildDayLabel(year, monthOf(dayItems.first().capturedAtMs),
+                val dayLabel = buildDayLabel(monthOf(dayItems.first().capturedAtMs),
                     dayOf(dayItems.first().capturedAtMs), dayItems.first().capturedAtMs)
                 sections.add(TimelineSection(
                     year = year,
@@ -167,7 +167,7 @@ class TimelineGrouper {
     private fun localDateOf(epochMs: Long): LocalDate =
         Instant.ofEpochMilli(epochMs).atZone(ZONE).toLocalDate()
 
-    private fun buildDayLabel(year: Int, month: Int, day: Int, timestamp: Long): String {
+    private fun buildDayLabel(month: Int, day: Int, timestamp: Long): String {
         val date = localDateOf(timestamp)
         val dayOfWeek = date.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.CHINESE)
         val today = LocalDate.now(ZONE)
