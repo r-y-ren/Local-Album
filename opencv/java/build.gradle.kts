@@ -1,8 +1,8 @@
-plugins {
-    id("com.android.library")
-}
+import com.android.build.api.dsl.LibraryExtension
 
-android {
+apply(plugin = "com.android.library")
+
+extensions.configure<LibraryExtension>("android") {
     namespace = "org.opencv"
     compileSdk = 35
 
@@ -32,5 +32,5 @@ android {
 }
 
 dependencies {
-    implementation("androidx.annotation:annotation:1.8.0")
+    add("implementation", "androidx.annotation:annotation:1.8.0")
 }

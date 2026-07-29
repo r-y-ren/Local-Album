@@ -57,6 +57,13 @@
             android:name=".data.worker.ScanForegroundService"
             android:foregroundServiceType="dataSync"
             android:exported="false" />
+
+        <!-- WorkManager SystemForegroundService：ScanWorker 通过 setForegroundAsync 启动的前台服务，
+             Android 14+（targetSdk 35）要求 manifest 中声明 foregroundServiceType，否则 lintVitalRelease 报错 -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
     </application>
 
 </manifest>

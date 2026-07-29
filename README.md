@@ -129,6 +129,30 @@ chmod +x scripts/download_models.sh
 ./gradlew installDebug
 ```
 
+#### 2.4 Release Build (Signed APK)
+
+Release builds are minified, resource-shrunk, and signed with a user-provided keystore. The keystore credentials are injected via `keystore.properties` (git-ignored; template at `keystore.properties.example`).
+
+```bash
+# 1. Generate a release keystore (one-time)
+keytool -genkeypair -v \
+  -keystore localalbum.jks \
+  -alias localalbum \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -dname "CN=LocalAlbum, OU=Dev, O=renyxin, L=Beijing, ST=Beijing, C=CN"
+
+# 2. Copy the template and fill in real values
+cp keystore.properties.example keystore.properties
+# Edit keystore.properties: storeFile / storePassword / keyAlias / keyPassword
+
+# 3. Build the signed release APK
+./gradlew assembleRelease
+
+# Output: app/build/outputs/apk/release/LocalAlbum-v0.1.0-c1-release.apk
+```
+
+> Without `keystore.properties`, `assembleRelease` still runs (producing an unsigned APK) so CI can verify release compilation without exposing signing keys.
+
 **Notes:**
 
 - PyTorch Mobile requires JitPack repository (configured in `settings.gradle.kts`)
@@ -484,6 +508,30 @@ chmod +x scripts/download_models.sh
 # 7. 安装到设备
 ./gradlew installDebug
 ```
+
+#### 2.4 正式包构建（签名 APK）
+
+正式包开启代码混淆、资源压缩，并使用用户提供的 keystore 签名。签名信息通过 `keystore.properties` 注入（已被 git 忽略；模板见 `keystore.properties.example`）。
+
+```bash
+# 1. 生成正式签名 keystore（一次性操作）
+keytool -genkeypair -v \
+  -keystore localalbum.jks \
+  -alias localalbum \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -dname "CN=LocalAlbum, OU=Dev, O=renyxin, L=Beijing, ST=Beijing, C=CN"
+
+# 2. 复制模板并填入真实值
+cp keystore.properties.example keystore.properties
+# 编辑 keystore.properties：storeFile / storePassword / keyAlias / keyPassword
+
+# 3. 构建签名正式包
+./gradlew assembleRelease
+
+# 产物：app/build/outputs/apk/release/LocalAlbum-v0.1.0-c1-release.apk
+```
+
+> 若未提供 `keystore.properties`，`assembleRelease` 仍可执行（产出未签名 APK），便于 CI 在不暴露签名密钥的情况下验证 release 编译。
 
 **注意事项**：
 
@@ -923,14 +971,18 @@ testOptions {
     unitTests.isReturnDefaultValues = true  // 允许 android.graphics.RectF 等类在 JVM 测试中使用
 }
 
-// Release 混淆
+// Release 混淆 + 资源压缩 + 签名（见 2.4 节正式包构建）
 buildTypes {
     release {
         isMinifyEnabled = true
+        isShrinkResources = true
         proguardFiles(
             getDefaultProguardFile("proguard-android-optimize.txt"),
             "proguard-rules.pro"
         )
+        if (rootProject.file("keystore.properties").exists()) {
+            signingConfig = signingConfigs.getByName("release")
+        }
     }
 }
 ```
