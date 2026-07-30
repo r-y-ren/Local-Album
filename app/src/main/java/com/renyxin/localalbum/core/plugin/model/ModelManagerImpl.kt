@@ -155,6 +155,10 @@ class ModelManagerImpl(
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             setIntraOpNumThreads(1)
             setInterOpNumThreads(1)
+            // 长批次中 arena 会按历史峰值保留原生工作区；多个模型再乘以对象池大小后
+            // 会造成 GB 级常驻。关闭两项缓存，使单次推理结束后工作区可被系统回收。
+            setMemoryPatternOptimization(false)
+            setCPUArenaAllocator(false)
             if (onnxPolicy(modelId).effectiveBackend == AccelerationBackend.ONNX_NNAPI) {
                 // CPU_DISABLED 防止模型仅部分分区后把未支持算子静默留在 CPU，确保本轮
                 // smoke test 测到的是实际 NNAPI 图覆盖；失败会触发 CPU session 回退。

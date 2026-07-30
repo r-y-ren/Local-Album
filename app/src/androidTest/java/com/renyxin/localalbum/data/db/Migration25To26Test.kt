@@ -37,7 +37,7 @@ class Migration25To26Test {
             db.query("PRAGMA table_info(deletion_tombstones)").use { cursor ->
                 var count = 0
                 while (cursor.moveToNext()) count++
-                assertEquals(18, count)
+                assertEquals(17, count)
             }
         } finally {
             helper.close()

@@ -13,8 +13,10 @@ enum class AccelerationBackend(
     val metricsBackend: InferenceMetrics.Backend,
     val maxPoolSize: Int,
 ) {
-    CPU_XNNPACK(InferenceMetrics.Backend.CPU_XNNPACK, InferenceDispatchers.inferenceConcurrency),
-    CPU_DEFAULT(InferenceMetrics.Backend.CPU_DEFAULT, InferenceDispatchers.inferenceConcurrency),
+    // 模型实例的原生工作区并不随模型 mmap 共享。真机验证显示按 CPU 核数扩到 8 个
+    // session/interpreter 会让仅 100 张图片的 PSS 超过 4GB，因此 CPU 池硬限制为 2。
+    CPU_XNNPACK(InferenceMetrics.Backend.CPU_XNNPACK, 2),
+    CPU_DEFAULT(InferenceMetrics.Backend.CPU_DEFAULT, 2),
     TFLITE_NNAPI(InferenceMetrics.Backend.TFLITE_NNAPI, 1),
     ONNX_NNAPI(InferenceMetrics.Backend.ONNX_NNAPI, 1),
 }

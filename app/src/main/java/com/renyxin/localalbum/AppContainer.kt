@@ -255,6 +255,21 @@ class AppContainer(context: Context) {
             capabilityRegistry = capabilityRegistry,
             semanticDao = database.semanticDao(),
             analysisStateDao = database.analysisStateDao(),
+            releaseStageResources = { stageId ->
+                // 每个模型阶段结束后立即卸载其 session，避免上一阶段权重/工作区与下一阶段
+                // 峰值叠加。搜索或下一批分析会按需懒加载；启发式阶段无需释放。
+                when (stageId) {
+                    "core:semantic" ->
+                        capabilityRegistry.getActiveProvider<SemanticEmbedProvider>("semantic")?.release()
+                    "core:face" ->
+                        capabilityRegistry.getActiveProvider<FaceProvider>("face")?.release()
+                    "core:scene" ->
+                        capabilityRegistry.getActiveProvider<SceneProvider>("scene")?.release()
+                    "core:ocr" ->
+                        capabilityRegistry.getActiveProvider<OcrProvider>("ocr")?.release()
+                }
+                modelManager.evictUnusedModels()
+            },
         )
     }
 

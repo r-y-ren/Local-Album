@@ -9,10 +9,7 @@ import com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider
 import com.renyxin.localalbum.core.plugin.capability.QualityProvider
 import com.renyxin.localalbum.core.plugin.capability.OcrProvider
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,6 +47,7 @@ class PluginAnalysisPipeline(
     val progressManager: ProgressManager = ProgressManager(),
     private val analysisStateDao: com.renyxin.localalbum.data.db.dao.AnalysisStateDao? = null,
     private val pipelineScopeOverride: String? = null,
+    private val releaseStageResources: suspend (String) -> Unit = {},
 ) {
     /** 当前任务身份范围；包含阶段集合、阶段模型版本及工厂注入的 Provider 身份。 */
     val pipelineScope: String by lazy {
@@ -88,6 +86,7 @@ class PluginAnalysisPipeline(
             capabilityRegistry: CapabilityRegistryV2,
             analysisStateDao: com.renyxin.localalbum.data.db.dao.AnalysisStateDao? = null,
             semanticDao: com.renyxin.localalbum.data.db.dao.SemanticDao? = null,
+            releaseStageResources: suspend (String) -> Unit = {},
         ): PluginAnalysisPipeline {
             val stages = mutableListOf<AnalysisStage>()
 
@@ -165,6 +164,7 @@ class PluginAnalysisPipeline(
                 stages = stages,
                 analysisStateDao = analysisStateDao,
                 pipelineScopeOverride = buildPipelineScope(activeProviders + stageVersions),
+                releaseStageResources = releaseStageResources,
             )
         }
 
@@ -225,39 +225,6 @@ class PluginAnalysisPipeline(
      */
     private val sortedStages: List<AnalysisStage> by lazy {
         dagSorter.sort(stages)
-    }
-
-    /**
-     * 按 DAG 依赖关系分层的阶段列表（多核并行优化）。
-     *
-     * 同一层内的阶段无相互依赖，可并行执行；层与层之间串行。
-     * 例如 face/scene/quality/ocr/geo 在 Layer0，semantic 在 Layer1，similarity 在 Layer2。
-     *
-     * 各 Stage 内部已通过 [com.renyxin.localalbum.core.concurrent.InferenceDispatchers.cpuBound]
-     * 限制总并发度，因此层内并行不会导致 CPU oversubscription。
-     */
-    private val stageLayers: List<List<AnalysisStage>> by lazy {
-        val stageById = stages.associateBy { it.stageId }
-        val levelCache = mutableMapOf<String, Int>()
-
-        fun levelOf(stage: AnalysisStage): Int {
-            levelCache[stage.stageId]?.let { return it }
-            if (stage.dependencies.isEmpty()) {
-                levelCache[stage.stageId] = 0
-                return 0
-            }
-            val maxDep = stage.dependencies
-                .mapNotNull { stageById[it] }
-                .maxOfOrNull { levelOf(it) } ?: -1
-            val lvl = maxDep + 1
-            levelCache[stage.stageId] = lvl
-            return lvl
-        }
-
-        sortedStages.groupBy { levelOf(it) }
-            .toSortedMap()
-            .values
-            .map { layer -> dagSorter.sort(layer) }
     }
 
     /**
@@ -416,6 +383,9 @@ class PluginAnalysisPipeline(
                 ),
             )
             progressManager.onStageError(stage.stageId, errorMsg)
+        } finally {
+            runCatching { releaseStageResources(stage.stageId) }
+                .onFailure { error -> Log.w(TAG, "[${stage.stageId}] 阶段资源释放失败", error) }
         }
     }
 
@@ -444,22 +414,10 @@ class PluginAnalysisPipeline(
 
         Log.i(TAG, "全量扫描开始：${filePaths.size} 个文件，${stages.size} 个阶段（排序后 ${sortedStages.size}）")
 
-        // 按 DAG 分层并行执行：同层无依赖阶段并发，层间串行。
-        // 各 Stage 内部文件级并行已通过 cpuBound 调度器限制总并发度，不会 oversubscription。
-        var stageIdx = 0
-        for (layer in stageLayers) {
-            // 使用 supervisorScope 而非 coroutineScope：同层阶段相互独立，
-            // 单个阶段失败（含 OOM 等 Error）不应取消同层其他阶段，避免级联取消导致
-            // 无关阶段被误报为"失败: unknown"。
-            supervisorScope {
-                layer.map { stage ->
-                    async {
-                        val idx = stageIdx
-                        runStage(stage, idx, sortedStages.size, filePaths, results)
-                    }
-                }.awaitAll()
-            }
-            stageIdx += layer.size
+        // 不并发执行不同模型阶段。文件级并发仍保留，但 face/semantic/OCR 等大型
+        // ONNX 模型不会同时创建 session 与峰值工作区，避免原生内存峰值相加。
+        sortedStages.forEachIndexed { stageIdx, stage ->
+            runStage(stage, stageIdx, sortedStages.size, filePaths, results)
         }
 
         // 通知 ProgressManager 管道完成
@@ -509,20 +467,10 @@ class PluginAnalysisPipeline(
             "增量扫描开始：增量=${incrementalPaths.size}，全量=${allPaths.size}，阶段=${sortedStages.size}",
         )
 
-        // 按 DAG 分层并行执行：同层无依赖阶段并发，层间串行。
-        var stageIdx = 0
-        for (layer in stageLayers) {
-            // 使用 supervisorScope：同层阶段相互独立，单阶段失败不连累其他阶段（见 runFullScan 注释）。
-            supervisorScope {
-                layer.map { stage ->
-                    async {
-                        val idx = stageIdx
-                        val targetPaths = if (stage.isCacheable) incrementalPaths else allPaths
-                        runStage(stage, idx, sortedStages.size, targetPaths, results)
-                    }
-                }.awaitAll()
-            }
-            stageIdx += layer.size
+        // 增量任务同样串行化模型阶段，保证恢复批次与全量批次具有相同的内存上界。
+        sortedStages.forEachIndexed { stageIdx, stage ->
+            val targetPaths = if (stage.isCacheable) incrementalPaths else allPaths
+            runStage(stage, stageIdx, sortedStages.size, targetPaths, results)
         }
 
         // 通知 ProgressManager 管道完成

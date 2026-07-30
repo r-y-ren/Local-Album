@@ -1,7 +1,6 @@
 package com.renyxin.localalbum.core.pipeline
 
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -114,6 +113,47 @@ class PluginAnalysisPipelineTest {
         assertTrue(
             executionOrder == listOf("a", "c", "b", "d") || executionOrder == listOf("a", "b", "c", "d"),
         )
+    }
+
+    @Test
+    fun `independent model stages execute serially and release resources after batch`() = runBlocking {
+        var activeStages = 0
+        var maxActiveStages = 0
+        val releasedStages = mutableListOf<String>()
+        val stages = listOf("face", "semantic", "ocr").map { id ->
+            LambdaStage(stageId = id, displayName = id) { _, _ ->
+                activeStages++
+                maxActiveStages = maxOf(maxActiveStages, activeStages)
+                delay(10)
+                activeStages--
+                StageResult(1, 0)
+            }
+        }
+        val pipeline = PluginAnalysisPipeline(
+            stages = stages,
+            releaseStageResources = { stageId -> releasedStages.add(stageId) },
+        )
+
+        pipeline.runFullScan(listOf("/x.jpg"))
+
+        assertEquals(1, maxActiveStages)
+        assertEquals(listOf("face", "semantic", "ocr"), releasedStages)
+    }
+
+    @Test
+    fun `batch resources are released when a stage is cancelled`() = runBlocking {
+        var releaseCount = 0
+        val cancellingStage = LambdaStage(stageId = "cancel", displayName = "Cancel") { _, _ ->
+            throw kotlinx.coroutines.CancellationException("cancelled")
+        }
+        val pipeline = PluginAnalysisPipeline(
+            stages = listOf(cancellingStage),
+            releaseStageResources = { releaseCount++ },
+        )
+
+        runCatching { pipeline.runIncremental(listOf("/x.jpg"), emptyList()) }
+
+        assertEquals(1, releaseCount)
     }
 
     // ---- 异常隔离 ----

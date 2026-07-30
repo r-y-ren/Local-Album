@@ -94,12 +94,11 @@ class Eva02ClipProvider(
     // 修复：移除永久 loadFailed 标记，允许每次调用时重试加载。
     // 原实现首次失败后永久放弃，导致瞬态失败（如启动时内存压力）后永远不可用。
 
-    // ---- 视觉 session 池（多核并行）----
-    // 单 session 的 intra-op 线程池为 session 级共享，intra=1 时并发 run 被串行化（单核瓶颈）。
-    // 本池为每个并发 worker 提供独立 session（独立线程池），实现多核并行。
-    // MT6991 实测 EVA02 visual 的 NNAPI 路径显著慢于 CPU，默认使用 CPU 多 session 池；
-    // 仅在后续模型转换或驱动更新后重新开启 NNAPI 候选时才降为单飞。
-    private val visualPoolSize: Int = minOf(InferenceDispatchers.cpuCores, 4)
+    // ---- 视觉 session 池（原生内存有界）----
+    // EVA02 visual 单个 session 的权重与工作区达到数百 MB，且 ORT/XNNPACK 工作区不会随
+    // 模型文件 mmap 完全共享。真机验证中 4 个 session 令 PSS 超过 4GB，因此固定单飞；
+    // 以吞吐换取可预测的内存上界，后续只有在逐设备内存基线通过后才允许扩大。
+    private val visualPoolSize: Int = 1
     private val visualSessionPool = ConcurrentLinkedDeque<OrtSession>()
     private val visualSemaphore = Semaphore(visualPoolSize)
     private val visualPoolMutex = Mutex()
@@ -130,6 +129,10 @@ class Eva02ClipProvider(
             setIntraOpNumThreads(1)
             setInterOpNumThreads(1)
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            // 关闭会保留峰值工作区的 arena 与 memory pattern。EVA02 固定形状推理会因此
+            // 多一些分配开销，但能在长批次结束后把原生内存归还给系统。
+            setMemoryPatternOptimization(false)
+            setCPUArenaAllocator(false)
             if (useNnapi) {
                 addNnapi(
                     EnumSet.of(
