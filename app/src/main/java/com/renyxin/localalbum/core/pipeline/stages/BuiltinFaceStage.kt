@@ -4,27 +4,30 @@ import android.content.Context
 import android.util.Log
 import com.renyxin.localalbum.core.analysis.FaceClusterer
 import com.renyxin.localalbum.core.analysis.FaceDetector
+import com.renyxin.localalbum.core.analysis.IncrementalFaceClusterAssigner
 import com.renyxin.localalbum.core.pipeline.AnalysisStage
 import com.renyxin.localalbum.core.pipeline.EnhancedProgressCallback
 import com.renyxin.localalbum.core.pipeline.FileProcessingStatus
 import com.renyxin.localalbum.core.pipeline.ParallelFileProcessor
 import com.renyxin.localalbum.core.pipeline.StageResult
 import com.renyxin.localalbum.core.pipeline.StageType
+import com.renyxin.localalbum.data.db.dao.FaceClusterDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.entity.FaceEntity
 import java.io.File
 
 /**
- * 内置人脸检测与聚类阶段适配器。
+ * 内置人脸检测与增量归类阶段适配器。
  *
- * 将 [FaceDetector] + [FaceClusterer] 封装为 [AnalysisStage]。
- * 工作流：清除旧记录 → 分批检测人脸 → 写入 faces 表 → DBSCAN 聚类 → 回写 clusterId。
+ * 将 [FaceDetector] 封装为 [AnalysisStage]，并复用 [IncrementalFaceClusterAssigner]。
+ * 常规扫描只比较已有人物代表向量；未命中的人脸进入 pending 临时簇，绝不执行全库 DBSCAN。
  */
 class BuiltinFaceStage(
     private val context: Context,
     private val mediaDao: MediaDao,
     private val faceDao: FaceDao,
+    faceClusterDao: FaceClusterDao,
 ) : AnalysisStage {
 
     override val stageId = "builtin:face"
@@ -34,6 +37,20 @@ class BuiltinFaceStage(
 
     private val faceDetector = FaceDetector(context)
     private val faceClusterer = FaceClusterer()
+    private val clusterAssigner = IncrementalFaceClusterAssigner(
+        mediaDao = mediaDao,
+        faceDao = faceDao,
+        faceClusterDao = faceClusterDao,
+        providerScope = BUILTIN_PROVIDER_SCOPE,
+        modelScope = BUILTIN_MODEL_SCOPE,
+        faceClusterer = faceClusterer,
+    )
+
+    companion object {
+        private const val DATABASE_BATCH_SIZE = 500
+        const val BUILTIN_PROVIDER_SCOPE = "builtin:face-detector"
+        const val BUILTIN_MODEL_SCOPE = "builtin:face-embedding-v1"
+    }
 
     override suspend fun execute(
         filePaths: List<String>,
@@ -57,8 +74,11 @@ class BuiltinFaceStage(
         try {
             enhancedCallback(0, total, null, null)
 
-            // 1. 清除旧的人脸记录
-            faceDao.deleteByFilePaths(filePaths)
+            // 1. 只清除本批旧记录及照片级聚类引用，不影响历史人物簇。
+            filePaths.chunked(DATABASE_BATCH_SIZE).forEach { chunk ->
+                faceDao.deleteByFilePaths(chunk)
+                mediaDao.clearFaceClusterId(chunk)
+            }
 
             // 2. 并发检测人脸（文件级并行，充分利用多核）
             val allFaceEntities = mutableListOf<FaceEntity>()
@@ -96,39 +116,14 @@ class BuiltinFaceStage(
                 faceCount = allFaceEntities.size
             }
 
-            // 4. 执行 DBSCAN 聚类
-            var clusterCount = 0
-            var noiseCount = 0
-            if (faceCount > 0) {
-                faceDao.clearAllClusterIds()
-                val allFaces = faceDao.getAll()
-
-                // 修复：聚类前清空所有含人脸照片的 media_items.faceClusterId，
-                // 使变为 noise 的照片不残留旧 clusterId，保证 faces 表与 media_items 表一致
-                val allFacePaths = allFaces.map { it.filePath }.distinct()
-                if (allFacePaths.isNotEmpty()) {
-                    allFacePaths.chunked(500).forEach { chunk -> mediaDao.clearFaceClusterId(chunk) }
-                }
-
-                val samples = allFaces.map { face ->
-                    FaceClusterer.FaceSample(
-                        id = face.faceId,
-                        embedding = faceClusterer.parseEmbedding(face.embedding),
-                    )
-                }
-
-                val clusterResult = faceClusterer.cluster(samples)
-
-                for (cluster in clusterResult.clusters) {
-                    faceDao.updateClusterIds(cluster.sampleIds, cluster.clusterId)
-                    for (sampleId in cluster.sampleIds) {
-                        val face = allFaces.find { it.faceId == sampleId } ?: continue
-                        mediaDao.setFaceClusterId(face.filePath, cluster.clusterId)
-                    }
-                }
-                clusterCount = clusterResult.clusterCount
-                noiseCount = clusterResult.noiseCount
+            // 4. 有界增量归类：不读取历史人脸全集，不清空已有簇，不运行 DBSCAN。
+            val assignment = if (faceCount > 0) {
+                clusterAssigner.assign(filePaths)
+            } else {
+                IncrementalFaceClusterAssigner.AssignmentResult(0, 0)
             }
+            val clusterCount = assignment.matchedClusterCount
+            val noiseCount = assignment.pendingFaceCount
 
             enhancedCallback(total, total, null, null)
 

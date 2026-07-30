@@ -24,20 +24,59 @@ interface EmbeddingDao {
     @Transaction
     suspend fun insertEmbeddings(embeddings: List<MediaEmbedding>)
 
+    /** 兼容非检索业务；搜索/推荐必须使用带 spaceId 的接口。 */
     @Query("SELECT * FROM media_embeddings WHERE filePath = :filePath LIMIT 1")
     suspend fun getByFilePath(filePath: String): MediaEmbedding?
 
+    @Query("SELECT * FROM media_embeddings WHERE filePath = :filePath AND spaceId = :spaceId LIMIT 1")
+    suspend fun getByFilePathInSpace(filePath: String, spaceId: String): MediaEmbedding?
+
+    /** 仅供 DatabaseExporter 历史单 JSON 兼容导出，运行时路径禁止调用。 */
+    @Deprecated("Legacy single-JSON export only; use keyset paging for bounded export")
     @Query("SELECT * FROM media_embeddings")
-    suspend fun getAll(): List<MediaEmbedding>
+    suspend fun getAllForLegacyExport(): List<MediaEmbedding>
 
     @Query("SELECT * FROM media_embeddings LIMIT :limit OFFSET :offset")
     suspend fun getPaged(limit: Int, offset: Int): List<MediaEmbedding>
+
+    /** 仅备份/maintenance 可跨空间分页；运行时检索禁止调用。 */
+    @Query("SELECT * FROM media_embeddings WHERE :afterPath IS NULL OR filePath > :afterPath ORDER BY filePath LIMIT :limit")
+    suspend fun getPagedAfter(afterPath: String?, limit: Int): List<MediaEmbedding>
+
+    /** 架构边界：Exact 搜索和聚类只能显式扫描一个向量空间。 */
+    @Query("SELECT * FROM media_embeddings WHERE spaceId = :spaceId AND (:afterPath IS NULL OR filePath > :afterPath) ORDER BY filePath LIMIT :limit")
+    suspend fun getPagedAfterInSpace(spaceId: String, afterPath: String?, limit: Int): List<MediaEmbedding>
+
+    /** 回填候选可跨 legacy；Worker 以 filePath keyset 有界处理。 */
+    @Query("SELECT * FROM media_embeddings WHERE spaceId = :legacySpaceId AND (:afterPath IS NULL OR filePath > :afterPath) ORDER BY filePath LIMIT :limit")
+    suspend fun getLegacyBackfillPage(legacySpaceId: String, afterPath: String?, limit: Int): List<MediaEmbedding>
+
+    @Query("""
+        UPDATE media_embeddings SET embeddingBlob = :blob, providerId = :providerId,
+          modelId = :modelId, dimension = :dimension, generation = :generation,
+          codecId = :codecId, formatVersion = :formatVersion
+        WHERE filePath = :filePath AND spaceId = :legacySpaceId
+    """)
+    suspend fun updateLegacyPayloadMetadata(
+        filePath: String,
+        legacySpaceId: String,
+        blob: ByteArray,
+        providerId: String,
+        modelId: String,
+        dimension: Int,
+        generation: Long,
+        codecId: String,
+        formatVersion: Int,
+    ): Int
 
     @Query("SELECT filePath FROM media_embeddings")
     suspend fun getAllFilePaths(): List<String>
 
     @Query("SELECT COUNT(*) FROM media_embeddings")
     suspend fun getCount(): Int
+
+    @Query("SELECT COUNT(*) FROM media_embeddings WHERE spaceId = :spaceId")
+    suspend fun getCountInSpace(spaceId: String): Int
 
     @Query("SELECT COUNT(*) FROM media_embeddings WHERE modelVersion = :modelVersion")
     suspend fun getCountByModelVersion(modelVersion: Int): Int

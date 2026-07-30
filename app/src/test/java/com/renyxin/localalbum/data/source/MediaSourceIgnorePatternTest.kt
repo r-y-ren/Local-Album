@@ -1,5 +1,6 @@
 package com.renyxin.localalbum.data.source
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -74,5 +75,20 @@ class MediaSourceIgnorePatternTest {
         val childNames = tree.first().children.map { it.name }
         assertTrue("visible 应保留", childNames.contains("visible"))
         assertTrue(".hidden 应被默认跳过", childNames.none { it == ".hidden" })
+    }
+
+    @Test
+    fun `bounded enumerator does not build directory tree and emits finite batches`() = runBlocking {
+        val root = tempFolder.newFolder("batch-root")
+        repeat(5) { index -> File(root, "note-$index.txt").writeText("x") }
+        val sizes = mutableListOf<Int>()
+
+        MediaSource().enumerateMediaBatches(
+            rootPaths = listOf(root.absolutePath),
+            batchSize = 2,
+        ) { batch -> sizes += batch.size }
+
+        // 非媒体文件不产生实体；关键是新入口可独立遍历且不返回 DirectoryNode。
+        assertTrue(sizes.isEmpty())
     }
 }

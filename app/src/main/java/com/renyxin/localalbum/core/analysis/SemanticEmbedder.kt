@@ -114,7 +114,7 @@ class SemanticEmbedder {
 
     /**
      * 图片特征提取结果（从已有分析字段 + 轻量图像采样派生）。
-     * 这些字段在 [AnalysisPipeline] 中已计算并存储于 [MediaEntity]。
+     * 这些字段在当前插件分析管道中已计算并存储于 [MediaEntity]。
      */
     data class ImageFeatures(
         val sceneType: String?,

@@ -2,7 +2,9 @@ package com.renyxin.localalbum.core.pipeline.stages
 
 import android.util.Log
 import com.renyxin.localalbum.core.plugin.FeatureSchema
+import com.renyxin.localalbum.core.search.EmbeddingCodec
 import com.renyxin.localalbum.core.plugin.PluginJsonCodec
+import com.renyxin.localalbum.core.search.SemanticVectorSpace
 import com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider
 import com.renyxin.localalbum.core.pipeline.AnalysisStage
 import com.renyxin.localalbum.core.pipeline.EnhancedProgressCallback
@@ -13,6 +15,7 @@ import com.renyxin.localalbum.core.pipeline.StageType
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.dao.FeatureStoreDao
 import com.renyxin.localalbum.data.db.dao.MediaDao
+import com.renyxin.localalbum.data.db.dao.SemanticDao
 import com.renyxin.localalbum.data.db.entity.FeatureStoreEntity
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
 import java.io.File
@@ -30,6 +33,7 @@ class SemanticStage(
     private val mediaDao: MediaDao,
     private val embeddingDao: EmbeddingDao,
     private val featureStoreDao: FeatureStoreDao? = null, // Phase 5: 可选注入
+    private val semanticDao: SemanticDao? = null,
 ) : AnalysisStage {
 
     override val stageId = "core:semantic"
@@ -63,6 +67,7 @@ class SemanticStage(
     ): StageResult {
         val total = filePaths.size
         val embeddings = mutableListOf<MediaEmbedding>()
+        val space = SemanticVectorSpace.from(embedProvider)
         var success = 0
         var failed = 0
 
@@ -89,10 +94,19 @@ class SemanticStage(
                     val vec = embedProvider.embedImage(File(path), context)
                     if (vec == null || vec.all { it == 0f }) null else MediaEmbedding(
                         filePath = path,
+                        // 保留 CSV 以兼容旧备份与 FeatureStore；搜索读取端优先走 BLOB。
                         embedding = serializeEmbedding(vec),
-                        modelVersion = MODEL_VERSION,
+                        embeddingBlob = EmbeddingCodec.encode(vec),
+                        modelVersion = embedProvider.modelVersion,
                         generatedAtMs = System.currentTimeMillis(),
                         source = embedProvider.providerId.split(":").firstOrNull() ?: "plugin",
+                        providerId = space.providerId,
+                        modelId = space.modelId,
+                        dimension = space.dimension,
+                        spaceId = space.spaceId,
+                        generation = 1,
+                        codecId = space.codecId,
+                        formatVersion = space.formatVersion,
                     )
                 }
                 val batchEmbeddings = results.mapNotNull { result ->
@@ -106,6 +120,30 @@ class SemanticStage(
                     embeddings.addAll(batchEmbeddings)
                 }
                 completedBeforeBatch += pathsInBatch.size
+            }
+            if (success > 0 && semanticDao != null) {
+                val now = System.currentTimeMillis()
+                semanticDao.upsertIndexMeta(
+                    com.renyxin.localalbum.data.db.entity.SemanticIndexMetaEntity(
+                        spaceId = space.spaceId,
+                        providerId = space.providerId,
+                        modelId = space.modelId,
+                        modelVersion = space.modelVersion,
+                        dimension = space.dimension,
+                        codecId = space.codecId,
+                        formatVersion = space.formatVersion,
+                        activeGeneration = 1,
+                        isActive = true,
+                        status = com.renyxin.localalbum.data.db.entity.SemanticIndexMetaEntity.STATUS_READY,
+                        vectorCount = embeddingDao.getCountInSpace(space.spaceId).toLong(),
+                        indexedCount = embeddingDao.getCountInSpace(space.spaceId).toLong(),
+                        deletedCount = 0,
+                        indexKind = com.renyxin.localalbum.data.db.entity.SemanticIndexMetaEntity.INDEX_EXACT,
+                        builtAt = now,
+                        updatedAt = now,
+                    ),
+                )
+                semanticDao.activate(space.spaceId, now)
             }
 
             // Phase 5: 双写 FeatureStore。主语义索引已按批写入，双写失败不影响扫描中搜索。
@@ -156,6 +194,6 @@ class SemanticStage(
      * 将嵌入向量序列化为逗号分隔的字符串（用于数据库存储）。
      */
     private fun serializeEmbedding(vec: FloatArray): String {
-        return vec.joinToString(",") { "%.6f".format(it) }
+        return vec.joinToString(",") { "%.6f".format(java.util.Locale.US, it) }
     }
 }

@@ -20,16 +20,37 @@ class SemanticClusterRecommenderTest {
 
     /** 内存模拟 EmbeddingDao */
     private class FakeEmbeddingDao(
-        private val embeddings: List<MediaEmbedding>,
+        embeddings: List<MediaEmbedding>,
     ) : EmbeddingDao {
+        private val embeddings = embeddings.sortedBy { it.filePath }
+        val keysetCursors = mutableListOf<String?>()
+        var largestRequestedPage = 0
+        var getAllCalls = 0
         override suspend fun insertEmbedding(embedding: MediaEmbedding) {}
         override suspend fun insertEmbeddings(embeddings: List<MediaEmbedding>) {}
         override suspend fun getByFilePath(filePath: String): MediaEmbedding? = embeddings.find { it.filePath == filePath }
-        override suspend fun getAll(): List<MediaEmbedding> = embeddings
+        override suspend fun getByFilePathInSpace(filePath: String, spaceId: String) = embeddings.find { it.filePath == filePath && it.spaceId == spaceId }
+        override suspend fun getAllForLegacyExport(): List<MediaEmbedding> {
+            getAllCalls++
+            error("推荐路径不得调用 getAll()")
+        }
         override suspend fun getPaged(limit: Int, offset: Int): List<MediaEmbedding> =
             embeddings.drop(offset).take(limit)
+        override suspend fun getPagedAfterInSpace(spaceId: String, afterPath: String?, limit: Int): List<MediaEmbedding> {
+            keysetCursors += afterPath
+            largestRequestedPage = maxOf(largestRequestedPage, limit)
+            return embeddings.filter { it.spaceId == spaceId && (afterPath == null || it.filePath > afterPath) }.take(limit)
+        }
+        override suspend fun getLegacyBackfillPage(legacySpaceId: String, afterPath: String?, limit: Int) = getPagedAfterInSpace(legacySpaceId, afterPath, limit)
+        override suspend fun updateLegacyPayloadMetadata(filePath: String, legacySpaceId: String, blob: ByteArray, providerId: String, modelId: String, dimension: Int, generation: Long, codecId: String, formatVersion: Int) = 0
+        override suspend fun getPagedAfter(afterPath: String?, limit: Int): List<MediaEmbedding> {
+            keysetCursors += afterPath
+            largestRequestedPage = maxOf(largestRequestedPage, limit)
+            return embeddings.filter { afterPath == null || it.filePath > afterPath }.take(limit)
+        }
         override suspend fun getAllFilePaths(): List<String> = embeddings.map { it.filePath }
         override suspend fun getCount(): Int = embeddings.size
+        override suspend fun getCountInSpace(spaceId: String) = embeddings.count { it.spaceId == spaceId }
         override suspend fun getCountByModelVersion(modelVersion: Int): Int = embeddings.count { it.modelVersion == modelVersion }
         override suspend fun deleteByFilePath(filePath: String) {}
         override suspend fun deleteByFilePaths(filePaths: List<String>) {}
@@ -204,5 +225,40 @@ class SemanticClusterRecommenderTest {
         if (favRec != null) {
             assertTrue("收藏数应大于 0", favRec.favoriteCount > 0)
         }
+    }
+
+    @Test
+    fun `over limit uses keyset pages and bounded deterministic sample`() = runBlocking {
+        val media = (0 until 200).map { makeMedia("bounded-%03d".format(it), qualityScore = 0.7f) }
+        val embeddings = media.reversed().map {
+            MediaEmbedding(filePath = it.filePath, embedding = makeVector(0), modelVersion = 1)
+        }
+        val dao = FakeEmbeddingDao(embeddings)
+        val recommender = SemanticClusterRecommender(
+            clock = fixedClock,
+            embeddingDao = dao,
+            k = 1,
+            minClusterSize = 3,
+            topNPerCluster = 100,
+            sampleLimit = 20,
+            pageSize = 8,
+        )
+
+        val first = recommender.generate(media)
+        val firstRunCursors = dao.keysetCursors.toList()
+        val second = recommender.generate(media)
+
+        assertEquals(0, dao.getAllCalls)
+        assertTrue("应遍历多个 keyset 页", firstRunCursors.size > 2)
+        assertTrue("首轮游标必须为 null", firstRunCursors.first() == null)
+        assertTrue("后续游标必须严格递增", firstRunCursors.filterNotNull().zipWithNext().all { it.first < it.second })
+        assertEquals("每轮 keyset 游标应一致", firstRunCursors, dao.keysetCursors.drop(firstRunCursors.size))
+        assertTrue("单页也必须计入总内存预算", dao.largestRequestedPage <= 5)
+        assertTrue("推荐媒体数不得超过总预算", first.flatMap { it.mediaItems }.size <= 20)
+        assertEquals(
+            first.map { it.mediaItems.map(MediaItem::filePath) },
+            second.map { it.mediaItems.map(MediaItem::filePath) },
+        )
+        assertEquals(first.map { it.score }, second.map { it.score })
     }
 }

@@ -40,17 +40,35 @@ interface FaceDao {
 
     // ---- 查询 ----
 
+    /** 仅供 DatabaseExporter 历史单 JSON 兼容导出，运行时路径禁止调用。 */
+    @Deprecated("Legacy single-JSON export only; use keyset paging for bounded export")
     @Query("SELECT * FROM faces")
-    suspend fun getAll(): List<FaceEntity>
+    suspend fun getAllForLegacyExport(): List<FaceEntity>
 
     @Query("SELECT * FROM faces ORDER BY faceId LIMIT :limit OFFSET :offset")
     suspend fun getPaged(limit: Int, offset: Int): List<FaceEntity>
 
+    @Query("SELECT * FROM faces WHERE faceId > :afterId ORDER BY faceId LIMIT :limit")
+    suspend fun getPagedAfter(afterId: Long, limit: Int): List<FaceEntity>
+
     @Query("SELECT * FROM faces WHERE filePath = :filePath")
     suspend fun getByFilePath(filePath: String): List<FaceEntity>
 
-    @Query("SELECT * FROM faces WHERE clusterId IS NOT NULL")
-    suspend fun getClustered(): List<FaceEntity>
+    /** 仅读取当前分析批次的人脸，用于首次建立小范围人物簇。 */
+    @Query("SELECT * FROM faces WHERE filePath IN (:filePaths)")
+    suspend fun getByFilePaths(filePaths: List<String>): List<FaceEntity>
+
+    /** 维护专用：按 faceId keyset 有界读取已有聚类，禁止 getAll/全量 DBSCAN。 */
+    @Query("""
+        SELECT * FROM faces
+        WHERE faceId > :afterId AND clusterId IS NOT NULL AND clusterId NOT LIKE 'pending:%'
+        ORDER BY faceId LIMIT :limit
+    """)
+    suspend fun getClusteredAfter(afterId: Long, limit: Int): List<FaceEntity>
+
+    /** 维护专用：pending 也按稳定 keyset 分批，供原型两阶段归并。 */
+    @Query("SELECT * FROM faces WHERE faceId > :afterId ORDER BY faceId LIMIT :limit")
+    suspend fun getMaintenanceBatchAfter(afterId: Long, limit: Int): List<FaceEntity>
 
     @Query("SELECT * FROM faces WHERE clusterId = :clusterId ORDER BY detectedAtMs DESC")
     suspend fun getByCluster(clusterId: String): List<FaceEntity>
@@ -61,7 +79,7 @@ interface FaceDao {
     /**
      * 查询所有非空 clusterId（去重），用于人脸相册分组展示。
      */
-    @Query("SELECT DISTINCT clusterId FROM faces WHERE clusterId IS NOT NULL")
+    @Query("SELECT DISTINCT clusterId FROM faces WHERE clusterId IS NOT NULL AND clusterId NOT LIKE 'pending:%'")
     suspend fun getClusterIds(): List<String>
 
     /**
@@ -74,11 +92,14 @@ interface FaceDao {
                (SELECT thumbnailPath FROM faces f2
                  WHERE f2.clusterId = f1.clusterId
                  ORDER BY f2.detectedAtMs ASC LIMIT 1) AS representativeThumb,
+               (SELECT filePath FROM faces f2
+                 WHERE f2.clusterId = f1.clusterId
+                 ORDER BY f2.detectedAtMs ASC LIMIT 1) AS representativeFilePath,
                (SELECT personName FROM faces f3
                  WHERE f3.clusterId = f1.clusterId AND f3.personName IS NOT NULL
                  LIMIT 1) AS personName
         FROM faces f1
-        WHERE clusterId IS NOT NULL
+        WHERE clusterId IS NOT NULL AND clusterId NOT LIKE 'pending:%'
         GROUP BY clusterId
         ORDER BY faceCount DESC
     """)
@@ -92,11 +113,14 @@ interface FaceDao {
                (SELECT thumbnailPath FROM faces f2
                  WHERE f2.clusterId = f1.clusterId
                  ORDER BY f2.detectedAtMs ASC LIMIT 1) AS representativeThumb,
+               (SELECT filePath FROM faces f2
+                 WHERE f2.clusterId = f1.clusterId
+                 ORDER BY f2.detectedAtMs ASC LIMIT 1) AS representativeFilePath,
                (SELECT personName FROM faces f3
                  WHERE f3.clusterId = f1.clusterId AND f3.personName IS NOT NULL
                  LIMIT 1) AS personName
         FROM faces f1
-        WHERE clusterId IS NOT NULL
+        WHERE clusterId IS NOT NULL AND clusterId NOT LIKE 'pending:%'
         GROUP BY clusterId
         ORDER BY faceCount DESC
     """)
@@ -107,6 +131,11 @@ interface FaceDao {
     @Query("UPDATE faces SET clusterId = :clusterId WHERE faceId IN (:faceIds)")
     @Transaction
     suspend fun updateClusterIds(faceIds: List<Long>, clusterId: String)
+
+    /** 增量人脸归类：按本批文件路径写入同一聚类 ID，避免回读所有人脸 ID。 */
+    @Query("UPDATE faces SET clusterId = :clusterId WHERE filePath IN (:filePaths)")
+    @Transaction
+    suspend fun updateClusterIdsByFilePaths(filePaths: List<String>, clusterId: String)
 
     @Query("UPDATE faces SET clusterId = :clusterId WHERE faceId = :faceId")
     suspend fun updateClusterId(faceId: Long, clusterId: String)
@@ -122,19 +151,18 @@ interface FaceDao {
     @Query("SELECT COUNT(*) FROM faces")
     suspend fun getCount(): Int
 
-    @Query("SELECT COUNT(*) FROM faces WHERE clusterId IS NOT NULL")
+    @Query("SELECT COUNT(*) FROM faces WHERE clusterId IS NOT NULL AND clusterId NOT LIKE 'pending:%'")
     suspend fun getClusteredCount(): Int
 
-    @Query("SELECT COUNT(DISTINCT clusterId) FROM faces WHERE clusterId IS NOT NULL")
+    @Query("SELECT COUNT(DISTINCT clusterId) FROM faces WHERE clusterId IS NOT NULL AND clusterId NOT LIKE 'pending:%'")
     suspend fun getClusterCount(): Int
 }
 
-/**
- * 人脸聚类摘要，用于人脸相册分组展示。
- */
+/** 人脸聚类摘要，用于人脸相册分组展示。 */
 data class FaceClusterSummary(
     val clusterId: String,
     val faceCount: Int,
     val representativeThumb: String?,
+    val representativeFilePath: String?,
     val personName: String? = null,
 )

@@ -33,15 +33,25 @@ class SemanticSearcherTest {
         }
 
         override suspend fun getByFilePath(filePath: String): MediaEmbedding? = store[filePath]
+        override suspend fun getByFilePathInSpace(filePath: String, spaceId: String): MediaEmbedding? = store[filePath]?.takeIf { it.spaceId == spaceId }
 
-        override suspend fun getAll(): List<MediaEmbedding> = store.values.toList()
+        override suspend fun getAllForLegacyExport(): List<MediaEmbedding> = store.values.toList()
 
         override suspend fun getPaged(limit: Int, offset: Int): List<MediaEmbedding> =
             store.values.toList().drop(offset).take(limit)
 
+        override suspend fun getPagedAfter(afterPath: String?, limit: Int): List<MediaEmbedding> =
+            store.toSortedMap().values.filter { afterPath == null || it.filePath > afterPath }.take(limit)
+        override suspend fun getPagedAfterInSpace(spaceId: String, afterPath: String?, limit: Int) =
+            store.toSortedMap().values.filter { it.spaceId == spaceId && (afterPath == null || it.filePath > afterPath) }.take(limit)
+        override suspend fun getLegacyBackfillPage(legacySpaceId: String, afterPath: String?, limit: Int) =
+            getPagedAfterInSpace(legacySpaceId, afterPath, limit)
+        override suspend fun updateLegacyPayloadMetadata(filePath: String, legacySpaceId: String, blob: ByteArray, providerId: String, modelId: String, dimension: Int, generation: Long, codecId: String, formatVersion: Int): Int = 0
+
         override suspend fun getAllFilePaths(): List<String> = store.keys.toList()
 
         override suspend fun getCount(): Int = store.size
+        override suspend fun getCountInSpace(spaceId: String): Int = store.values.count { it.spaceId == spaceId }
 
         override suspend fun getCountByModelVersion(modelVersion: Int): Int =
             store.values.count { it.modelVersion == modelVersion }
@@ -64,13 +74,25 @@ class SemanticSearcherTest {
             store.values.filter { it.modelVersion != currentVersion }.map { it.filePath }
     }
 
+    @Test
+    fun `embedding blob codec preserves floating point values`() {
+        val original = floatArrayOf(-1.25f, 0f, 0.125f, Float.MAX_VALUE)
+        val decoded = EmbeddingCodec.decode(EmbeddingCodec.encode(original))
+        assertTrue("二进制向量应无损往返", original.contentEquals(decoded))
+    }
+
     private fun makeEmbedding(searcher: SemanticSearcher, filePath: String, query: String): MediaEmbedding {
         val vec = runBlocking { provider.embedText(query) }
         return MediaEmbedding(
             filePath = filePath,
             embedding = searcher.serialize(vec),
+            embeddingBlob = EmbeddingCodec.encode(vec),
             modelVersion = 1,
             source = "concept",
+            providerId = SemanticVectorSpace.from(provider).providerId,
+            modelId = SemanticVectorSpace.from(provider).modelId,
+            dimension = vec.size,
+            spaceId = SemanticVectorSpace.from(provider).spaceId,
         )
     }
 

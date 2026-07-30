@@ -2,8 +2,6 @@ package com.renyxin.localalbum.data.worker
 
 import android.content.Context
 import androidx.work.*
-import com.renyxin.localalbum.AppContainer
-import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
@@ -16,39 +14,25 @@ class TrashCleanupWorker(
 ) : CoroutineWorker(context, workerParams) {
 
     override suspend fun doWork(): Result {
-        val container = (applicationContext as? com.renyxin.localalbum.LocalAlbumApplication)
-            ?.container ?: return Result.failure()
-        val dao = container.albumRepository.getMediaDao()
-        val trashFiles = dao.getTrashed()
+        val repository = (applicationContext as? com.renyxin.localalbum.LocalAlbumApplication)
+            ?.container?.albumRepository ?: return Result.failure()
+        val threshold = System.currentTimeMillis() - CLEANUP_DAYS_MS
 
-        val now = System.currentTimeMillis()
-        val threshold = now - CLEANUP_DAYS_MS
-        // P0-3: 使用 deletedAtMs 判定回收站过期时间，而非 modifiedAtMs
-        // modifiedAtMs 是文件系统修改时间，deletedAtMs 才是移入回收站的时间
-        val toDelete = trashFiles.filter { entity ->
-            entity.deletedAtMs in 1L..threshold
+        // 每次只处理有限批次；repository 统一保证关联表清理语义。
+        // 删除失败的物理文件仍留在回收站，后续周期任务可再次尝试。
+        var batches = 0
+        while (batches < MAX_BATCHES_PER_RUN) {
+            val deleted = repository.purgeExpiredTrashBatch(threshold, BATCH_SIZE)
+            if (deleted == 0) break
+            batches++
         }
-
-        if (toDelete.isNotEmpty()) {
-            val paths = toDelete.map { it.filePath }
-            // 删除物理文件
-            paths.forEach { path ->
-                try {
-                    File(path).delete()
-                } catch (_: Exception) {
-                    // 忽略删除失败
-                }
-            }
-            // 从数据库移出
-            dao.deleteByPaths(paths)
-            dao.deleteFtsEntries(paths)
-        }
-
         return Result.success()
     }
 
     companion object {
         private const val WORK_NAME = "trash_cleanup_worker"
+        private const val BATCH_SIZE = 200
+        private const val MAX_BATCHES_PER_RUN = 10
         private val CLEANUP_DAYS_MS = TimeUnit.DAYS.toMillis(30)
 
         fun schedule(context: Context) {

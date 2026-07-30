@@ -13,6 +13,7 @@ buildscript {
     dependencies {
         classpath("com.android.tools.build:gradle:8.13.2")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24")
+        classpath("com.google.devtools.ksp:symbol-processing-gradle-plugin:1.9.24-1.0.20")
         // 显式声明 kotlin-stdlib，防止 KGP 的 strictly 约束被过滤后
         // stage2 脚本编译 classpath 缺失 Kotlin 标准库与 JDK 平台类
         classpath("org.jetbrains.kotlin:kotlin-stdlib:1.9.24")

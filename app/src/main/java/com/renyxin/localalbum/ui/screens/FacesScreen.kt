@@ -19,6 +19,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.paging.PagingData
+import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.compose.itemKey
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -63,6 +66,7 @@ import com.renyxin.localalbum.core.pipeline.StageFileProgress
 import com.renyxin.localalbum.data.repo.FaceCluster
 import com.renyxin.localalbum.data.repo.FaceStats
 import com.renyxin.localalbum.ui.components.AnalysisProgressGrid
+import kotlinx.coroutines.flow.Flow
 
 /**
  * 人脸相册界面（Phase 3.3 人脸聚类）。
@@ -79,11 +83,10 @@ import com.renyxin.localalbum.ui.components.AnalysisProgressGrid
 fun FacesScreen(
     faceClusters: List<FaceCluster>,
     faceStats: FaceStats,
-    clusterPhotos: List<MediaItem>,
+    pagedMediaForCluster: (String) -> Flow<PagingData<MediaItem>>,
     isLoading: Boolean,
     onBack: () -> Unit,
-    onClusterClick: (String) -> Unit,
-    onMediaClick: (List<MediaItem>, Int) -> Unit,
+    onMediaClick: (MediaItem, String) -> Unit,
     onSetName: (String, String?) -> Unit,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
@@ -132,7 +135,7 @@ fun FacesScreen(
                 },
                 actions = {
                     IconButton(onClick = onRefresh) {
-                        Icon(Icons.Default.Refresh, contentDescription = "刷新")
+                        Icon(Icons.Default.Refresh, contentDescription = "刷新人物列表")
                     }
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
@@ -142,10 +145,13 @@ fun FacesScreen(
         },
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-            // 聚类详情视图：展示该人物的所有照片
+            // 聚类详情视图：按 selectedClusterId 创建并收集独立分页流。
             if (selectedClusterId != null) {
+                val clusterId = selectedClusterId!!
+                val clusterPaging = remember(clusterId) { pagedMediaForCluster(clusterId) }
                 FaceClusterDetailContent(
-                    clusterPhotos = clusterPhotos,
+                    clusterId = clusterId,
+                    clusterPhotos = clusterPaging,
                     onMediaClick = onMediaClick,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -161,10 +167,7 @@ fun FacesScreen(
                         FaceClusterGrid(
                             faceClusters = faceClusters,
                             faceStats = faceStats,
-                            onClusterClick = { cluster ->
-                                selectedClusterId = cluster.clusterId
-                                onClusterClick(cluster.clusterId)
-                            },
+                            onClusterClick = { cluster -> selectedClusterId = cluster.clusterId },
                             modifier = Modifier.weight(0.58f),
                         )
                     }
@@ -186,10 +189,7 @@ fun FacesScreen(
                 FaceClusterGrid(
                     faceClusters = faceClusters,
                     faceStats = faceStats,
-                    onClusterClick = { cluster ->
-                        selectedClusterId = cluster.clusterId
-                        onClusterClick(cluster.clusterId)
-                    },
+                    onClusterClick = { cluster -> selectedClusterId = cluster.clusterId },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -288,12 +288,14 @@ private fun FaceClusterGrid(
  */
 @Composable
 private fun FaceClusterDetailContent(
-    clusterPhotos: List<MediaItem>,
-    onMediaClick: (List<MediaItem>, Int) -> Unit,
+    clusterId: String,
+    clusterPhotos: Flow<PagingData<MediaItem>>,
+    onMediaClick: (MediaItem, String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    if (clusterPhotos.isEmpty()) {
+    val pagedItems = clusterPhotos.collectAsLazyPagingItems()
+    if (pagedItems.itemCount == 0 && pagedItems.loadState.refresh is androidx.paging.LoadState.Loading) {
         Box(
             modifier = modifier,
             contentAlignment = Alignment.Center,
@@ -313,17 +315,16 @@ private fun FaceClusterDetailContent(
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        items(clusterPhotos, key = { it.id }) { item ->
+        items(
+            count = pagedItems.itemCount,
+            key = pagedItems.itemKey { it.filePath },
+        ) { index ->
+            val item = pagedItems[index] ?: return@items
             Box(
                 modifier = Modifier
                     .aspectRatio(1f)
                     .clip(RoundedCornerShape(4.dp))
-                    .clickable {
-                        val index = clusterPhotos.indexOf(item)
-                        if (index >= 0) {
-                            onMediaClick(clusterPhotos, index)
-                        }
-                    },
+                    .clickable { onMediaClick(item, clusterId) },
             ) {
                 AsyncImage(
                     model = ImageRequest.Builder(context)

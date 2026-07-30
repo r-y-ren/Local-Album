@@ -13,12 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make JSON index import atomic across media, FTS, face, and semantic-embedding tables; FTS records are now restored in batches instead of one row at a time.
 - Preserve unchanged media-derived fields during a full scan and invalidate analysis checkpoints when media content changes, preventing completed analysis from being skipped after its result fields were replaced.
 - Serialize semantic vectors with a locale-invariant decimal format and reject malformed/non-finite vector values instead of silently shortening a vector.
+- Prevent built-in face analysis from clearing and clustering the complete face table; both face-provider paths now use bounded representative matching and pending clusters.
+- Make thumbnail generation convergent with persistent tasks, transactional leases, unique WorkManager scheduling, exponential retry backoff, and terminal failure states.
+- Batch trash cleanup and remove all associated face, embedding, analysis, plugin-feature, FTS, and thumbnail-task records only after physical deletion succeeds.
+
+### Added
+
+- Room schema v16 with the `thumbnail_tasks` queue and migration of existing missing thumbnails.
+- Room schema v17 with media scan generations and a persistent `analysis_tasks` queue.
 
 ### Changed
 
 - Documentation now describes the current local-media, on-device AI, model-download, import/export, and permission behavior.
 - External APK/Dex plugin loading remains hidden and experimental; it is no longer documented as a supported end-user extension mechanism.
 - Documentation: replace outdated Git LFS model workflow with `scripts/download_models.sh` / `extract_emap.py`; correct the model inventory and repository URLs.
+- Limit analysis checkpoint lookups to the current batch and stop incremental analysis from taking a complete image-path snapshot.
+- Build the album hierarchy from directory aggregates instead of complete media entities; album detail now consumes Room Paging, and missing indexer injection fails explicitly instead of falling back to an unbounded scan.
+- Full scans now mark media with a scan generation and purge stale paths in bounded SQL batches; analysis, full reanalysis, and startup resume use persistent leased tasks instead of complete image-path snapshots.
 
 ## [0.1.0] - 2026-07-27
 

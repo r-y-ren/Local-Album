@@ -228,13 +228,15 @@ private fun ExpandedDetail(
             value = "${progress.processedFiles} / ${progress.totalFiles} 已处理",
         )
 
-        // 处理速率
-        if (progress.processedFiles > 0 && progress.etaMs >= 0) {
-            DetailRow(
-                label = "预估剩余",
-                value = formatEta(progress.etaMs),
-            )
-        }
+        // ETA 尚未采集到足够样本时也保留该行，避免 UI 出现空白字段。
+        DetailRow(
+            label = "预估剩余",
+            value = when {
+                progress.isCompleted || progress.etaMs == 0L -> "即将完成"
+                progress.etaMs > 0L -> formatEta(progress.etaMs)
+                else -> "计算中…"
+            },
+        )
 
         DetailRow(
             label = "状态",
@@ -341,9 +343,7 @@ private fun buildMetaText(progress: AnalysisProgress): String {
     val parts = mutableListOf<String>()
     parts.add("${progress.processedFiles} / ${progress.totalFiles} 文件")
     parts.add("${progress.completedStages} / ${progress.totalStages} 阶段")
-    if (progress.etaMs > 0) {
-        parts.add(formatEta(progress.etaMs))
-    }
+    parts.add(if (progress.etaMs > 0) formatEta(progress.etaMs) else "预计时间计算中…")
     return parts.joinToString(" · ")
 }
 

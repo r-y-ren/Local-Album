@@ -83,9 +83,10 @@ class RecommendationEngine(
         // 3. [Phase 5] 场景主题推荐
         result += sceneThemeRecommender.generate(allItems)
 
-        // 4. [Phase 5] 语义聚类推荐（可选）
+        // 4. [Phase 5] 语义聚类推荐（可选）。生产路径由推荐器自行有界采样并加载元数据，
+        // 不把 albums 展平出的潜在整库列表继续传入语义推荐路径。
         semanticClusterRecommender?.let { recommender ->
-            result += recommender.generate(allItems)
+            result += recommender.generate()
         }
 
         return result.sortedByDescending { it.score }

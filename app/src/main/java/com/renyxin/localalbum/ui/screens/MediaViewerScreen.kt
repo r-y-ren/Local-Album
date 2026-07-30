@@ -74,6 +74,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as Media3Item
+import androidx.paging.PagingData
+import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.media3.exoplayer.ExoPlayer
 import coil.compose.AsyncImage
 import com.renyxin.localalbum.core.model.MediaItem
@@ -86,21 +88,33 @@ import kotlin.math.abs
 import androidx.compose.animation.core.Animatable
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.Flow
 
 @androidx.compose.foundation.ExperimentalFoundationApi
 @Composable
 fun MediaViewerScreen(
-    mediaItems: List<MediaItem>,
-    initialIndex: Int,
+    mediaPaging: Flow<PagingData<MediaItem>>,
+    initialPath: String,
     onBack: () -> Unit,
     onDeleteItem: (String) -> Unit = {},
     onToggleFavorite: (String) -> Unit = {},
+    resolvePreview: suspend (MediaItem) -> String? = { null },
 ) {
-    if (mediaItems.isEmpty()) return
-
-    val pagerState = rememberPagerState(
-        initialPage = initialIndex.coerceIn(0, mediaItems.lastIndex)
-    ) { mediaItems.size }
+    val mediaItems = mediaPaging.collectAsLazyPagingItems()
+    if (mediaItems.itemCount == 0) return
+    val initialIndex = mediaItems.itemSnapshotList.items.indexOfFirst { it.filePath == initialPath }
+        .takeIf { it >= 0 } ?: 0
+    val pagerState = rememberPagerState(initialPage = initialIndex) { mediaItems.itemCount }
+    var initialPathPositioned by remember(initialPath) { mutableStateOf(false) }
+    LaunchedEffect(initialPath, mediaItems.itemSnapshotList.items) {
+        if (!initialPathPositioned) {
+            val loadedIndex = mediaItems.itemSnapshotList.items.indexOfFirst { it.filePath == initialPath }
+            if (loadedIndex >= 0) {
+                pagerState.scrollToPage(loadedIndex)
+                initialPathPositioned = true
+            }
+        }
+    }
 
     var showOverlay by remember { mutableStateOf(true) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
@@ -124,7 +138,11 @@ fun MediaViewerScreen(
     // 背景透明度随拖拽距离即时变化（无需动画，跟随手指）
     val bgAlpha = (1f - (abs(dismissOffset.value) / dismissThreshold)).coerceIn(0f, 1f)
 
-    val currentItem = mediaItems.getOrNull(pagerState.currentPage)
+    val currentItem = mediaItems[pagerState.currentPage]
+    var resolvedPreviewPath by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(currentItem?.filePath, currentItem?.modifiedAt, currentItem?.fileSize) {
+        resolvedPreviewPath = currentItem?.let { resolvePreview(it) }
+    }
 
     // Delete confirmation dialog
     if (showDeleteConfirm && currentItem != null) {
@@ -266,10 +284,10 @@ fun MediaViewerScreen(
                 .systemBarsPadding()
                 .clipToBounds(),
         ) { page ->
-            val item = mediaItems[page]
+            val item = mediaItems[page] ?: return@HorizontalPager
             when (item.type) {
                 MediaType.IMAGE -> ZoomableImageContent(
-                    filePath = item.filePath,
+                    filePath = if (page == pagerState.currentPage) resolvedPreviewPath ?: item.filePath else item.filePath,
                     dismissOffset = dismissOffset.value,
                     onTap = { showOverlay = !showOverlay },
                     onVerticalDrag = { delta ->
@@ -377,7 +395,7 @@ fun MediaViewerScreen(
                     }
                 }
                 Text(
-                    text = "${pagerState.currentPage + 1} / ${mediaItems.size}",
+                    text = "${pagerState.currentPage + 1} / ${mediaItems.itemCount}",
                     color = Color.White,
                     fontSize = 14.sp,
                 )

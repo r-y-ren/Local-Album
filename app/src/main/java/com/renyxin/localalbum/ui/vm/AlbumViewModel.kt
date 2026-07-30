@@ -6,18 +6,21 @@ import androidx.lifecycle.viewModelScope
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import com.renyxin.localalbum.core.model.Album
+import com.renyxin.localalbum.core.model.DirectoryMediaQuery
 import com.renyxin.localalbum.core.model.MediaItem
+import com.renyxin.localalbum.core.model.MediaQueryContext
 import com.renyxin.localalbum.core.pipeline.AnalysisStage
 import com.renyxin.localalbum.core.pipeline.ProgressManager
 import com.renyxin.localalbum.core.pipeline.StageFileProgress
 import com.renyxin.localalbum.core.plugin.TaskProgress
 import com.renyxin.localalbum.core.recommendation.Recommendation
-import com.renyxin.localalbum.data.db.entity.MediaEntity
+import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
 import com.renyxin.localalbum.data.repo.AlbumRepository
 import com.renyxin.localalbum.data.repo.AlbumStats
 import com.renyxin.localalbum.data.repo.FaceCluster
 import com.renyxin.localalbum.data.repo.FaceStats
 import com.renyxin.localalbum.data.repo.DuplicateGroup
+import com.renyxin.localalbum.data.db.entity.MaintenanceRunEntity
 import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.data.repo.SemanticSearchResult
 import com.renyxin.localalbum.data.repo.SemanticSearchState
@@ -45,14 +48,41 @@ class AlbumViewModel(
     val leafAlbums: StateFlow<List<Album>> = repository.leafAlbums
     val recommendations: StateFlow<List<Recommendation>> = repository.recommendations
     val scanState: StateFlow<ScanState> = repository.scanState
-    val searchResults: StateFlow<List<MediaItem>> = repository.searchResults
-    val allMedia: StateFlow<List<MediaEntity>> = repository.allMedia
-    val favorites = repository.favorites
-    val trashedItems: StateFlow<List<MediaItem>> = repository.trashedItems
+    val favoriteCount: StateFlow<Int> = repository.favoriteCount
+    val trashedCount: StateFlow<Int> = repository.trashedCount
     val stats: StateFlow<AlbumStats> = repository.stats
 
-    /** Paging 3 分页媒体流，供时间线使用 */
+    /** Paging 3 分页媒体流，供时间线使用。 */
     val pagedMedia: Flow<PagingData<MediaItem>> = repository.pagedMedia.cachedIn(viewModelScope)
+
+    /** 收藏页独立 Paging 流，避免从全量媒体集合过滤。 */
+    val pagedFavorites: Flow<PagingData<MediaItem>> = repository.pagedFavorites.cachedIn(viewModelScope)
+
+    /** 回收站分页流。 */
+    val pagedTrash: Flow<PagingData<MediaItem>> = repository.pagedTrash.cachedIn(viewModelScope)
+
+    fun pagedMediaForFaceCluster(clusterId: String): Flow<PagingData<MediaItem>> =
+        repository.pagedMediaForFaceCluster(clusterId).cachedIn(viewModelScope)
+
+    fun pagedSearch(query: com.renyxin.localalbum.data.repo.MediaSearchQuery): Flow<PagingData<MediaItem>> =
+        repository.pagedSearch(query).cachedIn(viewModelScope)
+
+    fun viewerMedia(context: MediaQueryContext, initialPath: String): Flow<PagingData<MediaItem>> =
+        repository.viewerMedia(context, initialPath).cachedIn(viewModelScope)
+
+    suspend fun getMediaByPath(path: String): MediaItem? = repository.getMediaByPath(path)
+
+    fun requestGridThumbnails(visible: List<MediaItem>, prefetch: List<MediaItem> = emptyList()) {
+        viewModelScope.launch {
+            visible.forEach { repository.requestThumbnail(it, ThumbnailSpec.SIZE_GRID, ThumbnailSpec.PRIORITY_VISIBLE) }
+            prefetch.forEach { repository.requestThumbnail(it, ThumbnailSpec.SIZE_GRID, ThumbnailSpec.PRIORITY_PREFETCH) }
+        }
+    }
+
+    suspend fun resolvePreviewThumbnail(item: MediaItem): String? =
+        repository.requestThumbnail(item, ThumbnailSpec.SIZE_PREVIEW, ThumbnailSpec.PRIORITY_VISIBLE)
+
+    suspend fun getSearchModels(): List<String> = repository.getSearchModels()
 
     // ---- 任务进度追踪 (Phase 5.4) ----
 
@@ -151,6 +181,9 @@ class AlbumViewModel(
 
     fun findAlbumById(id: String): Album? = repository.findAlbumById(id)
 
+    fun pagedMediaForDirectory(query: DirectoryMediaQuery): Flow<PagingData<MediaItem>> =
+        repository.pagedMediaForDirectory(query).cachedIn(viewModelScope)
+
     fun deleteMediaItems(paths: List<String>) {
         viewModelScope.launch { repository.deleteMediaItems(paths) }
     }
@@ -165,14 +198,6 @@ class AlbumViewModel(
 
     fun clearTrash() {
         viewModelScope.launch { repository.clearTrash() }
-    }
-
-    fun search(query: String) {
-        viewModelScope.launch { repository.search(query) }
-    }
-
-    fun clearSearch() {
-        repository.clearSearch()
     }
 
     // ---- 语义搜索 (Phase 4.1) ----
@@ -214,21 +239,6 @@ class AlbumViewModel(
         }
     }
 
-    /**
-     * 智能搜索：根据当前模式自动选择搜索方式。
-     * 语义模式 → 混合检索（语义召回 + 关键词精排）
-     * 关键词模式 → 纯 FTS4 关键词搜索
-     */
-    fun smartSearch(query: String) {
-        viewModelScope.launch {
-            if (_isSemanticMode.value) {
-                repository.hybridSearch(query)
-            } else {
-                repository.search(query)
-            }
-        }
-    }
-
     fun toggleFavorite(path: String) {
         viewModelScope.launch { repository.toggleFavorite(path) }
     }
@@ -248,31 +258,27 @@ class AlbumViewModel(
 
     // ---- 重复照片管理 ----
 
-    private val _duplicateGroups = MutableStateFlow<List<DuplicateGroup>>(emptyList())
-    val duplicateGroups: StateFlow<List<DuplicateGroup>> = _duplicateGroups.asStateFlow()
+    /** 只观察 active generation 的有限持久结果窗口。 */
+    val duplicateGroups: StateFlow<List<DuplicateGroup>> = repository.observeDuplicateGroups(limit = 50)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val duplicateMaintenanceRun: StateFlow<MaintenanceRunEntity?> = repository.duplicateMaintenanceRun
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    val isDuplicateLoading: StateFlow<Boolean> = duplicateMaintenanceRun
+        .map { it?.status == MaintenanceRunEntity.STATUS_RUNNING || it?.status == MaintenanceRunEntity.STATUS_FINALIZING }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val _duplicateGroupPhotos = MutableStateFlow<List<MediaItem>>(emptyList())
     val duplicateGroupPhotos: StateFlow<List<MediaItem>> = _duplicateGroupPhotos.asStateFlow()
 
-    private val _isDuplicateLoading = MutableStateFlow(false)
-    val isDuplicateLoading: StateFlow<Boolean> = _isDuplicateLoading.asStateFlow()
-
-    /** 执行重复检测并加载所有重复组 */
-    fun loadDuplicateGroups() {
-        viewModelScope.launch {
-            _isDuplicateLoading.value = true
-            try {
-                _duplicateGroups.value = repository.findDuplicateGroups()
-            } finally {
-                _isDuplicateLoading.value = false
-            }
-        }
-    }
+    /** 调度唯一离线维护任务；调用立即返回。 */
+    fun loadDuplicateGroups() = repository.startDuplicateMaintenance()
 
     /** 加载某个重复组内的完整媒体项 */
     fun loadPhotosInDuplicateGroup(groupId: String) {
         viewModelScope.launch {
-            val group = _duplicateGroups.value.find { it.groupId == groupId } ?: return@launch
+            val group = duplicateGroups.value.find { it.groupId == groupId } ?: return@launch
             val dao = repository.getMediaDao()
             val items = group.filePaths.mapNotNull { path ->
                 dao.getByFilePathLight(path)?.let {
@@ -313,15 +319,12 @@ class AlbumViewModel(
 
     /** "保留一项删除其余" */
     fun keepOneDeleteRest(groupId: String, keepPath: String? = null) {
-        viewModelScope.launch {
-            repository.keepOneDeleteRest(groupId, keepPath)
-            _duplicateGroups.value = repository.findDuplicateGroups()
-        }
+        viewModelScope.launch { repository.keepOneDeleteRest(groupId, keepPath) }
     }
 
     /** 所有重复文件总大小（浪费的存储空间） */
     fun getTotalWastedBytes(): Long {
-        return _duplicateGroups.value.sumOf { group ->
+        return duplicateGroups.value.sumOf { group ->
             group.filePaths.drop(1).sumOf { group.fileSizes[it] ?: 0L }
         }
     }
@@ -330,9 +333,6 @@ class AlbumViewModel(
 
     private val _faceClusters = MutableStateFlow<List<FaceCluster>>(emptyList())
     val faceClusters: StateFlow<List<FaceCluster>> = _faceClusters.asStateFlow()
-
-    private val _faceClusterPhotos = MutableStateFlow<List<MediaItem>>(emptyList())
-    val faceClusterPhotos: StateFlow<List<MediaItem>> = _faceClusterPhotos.asStateFlow()
 
     private val _faceStats = MutableStateFlow(FaceStats())
     val faceStats: StateFlow<FaceStats> = _faceStats.asStateFlow()
@@ -345,13 +345,6 @@ class AlbumViewModel(
         }
     }
 
-    /** 加载某个聚类内的完整媒体项 */
-    fun loadPhotosInFaceCluster(clusterId: String) {
-        viewModelScope.launch {
-            _faceClusterPhotos.value = repository.getPhotosInFaceCluster(clusterId)
-        }
-    }
-
     /** 为聚类命名（人物名称） */
     fun setPersonName(clusterId: String, name: String?) {
         viewModelScope.launch {
@@ -359,6 +352,9 @@ class AlbumViewModel(
             _faceClusters.value = repository.getFaceClusters()
         }
     }
+
+    /** 仅启动显式人物原型维护，不触发图片全量重分析。 */
+    fun maintainFaceClusters() = repository.startFaceClusterMaintenance()
 
     // ---- 数据库导入导出 (Phase 4.2) ----
 
@@ -437,7 +433,8 @@ class AlbumViewModel(
     fun exportDatabaseToUri(context: android.content.Context, uri: android.net.Uri) {
         viewModelScope.launch {
             _backupState.value = BackupState.InProgress("正在导出数据库…")
-            val temp = java.io.File(context.cacheDir, "localalbum_export_tmp.json")
+            // 默认使用 ZIP + NDJSON；导出器仅在显式 .json 后缀时生成历史单文件格式。
+            val temp = java.io.File(context.cacheDir, "localalbum_export_tmp.zip")
             try {
                 val result = repository.exportDatabase(temp)
                 if (!result.success) {
@@ -468,7 +465,8 @@ class AlbumViewModel(
     fun prepareImportFromUri(context: android.content.Context, uri: android.net.Uri) {
         viewModelScope.launch {
             _backupState.value = BackupState.InProgress("正在读取文件…")
-            val temp = java.io.File(context.cacheDir, "localalbum_import_tmp.json")
+            // 固定 .zip 后缀不影响内容探测；导入器以 ZIP 文件头而非扩展名判别格式。
+            val temp = java.io.File(context.cacheDir, "localalbum_import_tmp.zip")
             try {
                 val opened = context.contentResolver.openInputStream(uri)?.use { inp ->
                     temp.outputStream().use { inp.copyTo(it) }

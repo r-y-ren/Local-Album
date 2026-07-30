@@ -124,6 +124,7 @@ import coil.compose.AsyncImage
 import androidx.paging.compose.collectAsLazyPagingItems
 import com.renyxin.localalbum.core.model.Album
 import com.renyxin.localalbum.core.model.MediaItem
+import com.renyxin.localalbum.core.model.MediaQueryContext
 import com.renyxin.localalbum.core.recommendation.Recommendation
 import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.ui.components.DirectoryPickerDialog
@@ -177,8 +178,8 @@ sealed interface Screen {
     data object Main : Screen
     data class AlbumDetail(val album: Album, val sourceTab: Int = 0) : Screen
     data class MediaViewer(
-        val items: List<MediaItem>,
-        val initialIndex: Int,
+        val initialPath: String,
+        val queryContext: MediaQueryContext,
         val returnTo: Screen,
     ) : Screen
     data object Search : Screen
@@ -292,10 +293,16 @@ fun LocalAlbumApp(
         is Screen.AlbumDetail -> {
             AlbumDetailScreen(
                 album = s.album,
+                mediaPaging = albumViewModel::pagedMediaForDirectory,
                 onBack = { goBack() },
-                onMediaClick = { items, index ->
-                    // 将当前 AlbumDetail 作为返回目标
-                    navigateTo(Screen.MediaViewer(items, index, returnTo = s))
+                onMediaClick = { item, _ ->
+                    // 相册详情必须优先准确打开用户点击的媒体。目录 Paging 的 initialKey
+                    // 只决定加载窗口，并不保证目标项对应查看器索引 0，因此这里使用单项上下文。
+                    navigateTo(Screen.MediaViewer(
+                        initialPath = item.filePath,
+                        queryContext = MediaQueryContext.Single,
+                        returnTo = s,
+                    ))
                 },
                 onDeleteMediaItems = { paths ->
                     albumViewModel.deleteMediaItems(paths)
@@ -318,10 +325,13 @@ fun LocalAlbumApp(
                     settingsViewModel.setGestureGuideShown(true)
                 }
             }
+            val viewerPaging = remember(s.queryContext, s.initialPath) {
+                albumViewModel.viewerMedia(s.queryContext, s.initialPath)
+            }
             Box(modifier = Modifier.fillMaxSize()) {
                 MediaViewerScreen(
-                    mediaItems = s.items,
-                    initialIndex = s.initialIndex,
+                    mediaPaging = viewerPaging,
+                    initialPath = s.initialPath,
                     onBack = {
                         goBackTo(s.returnTo)
                     },
@@ -331,6 +341,7 @@ fun LocalAlbumApp(
                     onToggleFavorite = { path ->
                         albumViewModel.toggleFavorite(path)
                     },
+                    resolvePreview = albumViewModel::resolvePreviewThumbnail,
                 )
 
                 // 手势引导浮层（4秒后自动消失）
@@ -360,7 +371,7 @@ fun LocalAlbumApp(
         }
 
         is Screen.Trash -> {
-            val trashedItems by albumViewModel.trashedItems.collectAsStateWithLifecycle()
+            val trashedItems = albumViewModel.pagedTrash.collectAsLazyPagingItems()
             TrashScreen(
                 trashedItems = trashedItems,
                 onBack = { goBack() },
@@ -371,24 +382,38 @@ fun LocalAlbumApp(
         }
 
         is Screen.Favorites -> {
-            val allMedia by albumViewModel.allMedia.collectAsStateWithLifecycle()
-            val favorites = remember(allMedia) { allMedia.filter { it.isFavorite } }
-            com.renyxin.localalbum.ui.screen.TimelineScreen(
-                items = favorites,
-                onItemClick = { entity ->
-                    val idx = favorites.indexOf(entity)
-                    if (idx >= 0) {
+            val pagedFavorites = albumViewModel.pagedFavorites.collectAsLazyPagingItems()
+            Scaffold(
+                topBar = {
+                    TopAppBar(
+                        title = { Text("收藏") },
+                        navigationIcon = {
+                            IconButton(onClick = { goBack() }) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "返回",
+                                )
+                            }
+                        },
+                    )
+                },
+            ) { padding ->
+                com.renyxin.localalbum.ui.screen.PagedTimelineScreen(
+                    pagedItems = pagedFavorites,
+                    onThumbnailWindowChanged = albumViewModel::requestGridThumbnails,
+                    onItemClick = { item ->
+                        // 点击路径是查看器的唯一权威，避免数据库绝对偏移与局部 Pager 索引错位。
                         navigateTo(
                             Screen.MediaViewer(
-                                items = favorites.map { it.toMediaItem() },
-                                initialIndex = idx,
+                                initialPath = item.filePath,
+                                queryContext = MediaQueryContext.Single,
                                 returnTo = s,
                             )
                         )
-                    }
-                },
-                onBack = { goBack() },
-            )
+                    },
+                    modifier = Modifier.padding(padding),
+                )
+            }
         }
 
         is Screen.Recommendations -> {
@@ -407,7 +432,11 @@ fun LocalAlbumApp(
                 recommendation = s.recommendation,
                 onBack = { goBack() },
                 onMediaClick = { items, index ->
-                    navigateTo(Screen.MediaViewer(items, index, returnTo = s))
+                    navigateTo(Screen.MediaViewer(
+                        initialPath = items[index].filePath,
+                        queryContext = MediaQueryContext.StablePaths.of(items.map { it.filePath }),
+                        returnTo = s,
+                    ))
                 },
             )
         }
@@ -415,13 +444,12 @@ fun LocalAlbumApp(
         is Screen.DuplicatePhotos -> {
             val duplicateGroups by albumViewModel.duplicateGroups.collectAsStateWithLifecycle()
             val isDuplicateLoading by albumViewModel.isDuplicateLoading.collectAsStateWithLifecycle()
-            // 进入页面时触发重复检测
-            LaunchedEffect(Unit) {
-                albumViewModel.loadDuplicateGroups()
-            }
+            val maintenanceRun by albumViewModel.duplicateMaintenanceRun.collectAsStateWithLifecycle()
             DuplicatePhotosScreen(
                 duplicateGroups = duplicateGroups,
                 isLoading = isDuplicateLoading,
+                scannedCount = maintenanceRun?.scannedCount ?: 0,
+                lastError = maintenanceRun?.error,
                 onBack = { goBack() },
                 onKeepOneDeleteRest = { groupId, keepPath ->
                     albumViewModel.keepOneDeleteRest(groupId, keepPath)
@@ -433,7 +461,6 @@ fun LocalAlbumApp(
         is Screen.Faces -> {
             val faceClusters by albumViewModel.faceClusters.collectAsStateWithLifecycle()
             val faceStats by albumViewModel.faceStats.collectAsStateWithLifecycle()
-            val clusterPhotos by albumViewModel.faceClusterPhotos.collectAsStateWithLifecycle()
             val faceProgress by albumViewModel.faceFileProgress.collectAsStateWithLifecycle()
             val isPipelineRunning by albumViewModel.isPipelineRunning.collectAsStateWithLifecycle()
             // 修复：扫描完成后自动刷新人脸聚类，无需退出重进页面
@@ -458,18 +485,20 @@ fun LocalAlbumApp(
             FacesScreen(
                 faceClusters = faceClusters,
                 faceStats = faceStats,
-                clusterPhotos = clusterPhotos,
+                pagedMediaForCluster = albumViewModel::pagedMediaForFaceCluster,
                 isLoading = false,
                 onBack = { goBack() },
-                onClusterClick = { clusterId ->
-                    albumViewModel.loadPhotosInFaceCluster(clusterId)
-                },
-                onMediaClick = { items, index ->
-                    navigateTo(Screen.MediaViewer(items, index, returnTo = s))
+                onMediaClick = { item, clusterId ->
+                    navigateTo(Screen.MediaViewer(
+                        initialPath = item.filePath,
+                        queryContext = MediaQueryContext.Face(clusterId),
+                        returnTo = s,
+                    ))
                 },
                 onSetName = { clusterId, name ->
                     albumViewModel.setPersonName(clusterId, name)
                 },
+                // 人物页刷新是用户要求的“重新开始全量 AI 扫描”，而非仅读取数据库或维护原型。
                 onRefresh = { albumViewModel.forceReanalyzeAll() },
                 stageFileProgress = faceProgress,
                 isPipelineRunning = isPipelineRunning,
@@ -477,30 +506,30 @@ fun LocalAlbumApp(
         }
 
         is Screen.Search -> {
-            val searchResults by albumViewModel.searchResults.collectAsStateWithLifecycle()
             val semanticResults by albumViewModel.semanticSearchResults.collectAsStateWithLifecycle()
             val isSemanticMode by albumViewModel.isSemanticMode.collectAsStateWithLifecycle()
             val semanticSearchState by albumViewModel.semanticSearchState.collectAsStateWithLifecycle()
+            var cameraModels by remember { mutableStateOf(emptyList<String>()) }
+            LaunchedEffect(Unit) { cameraModels = albumViewModel.getSearchModels() }
             SearchScreen(
-                searchResults = searchResults,
+                pagedSearch = albumViewModel::pagedSearch,
+                cameraModels = cameraModels,
                 semanticSearchResults = semanticResults,
                 isSemanticMode = isSemanticMode,
                 semanticSearchState = semanticSearchState,
                 onSemanticModeChange = { albumViewModel.setSemanticMode(it) },
                 onSearch = { query ->
-                    if (isSemanticMode) {
-                        albumViewModel.semanticSearch(query)
-                    } else {
-                        albumViewModel.search(query)
-                    }
+                    if (isSemanticMode) albumViewModel.semanticSearch(query)
                 },
-                onClearSearch = {
-                    albumViewModel.clearSearch()
-                    albumViewModel.clearSemanticSearch()
-                },
+                onClearSearch = albumViewModel::clearSemanticSearch,
                 onBack = { goBack() },
-                onMediaClick = { items, index ->
-                    navigateTo(Screen.MediaViewer(items, index, returnTo = s))
+                onMediaClick = { item, query, stablePaths ->
+                    navigateTo(Screen.MediaViewer(
+                        initialPath = item.filePath,
+                        queryContext = query?.let(MediaQueryContext::Search)
+                            ?: MediaQueryContext.StablePaths.of(stablePaths.orEmpty()),
+                        returnTo = s,
+                    ))
                 },
             )
         }
@@ -677,11 +706,14 @@ private fun currentTabContent(
         // Tab 0: 照片 — 时间线 + 顶部快捷入口卡片
         0 -> PhotosTab(
             viewModel = albumViewModel,
-            onMediaClick = { items, index ->
+            onMediaClick = { item ->
+                // Timeline Paging 的 initialKey 是数据库绝对偏移，而查看器 Pager 页码是
+                // 当前加载窗口的局部索引，两者混用会使部分点击显示相邻或错误图片。
+                // 首页点击应以路径为唯一权威，直接加载被点击媒体。
                 navigateTo(
                     Screen.MediaViewer(
-                        items = items.map { entity -> entity.toMediaItem() },
-                        initialIndex = index,
+                        initialPath = item.filePath,
+                        queryContext = MediaQueryContext.Single,
                         returnTo = Screen.Timeline,
                     )
                 )
@@ -705,30 +737,30 @@ private fun currentTabContent(
 
         // Tab 1: 搜索
         1 -> {
-            val searchResults by albumViewModel.searchResults.collectAsStateWithLifecycle()
             val semanticResults by albumViewModel.semanticSearchResults.collectAsStateWithLifecycle()
             val isSemanticMode by albumViewModel.isSemanticMode.collectAsStateWithLifecycle()
             val semanticSearchState by albumViewModel.semanticSearchState.collectAsStateWithLifecycle()
+            var cameraModels by remember { mutableStateOf(emptyList<String>()) }
+            LaunchedEffect(Unit) { cameraModels = albumViewModel.getSearchModels() }
             SearchScreen(
-                searchResults = searchResults,
+                pagedSearch = albumViewModel::pagedSearch,
+                cameraModels = cameraModels,
                 semanticSearchResults = semanticResults,
                 isSemanticMode = isSemanticMode,
                 semanticSearchState = semanticSearchState,
                 onSemanticModeChange = { albumViewModel.setSemanticMode(it) },
                 onSearch = { query ->
-                    if (isSemanticMode) {
-                        albumViewModel.semanticSearch(query)
-                    } else {
-                        albumViewModel.search(query)
-                    }
+                    if (isSemanticMode) albumViewModel.semanticSearch(query)
                 },
-                onClearSearch = {
-                    albumViewModel.clearSearch()
-                    albumViewModel.clearSemanticSearch()
-                },
+                onClearSearch = albumViewModel::clearSemanticSearch,
                 onBack = { onSwitchTab(0) },
-                onMediaClick = { items, index ->
-                    navigateTo(Screen.MediaViewer(items, index, returnTo = Screen.Search))
+                onMediaClick = { item, query, stablePaths ->
+                    navigateTo(Screen.MediaViewer(
+                        initialPath = item.filePath,
+                        queryContext = query?.let(MediaQueryContext::Search)
+                            ?: MediaQueryContext.StablePaths.of(stablePaths.orEmpty()),
+                        returnTo = Screen.Search,
+                    ))
                 },
             )
         }
@@ -851,6 +883,18 @@ private fun RecommendationTab(
     val recommendations by viewModel.recommendations.collectAsStateWithLifecycle()
     val scanState by viewModel.scanState.collectAsStateWithLifecycle()
 
+    // 进入精选页立即读取当前数据库候选；扫描期间定时刷新，使已写入的媒体逐步呈现。
+    LaunchedEffect(Unit) {
+        viewModel.refreshRecommendations()
+    }
+    LaunchedEffect(scanState) {
+        while (scanState is ScanState.Scanning) {
+            delay(1_500L)
+            viewModel.refreshRecommendations()
+        }
+        if (scanState is ScanState.Done) viewModel.refreshRecommendations()
+    }
+
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -886,6 +930,7 @@ private fun RecommendationTab(
             }
         },
     ) { padding ->
+        // 扫描中若已有候选则继续显示内容，仅在首批结果尚未写入时展示加载态。
         if (scanState is ScanState.Scanning && recommendations.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize().padding(padding),
@@ -895,7 +940,7 @@ private fun RecommendationTab(
                     CircularProgressIndicator()
                     Spacer(Modifier.height(16.dp))
                     Text(
-                        text = (scanState as ScanState.Scanning).message,
+                        text = "${(scanState as ScanState.Scanning).message}\n已扫描内容将自动显示",
                         style = MaterialTheme.typography.bodyLarge,
                     )
                 }
@@ -1743,7 +1788,7 @@ private fun SettingsTab(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val scanState by albumViewModel.scanState.collectAsStateWithLifecycle()
-    val trashedCount by albumViewModel.trashedItems.collectAsStateWithLifecycle()
+    val trashedCount by albumViewModel.trashedCount.collectAsStateWithLifecycle()
 
     var showPicker by remember { mutableStateOf(false) }
     var newIgnore by remember { mutableStateOf("") }
@@ -1831,7 +1876,7 @@ private fun SettingsTab(
                             .clickable(onClick = onNavigateToTrash),
                         headlineContent = { Text("回收站") },
                         supportingContent = {
-                            Text(if (trashedCount.isEmpty()) "空" else "${trashedCount.size} 项待清理")
+                            Text(if (trashedCount == 0) "空" else "$trashedCount 项待清理")
                         },
                         leadingContent = {
                             Icon(
@@ -2202,13 +2247,13 @@ private fun SettingsTab(
                 val pendingImport by albumViewModel.pendingImport.collectAsStateWithLifecycle()
                 val context = androidx.compose.ui.platform.LocalContext.current
 
-                // SAF 导出：用户选择目标位置（自定义路径）
+                // SAF 默认导出 ZIP + NDJSON；导入器仍兼容历史 JSON 文件。
                 val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-                    androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json"),
+                    androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/zip"),
                 ) { uri ->
                     if (uri != null) albumViewModel.exportDatabaseToUri(context, uri)
                 }
-                // SAF 导入：用户选择 JSON 文件（自定义路径）
+                // SAF 导入：接受新的 ZIP 备份及历史 JSON 文件。
                 val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
                     androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
                 ) { uri ->
@@ -2225,7 +2270,7 @@ private fun SettingsTab(
                         fontWeight = FontWeight.Bold,
                     )
                     Text(
-                        text = "将索引数据库导出为 JSON 文件，换设备后可一键恢复，避免重新扫描。可选择自定义位置导出/导入。",
+                        text = "默认导出 ZIP 流式备份，适合大图库；仍可导入历史 JSON 备份。可选择自定义位置导出/导入。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
                     )
@@ -2233,7 +2278,7 @@ private fun SettingsTab(
                     // Export button
                     OutlinedButton(
                         onClick = {
-                            val fileName = "localalbum_backup_${java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(java.util.Date())}.json"
+                            val fileName = "localalbum_backup_${java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(java.util.Date())}.zip"
                             exportLauncher.launch(fileName)
                         },
                         enabled = backupState !is AlbumViewModel.BackupState.InProgress,
@@ -2248,7 +2293,7 @@ private fun SettingsTab(
                     // Import button
                     OutlinedButton(
                         onClick = {
-                            importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*"))
+                            importLauncher.launch(arrayOf("application/zip", "application/json", "application/octet-stream", "*/*"))
                         },
                         enabled = backupState !is AlbumViewModel.BackupState.InProgress,
                         modifier = Modifier.fillMaxWidth(),
@@ -2389,7 +2434,7 @@ private fun formatInstant(instant: Instant): String {
 @Composable
 private fun PhotosTab(
     viewModel: AlbumViewModel,
-    onMediaClick: (List<com.renyxin.localalbum.data.db.entity.MediaEntity>, Int) -> Unit,
+    onMediaClick: (MediaItem) -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToFavorites: () -> Unit,
     onNavigateToDuplicate: () -> Unit,
@@ -2397,13 +2442,13 @@ private fun PhotosTab(
     onNavigateToRecommendations: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val allMedia by viewModel.allMedia.collectAsStateWithLifecycle()
+    val favoriteCount by viewModel.favoriteCount.collectAsStateWithLifecycle()
     val scanState by viewModel.scanState.collectAsStateWithLifecycle()
 
-    // Paging 3 分页数据
+    // Paging 3 是时间线唯一的媒体数据源，禁止维护全库 List 镜像。
     val pagedItems = viewModel.pagedMedia.collectAsLazyPagingItems()
 
-    if (scanState is ScanState.Scanning && allMedia.isEmpty() && pagedItems.itemCount == 0) {
+    if (scanState is ScanState.Scanning && pagedItems.itemCount == 0) {
         Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator()
@@ -2414,7 +2459,7 @@ private fun PhotosTab(
         return
     }
 
-    if (allMedia.isEmpty() && pagedItems.itemCount == 0) {
+    if (pagedItems.itemCount == 0) {
         EmptyStateView(
             icon = Icons.Outlined.PhotoLibrary,
             title = "暂无媒体文件",
@@ -2432,17 +2477,12 @@ private fun PhotosTab(
     // LazyVerticalGrid 中，作为占满整行的 header item。
     com.renyxin.localalbum.ui.screen.PagedTimelineScreen(
         pagedItems = pagedItems,
-        onItemClick = { mediaItem ->
-            val entity = allMedia.find { it.filePath == mediaItem.filePath }
-            if (entity != null) {
-                val idx = allMedia.indexOf(entity)
-                if (idx >= 0) onMediaClick(allMedia, idx)
-            }
-        },
+        onItemClick = onMediaClick,
+        onThumbnailWindowChanged = viewModel::requestGridThumbnails,
         modifier = modifier.fillMaxSize(),
         headerContent = {
             QuickAccessRow(
-                favoritesCount = allMedia.count { it.isFavorite },
+                favoritesCount = favoriteCount,
                 onNavigateToSearch = onNavigateToSearch,
                 onNavigateToFavorites = onNavigateToFavorites,
                 onNavigateToDuplicate = onNavigateToDuplicate,

@@ -14,16 +14,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -44,7 +40,6 @@ import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -55,7 +50,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,14 +65,20 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import androidx.compose.ui.platform.LocalContext
+import androidx.paging.PagingData
+import androidx.paging.compose.LazyPagingItems
+import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.compose.itemKey
 import com.renyxin.localalbum.core.model.Album
+import com.renyxin.localalbum.core.model.DirectoryMediaQuery
+import com.renyxin.localalbum.core.model.DirectoryMediaSort
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.Locale
+import kotlinx.coroutines.flow.Flow
 
 enum class SortMode(val label: String) {
     NAME_ASC("名称 A → Z"),
@@ -106,8 +106,9 @@ enum class ViewMode(val label: String) {
 @Composable
 fun AlbumDetailScreen(
     album: Album,
+    mediaPaging: (DirectoryMediaQuery) -> Flow<PagingData<MediaItem>>,
     onBack: () -> Unit,
-    onMediaClick: (List<MediaItem>, Int) -> Unit,
+    onMediaClick: (MediaItem, DirectoryMediaQuery) -> Unit,
     onDeleteMediaItems: (List<String>) -> Unit = {},
     onBatchSetFavorite: (List<String>, Boolean) -> Unit = { _, _ -> },
     onSetCover: (String) -> Unit = {},
@@ -123,28 +124,30 @@ fun AlbumDetailScreen(
     val selectedPaths = remember { mutableStateMapOf<String, Boolean>() }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
-    val allItems = album.mediaItems
-
-    val filtered = remember(allItems, filter) {
-        when (filter) {
-            MediaFilter.ALL -> allItems
-            MediaFilter.IMAGES_ONLY -> allItems.filter { it.type == MediaType.IMAGE }
-            MediaFilter.VIDEOS_ONLY -> allItems.filter { it.type == MediaType.VIDEO }
-        }
+    val directoryQuery = remember(album.directoryPath, sortMode, filter) {
+        DirectoryMediaQuery(
+            directoryPath = album.directoryPath,
+            mediaType = when (filter) {
+                MediaFilter.ALL -> null
+                MediaFilter.IMAGES_ONLY -> MediaType.IMAGE
+                MediaFilter.VIDEOS_ONLY -> MediaType.VIDEO
+            },
+            sort = when (sortMode) {
+                SortMode.NAME_ASC -> DirectoryMediaSort.NAME_ASC
+                SortMode.NAME_DESC -> DirectoryMediaSort.NAME_DESC
+                SortMode.DATE_NEWEST -> DirectoryMediaSort.DATE_DESC
+                SortMode.DATE_OLDEST -> DirectoryMediaSort.DATE_ASC
+                SortMode.MODIFIED_NEWEST -> DirectoryMediaSort.MODIFIED_DESC
+                SortMode.MODIFIED_OLDEST -> DirectoryMediaSort.MODIFIED_ASC
+                SortMode.SIZE_DESC -> DirectoryMediaSort.SIZE_DESC
+                SortMode.SIZE_ASC -> DirectoryMediaSort.SIZE_ASC
+            },
+        )
     }
-
-    val sorted = remember(filtered, sortMode) {
-        when (sortMode) {
-            SortMode.NAME_ASC -> filtered.sortedBy { it.fileName.lowercase() }
-            SortMode.NAME_DESC -> filtered.sortedByDescending { it.fileName.lowercase() }
-            SortMode.DATE_NEWEST -> filtered.sortedByDescending { it.capturedAt }
-            SortMode.DATE_OLDEST -> filtered.sortedBy { it.capturedAt }
-            SortMode.MODIFIED_NEWEST -> filtered.sortedByDescending { it.modifiedAt }
-            SortMode.MODIFIED_OLDEST -> filtered.sortedBy { it.modifiedAt }
-            SortMode.SIZE_DESC -> filtered.sortedByDescending { it.fileSize }
-            SortMode.SIZE_ASC -> filtered.sortedBy { it.fileSize }
-        }
-    }
+    // 查询身份变化时创建新 Pager；UI 不再对当前 Paging 窗口做全局筛选或排序。
+    val pagingFlow = remember(directoryQuery) { mediaPaging(directoryQuery) }
+    val pagedItems = pagingFlow.collectAsLazyPagingItems()
+    val loadedItems = pagedItems.itemSnapshotList.items
 
     // 确认删除对话框
     if (showDeleteConfirm) {
@@ -191,14 +194,14 @@ fun AlbumDetailScreen(
                     actions = {
                         // 全选/取消全选
                         IconButton(onClick = {
-                            if (selectedPaths.size == sorted.size) {
+                            if (selectedPaths.size == loadedItems.size) {
                                 selectedPaths.clear()
                             } else {
-                                sorted.forEach { selectedPaths[it.filePath] = true }
+                                loadedItems.forEach { selectedPaths[it.filePath] = true }
                             }
                         }) {
                             Icon(
-                                imageVector = if (selectedPaths.size == sorted.size) Icons.Default.CheckCircle
+                                imageVector = if (selectedPaths.size == loadedItems.size) Icons.Default.CheckCircle
                                     else Icons.Default.SelectAll,
                                 contentDescription = "全选",
                             )
@@ -264,7 +267,7 @@ fun AlbumDetailScreen(
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(
-                                text = "${sorted.size} 项",
+                                text = "${album.mediaCount} 项",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline,
                             )
@@ -341,53 +344,35 @@ fun AlbumDetailScreen(
             }
         },
     ) { padding ->
+        val clickItem: (MediaItem) -> Unit = { item ->
+            if (isSelectionMode) {
+                if (selectedPaths.containsKey(item.filePath)) selectedPaths.remove(item.filePath)
+                else selectedPaths[item.filePath] = true
+            } else {
+                onMediaClick(item, directoryQuery)
+            }
+        }
+        val longClickItem: (MediaItem) -> Unit = { item ->
+            if (!isSelectionMode) {
+                isSelectionMode = true
+                selectedPaths[item.filePath] = true
+            }
+        }
         when (viewMode) {
             ViewMode.GRID -> MediaGrid(
-                items = sorted,
+                items = pagedItems,
                 isSelectionMode = isSelectionMode,
                 selectedPaths = selectedPaths,
-                onMediaClick = { index ->
-                    if (isSelectionMode) {
-                        val path = sorted[index].filePath
-                        if (selectedPaths.containsKey(path)) {
-                            selectedPaths.remove(path)
-                        } else {
-                            selectedPaths[path] = true
-                        }
-                    } else {
-                        onMediaClick(sorted, index)
-                    }
-                },
-                onLongClick = { index ->
-                    if (!isSelectionMode) {
-                        isSelectionMode = true
-                        selectedPaths[sorted[index].filePath] = true
-                    }
-                },
+                onMediaClick = clickItem,
+                onLongClick = longClickItem,
                 modifier = Modifier.padding(padding),
             )
             ViewMode.DATE_GROUP -> DateGroupedView(
-                items = sorted,
+                items = pagedItems,
                 isSelectionMode = isSelectionMode,
                 selectedPaths = selectedPaths,
-                onMediaClick = { index ->
-                    if (isSelectionMode) {
-                        val path = sorted[index].filePath
-                        if (selectedPaths.containsKey(path)) {
-                            selectedPaths.remove(path)
-                        } else {
-                            selectedPaths[path] = true
-                        }
-                    } else {
-                        onMediaClick(sorted, index)
-                    }
-                },
-                onLongClick = { index ->
-                    if (!isSelectionMode) {
-                        isSelectionMode = true
-                        selectedPaths[sorted[index].filePath] = true
-                    }
-                },
+                onMediaClick = clickItem,
+                onLongClick = longClickItem,
                 modifier = Modifier.padding(padding),
             )
         }
@@ -397,14 +382,14 @@ fun AlbumDetailScreen(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MediaGrid(
-    items: List<MediaItem>,
+    items: LazyPagingItems<MediaItem>,
     isSelectionMode: Boolean,
     selectedPaths: Map<String, Boolean>,
-    onMediaClick: (Int) -> Unit,
-    onLongClick: (Int) -> Unit = {},
+    onMediaClick: (MediaItem) -> Unit,
+    onLongClick: (MediaItem) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    if (items.isEmpty()) {
+    if (items.itemCount == 0) {
         EmptyAlbumContent(modifier)
         return
     }
@@ -416,14 +401,17 @@ private fun MediaGrid(
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        // P2-2: 使用 itemsIndexed 替代 items + indexOf，O(1) 索引而非 O(n) 线性查找
-        itemsIndexed(items, key = { _, it -> it.id }) { index, item ->
+        items(
+            count = items.itemCount,
+            key = items.itemKey { it.filePath },
+        ) { index ->
+            val item = items[index] ?: return@items
             SelectableMediaThumbnail(
                 item = item,
                 isSelected = selectedPaths.containsKey(item.filePath),
                 isSelectionMode = isSelectionMode,
-                onClick = { onMediaClick(index) },
-                onLongClick = { onLongClick(index) },
+                onClick = { onMediaClick(item) },
+                onLongClick = { onLongClick(item) },
             )
         }
     }
@@ -432,22 +420,24 @@ private fun MediaGrid(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DateGroupedView(
-    items: List<MediaItem>,
+    items: LazyPagingItems<MediaItem>,
     isSelectionMode: Boolean,
     selectedPaths: Map<String, Boolean>,
-    onMediaClick: (Int) -> Unit,
-    onLongClick: (Int) -> Unit = {},
+    onMediaClick: (MediaItem) -> Unit,
+    onLongClick: (MediaItem) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    if (items.isEmpty()) {
+    if (items.itemCount == 0) {
         EmptyAlbumContent(modifier)
         return
     }
 
-    val grouped = remember(items) {
-        items.groupBy {
+    // 仅做展示分组，不改变数据库返回的全局顺序；跨页同日允许出现续接标题。
+    val loaded = items.itemSnapshotList.items
+    val grouped = remember(loaded) {
+        loaded.groupBy {
             LocalDate.ofInstant(it.capturedAt, ZoneId.systemDefault())
-        }.toSortedMap(reverseOrder())
+        }.toList()
     }
 
     LazyColumn(
@@ -465,13 +455,17 @@ private fun DateGroupedView(
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
                 )
             }
-            items(dateItems, key = { it.id }) { item ->
+            items(
+                count = dateItems.size,
+                key = { index -> dateItems[index].filePath },
+            ) { index ->
+                val item = dateItems[index]
                 SelectableDateGroupMediaRow(
                     item = item,
                     isSelected = selectedPaths.containsKey(item.filePath),
                     isSelectionMode = isSelectionMode,
-                    onClick = { onMediaClick(items.indexOf(item)) },
-                    onLongClick = { onLongClick(items.indexOf(item)) },
+                    onClick = { onMediaClick(item) },
+                    onLongClick = { onLongClick(item) },
                 )
             }
         }

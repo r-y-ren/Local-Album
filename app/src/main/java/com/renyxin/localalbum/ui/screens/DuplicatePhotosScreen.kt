@@ -80,6 +80,8 @@ import kotlinx.coroutines.launch
 fun DuplicatePhotosScreen(
     duplicateGroups: List<DuplicateGroup>,
     isLoading: Boolean,
+    scannedCount: Long,
+    lastError: String?,
     onBack: () -> Unit,
     onKeepOneDeleteRest: (String, String?) -> Unit,
     onRefresh: () -> Unit,
@@ -123,11 +125,21 @@ fun DuplicatePhotosScreen(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator()
                         Spacer(Modifier.height(16.dp))
-                        Text("正在检测重复项…", style = MaterialTheme.typography.bodyLarge)
+                        Text("正在后台检测重复项…", style = MaterialTheme.typography.bodyLarge)
+                        Text("已扫描 $scannedCount 项，可离开此页面", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             } else if (duplicateGroups.isEmpty()) {
-                EmptyDuplicateState(modifier = Modifier.fillMaxSize(), onRefresh = onRefresh)
+                Column(modifier = Modifier.fillMaxSize()) {
+                    if (lastError != null) {
+                        Text(
+                            text = "上次检测未完成，可重新开始",
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(16.dp),
+                        )
+                    }
+                    EmptyDuplicateState(modifier = Modifier.weight(1f), onRefresh = onRefresh)
+                }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),

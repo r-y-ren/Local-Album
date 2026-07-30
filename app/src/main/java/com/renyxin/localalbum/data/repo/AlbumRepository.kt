@@ -9,7 +9,11 @@ import com.renyxin.localalbum.core.album.AlbumBuilder
 import com.renyxin.localalbum.core.index.HybridIndexer
 import com.renyxin.localalbum.core.model.Album
 import com.renyxin.localalbum.core.model.DirectoryNode
+import com.renyxin.localalbum.core.model.DirectoryMediaAnchor
+import com.renyxin.localalbum.core.model.DirectoryMediaQuery
+import com.renyxin.localalbum.core.model.DirectoryMediaQueryMapper
 import com.renyxin.localalbum.core.model.MediaItem
+import com.renyxin.localalbum.core.model.MediaQueryContext
 import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.core.recommendation.Recommendation
 import com.renyxin.localalbum.core.recommendation.RecommendationDiversifier
@@ -23,20 +27,22 @@ import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.FaceClusterSummary
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.entity.FaceEntity
+import com.renyxin.localalbum.data.db.entity.MaintenanceRunEntity
 import com.renyxin.localalbum.data.db.entity.MediaEntity
-import com.renyxin.localalbum.data.source.MediaMetadataCache
+import com.renyxin.localalbum.data.worker.DuplicateMaintenanceWorker
+import com.renyxin.localalbum.data.worker.FaceClusterMaintenanceWorker
 import com.renyxin.localalbum.data.source.MediaSource
 import com.renyxin.localalbum.data.worker.AnalysisResumePrefs
 import com.renyxin.localalbum.data.worker.ScanServiceController
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
+import androidx.room.withTransaction
 import androidx.paging.map
 import androidx.paging.cachedIn
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -46,6 +52,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.stateIn
@@ -101,6 +108,15 @@ data class SemanticSearchResult(
     val similarity: Float,
 )
 
+/** 数据库分页搜索上下文；所有筛选条件都参与 PagingSource 身份。 */
+data class MediaSearchQuery(
+    val text: String,
+    val mediaType: MediaType? = null,
+    val startMs: Long? = null,
+    val endMs: Long? = null,
+    val model: String? = null,
+)
+
 /**
  * 语义搜索索引统计信息（Phase 4.1）。
  */
@@ -138,16 +154,28 @@ class AlbumRepository(
     private val albumBuilder: AlbumBuilder = AlbumBuilder(),
     private val recommendationEngine: RecommendationEngine = RecommendationEngine(
         semanticClusterRecommender = embeddingDao?.let {
-            com.renyxin.localalbum.core.recommendation.SemanticClusterRecommender(embeddingDao = it)
+            com.renyxin.localalbum.core.recommendation.SemanticClusterRecommender(
+                embeddingDao = it,
+                mediaDao = mediaDao,
+                semanticDao = database?.semanticDao(),
+            )
         },
     ),
     private val recommendationDiversifier: RecommendationDiversifier = RecommendationDiversifier(),
     private val hybridIndexer: HybridIndexer? = null,
+    private val thumbnailScheduler: ThumbnailScheduler? = null,
+    private val deletionService: PersistentDeletionService? = null,
+    private val mediaDeletionCoordinator: MediaDeletionCoordinator? = null,
     private val semanticProviderFactory: (() -> com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider?)? = null,
     context: android.content.Context? = null,
 ) {
     companion object {
         private const val TAG = "AlbumRepository"
+        private const val DATABASE_DELETE_BATCH_SIZE = 500
+        private const val TRASH_PURGE_BATCH_SIZE = 200
+
+        /** 精选推荐最多读取的最近媒体数，避免大图库全量实体加载。 */
+        private const val RECOMMENDATION_CANDIDATE_LIMIT = 2_000
     }
     /** 与 Repository 生命周期绑定的协程作用域，替代 GlobalScope */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -174,11 +202,8 @@ class AlbumRepository(
             return null
         }
         Log.i(TAG, "buildSemanticSearcher: 成功, provider=${provider.providerId}, dim=${provider.embeddingDim}")
-        return SemanticSearcher(provider, dao)
+        return SemanticSearcher(provider, dao, database?.semanticDao())
     }
-
-    /** 重复文件分析器，基于 SHA-256 完全重复检测 */
-    private val duplicateAnalyzer = DuplicateAnalyzer()
 
     private val _albumTree = MutableStateFlow<List<Album>>(emptyList())
     val albumTree: StateFlow<List<Album>> = _albumTree.asStateFlow()
@@ -210,9 +235,6 @@ class AlbumRepository(
     private val _scanState = MutableStateFlow<ScanState>(ScanState.Idle)
     val scanState: StateFlow<ScanState> = _scanState.asStateFlow()
 
-    private val _searchResults = MutableStateFlow<List<MediaItem>>(emptyList())
-    val searchResults: StateFlow<List<MediaItem>> = _searchResults.asStateFlow()
-
     /** 语义搜索结果（Phase 4.1），含相似度评分 */
     private val _semanticSearchResults = MutableStateFlow<List<SemanticSearchResult>>(emptyList())
     val semanticSearchResults: StateFlow<List<SemanticSearchResult>> = _semanticSearchResults.asStateFlow()
@@ -223,39 +245,141 @@ class AlbumRepository(
 
     private val _stats = MutableStateFlow(AlbumStats())
     val stats: StateFlow<AlbumStats> = _stats.asStateFlow()
+// ---- 收藏与轻量统计 ----
 
-    // ---- 收藏 ----
-    val favorites = mediaDao.getFavorites().map { entities -> entities.map { it.toMediaItem() } }
-
-    // ---- Flow 辅助 (使用 stateIn 替代 GlobalScope.launch，避免内存泄漏) ----
-    val allMedia: StateFlow<List<MediaEntity>> = mediaDao.getAllFlow()
-        .stateIn(scope, SharingStarted.Eagerly, emptyList())
+    /**
+     * 仅订阅聚合计数，禁止首页为展示收藏数而常驻完整媒体列表。
+     * 大图库下完整实体 Flow 会在每一次索引写入时复制、映射并触发 Compose 重组。
+     */
+    val favoriteCount: StateFlow<Int> = mediaDao.getFavoriteCountFlow()
+        .stateIn(scope, SharingStarted.Eagerly, 0)
 
     val totalCount: StateFlow<Int> = mediaDao.getTotalCountFlow()
         .stateIn(scope, SharingStarted.Eagerly, 0)
 
-    // ---- Paging 3 分页数据流 (时间线使用) ----
+    // ---- Paging 3 分页数据流 ----
+    private val mediaPagingConfig = PagingConfig(
+        pageSize = 50,
+        prefetchDistance = 20,
+        enablePlaceholders = false,
+        initialLoadSize = 100,
+    )
+
     val pagedMedia: Flow<PagingData<MediaItem>> = Pager(
-        config = PagingConfig(
-            pageSize = 50,
-            prefetchDistance = 20,
-            enablePlaceholders = false,
-            initialLoadSize = 100,
-        ),
+        config = mediaPagingConfig,
         pagingSourceFactory = { mediaDao.pagingSource() },
     ).flow
         .map { pagingData -> pagingData.map { it.toMediaItem() } }
         .cachedIn(scope)
 
-    suspend fun loadFromDb() = withContext(Dispatchers.IO) {
-        val entities = mediaDao.getAll()
-        if (entities.isNotEmpty()) {
-            val items = entities.map { it.toMediaItem() }
-            rebuildTreeFromMediaItems(items)
-        } else {
-            // 修复：数据库为空时必须清空相册树，避免过滤后旧数据残留导致 UI 状态不一致
-            clearAll()
+    /** 收藏页独立分页，不能从全量媒体 Flow 过滤。 */
+    val pagedFavorites: Flow<PagingData<MediaItem>> = Pager(
+        config = mediaPagingConfig,
+        pagingSourceFactory = { mediaDao.favoritesPagingSource() },
+    ).flow
+        .map { pagingData -> pagingData.map { it.toMediaItem() } }
+        .cachedIn(scope)
+
+    suspend fun requestThumbnail(item: MediaItem, sizeClass: String, priority: Int): String? =
+        thumbnailScheduler?.request(item, sizeClass, priority)
+
+    val trashedCount: StateFlow<Int> = mediaDao.getTrashedCountFlow()
+        .stateIn(scope, SharingStarted.Eagerly, 0)
+
+    /** P1-A：回收站页面独立分页。 */
+    val pagedTrash: Flow<PagingData<MediaItem>> = Pager(
+        config = mediaPagingConfig,
+        pagingSourceFactory = { mediaDao.trashPagingSource() },
+    ).flow.map { data -> data.map { it.toMediaItem() } }.cachedIn(scope)
+
+    /** P1-A：人物详情独立分页。 */
+    fun pagedMediaForFaceCluster(clusterId: String): Flow<PagingData<MediaItem>> = Pager(
+        config = mediaPagingConfig,
+        pagingSourceFactory = { mediaDao.faceClusterPagingSource(clusterId) },
+    ).flow.map { data -> data.map { it.toMediaItem() } }
+
+    /** P1-A：关键词和筛选全部下推 Room，而非过滤当前 Paging 窗口。 */
+    fun pagedSearch(query: MediaSearchQuery): Flow<PagingData<MediaItem>> {
+        val fts = toFtsQuery(query.text.trim())
+        return Pager(
+            config = mediaPagingConfig,
+            pagingSourceFactory = {
+                mediaDao.searchPagingSource(
+                    fts,
+                    query.mediaType?.name,
+                    query.startMs,
+                    query.endMs,
+                    query.model,
+                )
+            },
+        ).flow.map { data -> data.map { it.toMediaItem() } }
+    }
+
+    suspend fun getSearchModels(): List<String> = withContext(Dispatchers.IO) {
+        mediaDao.getDistinctModels()
+    }
+
+    /** 根据稳定导航上下文重建查看器数据，并以 initialPath 所在数据库偏移作为首屏。 */
+    fun viewerMedia(context: MediaQueryContext, initialPath: String): Flow<PagingData<MediaItem>> =
+        kotlinx.coroutines.flow.flow {
+            val initial = mediaDao.getByFilePathLight(initialPath)
+            if (context == MediaQueryContext.Single || initial == null) {
+                emit(PagingData.from(listOfNotNull(initial?.toMediaItem())))
+                return@flow
+            }
+            if (context is MediaQueryContext.StablePaths) {
+                val entities = if (context.paths.isEmpty()) emptyList()
+                else mediaDao.getByFilePathsLight(context.paths)
+                val byPath = entities.associateBy { it.filePath }
+                emit(PagingData.from(context.paths.mapNotNull(byPath::get).map { it.toMediaItem() }))
+                return@flow
+            }
+
+            val initialKey = when (context) {
+                MediaQueryContext.Timeline -> mediaDao.timelineOffset(initial.capturedAtMs, initialPath)
+                is MediaQueryContext.Directory -> mediaDao.directoryOffset(
+                    DirectoryMediaQueryMapper.offset(context.query, initial.toDirectoryAnchor()).toRoomQuery()
+                )
+                is MediaQueryContext.Search -> with(context.query) {
+                    mediaDao.searchOffset(
+                        toFtsQuery(text.trim()), mediaType?.name, startMs, endMs, model,
+                        initial.capturedAtMs, initialPath,
+                    )
+                }
+                is MediaQueryContext.Face -> mediaDao.faceClusterOffset(
+                    context.clusterId, initial.capturedAtMs, initialPath
+                )
+                MediaQueryContext.Favorites -> mediaDao.favoritesOffset(initial.capturedAtMs, initialPath)
+                else -> 0
+            }
+            val source = when (context) {
+                MediaQueryContext.Timeline -> { { mediaDao.pagingSource() } }
+                is MediaQueryContext.Directory -> { {
+                    mediaDao.directoryPagingSource(DirectoryMediaQueryMapper.paging(context.query).toRoomQuery())
+                } }
+                is MediaQueryContext.Search -> { {
+                    with(context.query) {
+                        mediaDao.searchPagingSource(
+                            toFtsQuery(text.trim()), mediaType?.name, startMs, endMs, model
+                        )
+                    }
+                } }
+                is MediaQueryContext.Face -> { { mediaDao.faceClusterPagingSource(context.clusterId) } }
+                MediaQueryContext.Favorites -> { { mediaDao.favoritesPagingSource() } }
+                else -> error("Unsupported paging context: $context")
+            }
+            emitAll(
+                Pager(mediaPagingConfig, initialKey = initialKey, pagingSourceFactory = source)
+                    .flow.map { data -> data.map { it.toMediaItem() } }
+            )
         }
+
+    suspend fun getMediaByPath(path: String): MediaItem? = withContext(Dispatchers.IO) {
+        mediaDao.getByFilePathLight(path)?.toMediaItem()
+    }
+
+    suspend fun loadFromDb() = withContext(Dispatchers.IO) {
+        rebuildTreeFromDirectorySummaries()
         refreshStats()
     }
 
@@ -268,11 +392,10 @@ class AlbumRepository(
                 Log.i(TAG, "restoreFromDbIfNeeded: 相册树已非空，跳过")
                 return@withLock
             }
-            val entities = mediaDao.getAll()
-            Log.i(TAG, "restoreFromDbIfNeeded: DB 中有 ${entities.size} 条媒体记录")
-            if (entities.isEmpty()) return@withLock
-            val items = entities.map { it.toMediaItem() }
-            rebuildTreeFromMediaItems(items)
+            val summaries = mediaDao.getDirectorySummaries()
+            Log.i(TAG, "restoreFromDbIfNeeded: DB 中有 ${summaries.size} 个媒体目录")
+            if (summaries.isEmpty()) return@withLock
+            rebuildTreeFromDirectorySummaries(summaries)
             _scanState.value = ScanState.Done
             refreshStats()
             Log.i(TAG, "restoreFromDbIfNeeded: 完成")
@@ -338,40 +461,8 @@ class AlbumRepository(
                 _scanState.value = ScanState.Done
                 refreshStats()
             } else {
-                // ---- 兜底路径：未注入 HybridIndexer 时走旧的 MediaSource 全量逻辑 ----
-                Log.w(TAG, "HybridIndexer 未注入，回退到 MediaSource 全量扫描")
-                val dbModifiedMap = mediaDao.getModifiedTimeMap().associate { it.filePath to it.modifiedAtMs }
-                val dbCapturedMap = mediaDao.getAll().associate { it.filePath to it.capturedAtMs }
-
-                val cache = object : MediaMetadataCache {
-                    override fun getCapturedAtMs(path: String, modifiedAtMs: Long): Long? {
-                        val dbModified = dbModifiedMap[path]
-                        return if (dbModified != null && dbModified == modifiedAtMs) {
-                            dbCapturedMap[path]
-                        } else null
-                    }
-                }
-
-                _scanState.value = ScanState.Scanning("正在扫描文件系统…")
-                val tree = mediaSource.scanRoots(roots, cache, allowNomedia, ignorePatterns)
-
-                val allItems = mutableListOf<MediaItem>()
-                tree.forEach { collectMediaItems(it, allItems) }
-
-                _scanState.value = ScanState.Scanning("正在更新本地索引…")
-                mediaDao.clearAll()
-                mediaDao.insertAll(allItems.map { it.toEntity() })
-
-                _scanState.value = ScanState.Scanning("正在检测无效记录…")
-                removeOrphanedRecords(allItems.map { it.filePath }.toSet())
-
-                _scanState.value = ScanState.Scanning("正在构建相册树…")
-                val sortMode = withTimeoutOrNull(5000L) {
-                    settingsRepository.state.first()
-                }?.albumSortMode ?: 0
-                rebuildTreeFromDirectoryNodes(tree, sortMode)
-                _scanState.value = ScanState.Done
-                refreshStats()
+                // 依赖注入异常必须显式失败，禁止静默退回构造多份全库映射的旧扫描路径。
+                error("HybridIndexer 未注入，已拒绝执行高风险全量扫描兜底")
             }
         }.onFailure { e ->
             Log.e(TAG, "扫描失败", e)
@@ -402,36 +493,12 @@ class AlbumRepository(
     suspend fun forceReanalyzeAll() = withContext(Dispatchers.IO) {
         // 修复：与 rescan 共用 scanMutex 串行化，避免并发分析造成数据竞态
         scanMutex.withLock {
-        // 视频过滤：AI 识别管道仅支持图片，使用 getImagePaths() 排除视频文件，
-        // 避免视频传入后 BitmapFactory.decodeFile 返回 null 产生无谓失败计数与日志噪音。
-        val allPaths = mediaDao.getImagePaths()
-        if (allPaths.isEmpty()) {
-            Log.i(TAG, "forceReanalyzeAll: 无图片文件，跳过")
-            return@withLock
-        }
-
-        _scanState.value = ScanState.Scanning("正在分析 ${allPaths.size} 个文件…", 0, allPaths.size)
-
-        // Phase 1: 全量重分析前清空断点状态，避免被断点续跑跳过
-        hybridIndexer?.clearAnalysisState()
-
-        val pipeline = hybridIndexer?.getPluginPipeline()
-        if (pipeline != null) {
-            Log.i(TAG, "forceReanalyzeAll: 使用插件化管道分析 ${allPaths.size} 个文件")
-            pipeline.runFullScan(allPaths)
-        } else {
-            Log.i(TAG, "forceReanalyzeAll: 使用内置分析管道分析 ${allPaths.size} 个文件")
-            appContext?.let { ctx ->
-                val fallback = com.renyxin.localalbum.core.analysis.AnalysisPipeline(
-                    ctx, mediaDao, faceDao, embeddingDao
-                )
-                fallback.analyzeNewFiles(allPaths, enableOcr = true)
-            } ?: Log.w(TAG, "forceReanalyzeAll: 无可用分析管道，跳过")
-        }
-
+        val indexer = hybridIndexer ?: error("HybridIndexer 未注入，无法创建持久化重分析任务")
+        _scanState.value = ScanState.Scanning("正在创建全量重分析任务…")
+        indexer.requestFullReanalysis()
         _scanState.value = ScanState.Done
         refreshStats()
-        Log.i(TAG, "forceReanalyzeAll: 完成 ${allPaths.size} 个文件的分析")
+        Log.i(TAG, "forceReanalyzeAll: 持久化任务已重置并开始有界领取")
         } // scanMutex.withLock
     }
 
@@ -447,28 +514,14 @@ class AlbumRepository(
     suspend fun resumeAnalysisIfNeeded() = withContext(Dispatchers.IO) {
         val ctx = appContext ?: return@withContext
         if (!AnalysisResumePrefs.isPending(ctx)) return@withContext
-        val pipeline = hybridIndexer?.getPluginPipeline() ?: run {
-            AnalysisResumePrefs.setPending(ctx, false)
-            return@withContext
-        }
-        // 视频过滤：AI 识别管道仅支持图片，使用 getImagePaths() 排除视频文件。
-        val allPaths = mediaDao.getImagePaths()
-        if (allPaths.isEmpty()) {
+        val indexer = hybridIndexer ?: run {
             AnalysisResumePrefs.setPending(ctx, false)
             return@withContext
         }
         scanMutex.withLock {
-            Log.i(TAG, "resumeAnalysisIfNeeded: 续跑未完成分析 ${allPaths.size} 个文件")
-            _scanState.value = ScanState.Scanning("续跑 AI 分析…", 0, allPaths.size)
-            ScanServiceController.acquire(ctx, "正在分析 AI 特征…")
-            try {
-                pipeline.runFullScan(allPaths)
-            } finally {
-                ScanServiceController.release(ctx)
-                if (_scanState.value is ScanState.Scanning) {
-                    _scanState.value = ScanState.Done
-                }
-            }
+            Log.i(TAG, "resumeAnalysisIfNeeded: 恢复持久化分析任务领取")
+            indexer.resumePendingAnalysis()
+            AnalysisResumePrefs.setPending(ctx, false)
         }
     }
 
@@ -492,99 +545,100 @@ class AlbumRepository(
     }
 
     /**
-     * 彻底删除：删除物理文件 + 清理 media_items/FTS/faces/embeddings/analysis_state。
+     * 彻底删除物理文件，并且只清理删除成功或原本已不存在路径的数据库记录。
      *
-     * 修复：原实现仅删数据库记录，物理文件残留导致下次增量扫描"复活"被删照片；
-     * 同时未清 faces/embeddings，人物相册与语义搜索残留。现与 TrashCleanupWorker 对齐。
+     * 删除失败项保留原数据库/回收站状态，避免无权限删除时记录先消失、随后又被扫描复活。
      */
     suspend fun permanentlyDelete(paths: List<String>) = withContext(Dispatchers.IO) {
         if (paths.isEmpty()) return@withContext
-        deletePhysicalFiles(paths)
-        purgeMediaData(paths)
-        removeFromMemoryTree(paths.toSet())
-        refreshStats()
+        val service = requireNotNull(deletionService) { "PersistentDeletionService 未注入" }
+        val physicallyDeleted = service.delete(
+            paths,
+            com.renyxin.localalbum.data.db.entity.DeletionTombstoneEntity.OP_USER_PERMANENT,
+        )
+        if (physicallyDeleted.isNotEmpty()) {
+            removeFromMemoryTree(physicallyDeleted.toSet())
+            refreshStats()
+        }
+        appContext?.let { com.renyxin.localalbum.data.worker.DeletionRetryWorker.enqueue(it) }
     }
 
     suspend fun restoreFromTrash(paths: List<String>) = withContext(Dispatchers.IO) {
         if (paths.isEmpty()) return@withContext
-        mediaDao.restoreFromTrash(paths)
-        // 从数据库重新加载
+        // 显式 restore 是唯一清除删除意图的操作；与可见状态在同一 Room 事务提交。
+        if (database != null && deletionService != null) {
+            database.withTransaction {
+                deletionService.restore(paths)
+                mediaDao.restoreFromTrash(paths)
+            }
+        } else {
+            deletionService?.restore(paths)
+            mediaDao.restoreFromTrash(paths)
+        }
         loadFromDb()
     }
 
     /**
-     * 清空回收站：删除所有已回收媒体的物理文件 + 全量清理相关数据。
+     * 清空回收站：按路径 keyset 有界读取，只清理物理删除成功或原文件已不存在的路径。
+     *
+     * 游标始终推进到本次读取批次的末尾，因此删除失败项不会反复占据首批形成死循环；
+     * 它们保留在回收站中，用户下次操作时可重试。
      */
     suspend fun clearTrash() = withContext(Dispatchers.IO) {
-        val trashed = mediaDao.getTrashed()
-        if (trashed.isEmpty()) return@withContext
-        val paths = trashed.map { it.filePath }
-        deletePhysicalFiles(paths)
-        purgeMediaData(paths)
-        removeFromMemoryTree(paths.toSet())
-        refreshStats()
+        var afterPath = ""
+        var purgedAny = false
+        while (true) {
+            val paths = mediaDao.getTrashedPathsAfter(afterPath, TRASH_PURGE_BATCH_SIZE)
+            if (paths.isEmpty()) break
+            afterPath = paths.last()
+            val physicallyDeleted = requireNotNull(deletionService) { "PersistentDeletionService 未注入" }.delete(
+                paths,
+                com.renyxin.localalbum.data.db.entity.DeletionTombstoneEntity.OP_CLEAR_TRASH,
+            )
+            if (physicallyDeleted.isNotEmpty()) purgedAny = true
+            if (paths.size < TRASH_PURGE_BATCH_SIZE) break
+        }
+        if (purgedAny) {
+            rebuildTreeFromDirectorySummaries()
+            refreshStats()
+        }
     }
 
     /**
      * 删除物理文件（与 TrashCleanupWorker 一致使用 File.delete，失败仅告警不阻塞）。
      */
     private suspend fun deletePhysicalFiles(paths: List<String>): List<String> = withContext(Dispatchers.IO) {
-        val deleted = mutableListOf<String>()
-        for (path in paths) {
-            try {
-                val file = java.io.File(path)
-                if (!file.exists()) {
-                    deleted.add(path) // 视为已删除
-                    continue
-                }
-                if (file.delete()) {
-                    deleted.add(path)
-                } else {
-                    Log.w(TAG, "物理文件删除失败（可能无权限）: $path")
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "删除物理文件异常: $path", e)
-            }
+        val result = PhysicalFileDeletion.delete(paths)
+        result.failed.forEach { path ->
+            // 日志保留行为类别但不打印完整隐私路径。
+            Log.w(TAG, "物理文件删除失败（可能无权限）: ${path.substringAfterLast('/')}")
         }
-        deleted
+        result.deletedOrMissing
     }
 
     /**
-     * 彻底清理媒体相关数据：media_items + FTS + faces + embeddings + analysis_state（分块规避 999 上限）。
+     * 供用户永久删除和后台回收站清理复用的一致删除入口。
+     * 仅在物理文件已删除或原文件已不存在时清理数据库，删除失败的路径保留在回收站以便重试。
+     */
+    suspend fun purgeExpiredTrashBatch(before: Long, limit: Int = 200): Int = withContext(Dispatchers.IO) {
+        val paths = mediaDao.getExpiredTrashPaths(before, limit)
+        if (paths.isEmpty()) return@withContext 0
+        val physicallyDeleted = requireNotNull(deletionService) { "PersistentDeletionService 未注入" }.delete(
+            paths,
+            com.renyxin.localalbum.data.db.entity.DeletionTombstoneEntity.OP_EXPIRED_TRASH,
+        )
+        removeFromMemoryTree(physicallyDeleted.toSet())
+        physicallyDeleted.size
+    }
+
+    /**
+     * 彻底清理媒体及全部关联数据。真实应用注入 AppDatabase 时，每一块在同一事务内提交，
+     * 防止进程中断留下部分孤儿；database 为 null 仅用于轻量测试替身。
      */
     private suspend fun purgeMediaData(paths: List<String>) {
         if (paths.isEmpty()) return
-        paths.chunked(500).forEach { chunk ->
-            mediaDao.deleteByPaths(chunk)
-            mediaDao.deleteFtsEntries(chunk)
-            faceDao?.deleteByFilePaths(chunk)
-            embeddingDao?.deleteByFilePaths(chunk)
-            hybridIndexer?.invalidateAnalysisState(chunk)
-        }
-    }
-
-    // ---- 搜索 (优先 FTS4 全文索引，失败回退 LIKE + OCR) ----
-    suspend fun search(query: String) = withContext(Dispatchers.IO) {
-        if (query.isBlank()) {
-            _searchResults.value = emptyList()
-            return@withContext
-        }
-        val trimmed = query.trim()
-        // 优先尝试 FTS4 查询
-        val entities = runCatching {
-            val ftsQuery = toFtsQuery(trimmed)
-            mediaDao.searchFts(ftsQuery, limit = 200, offset = 0)
-        }.getOrElse { e ->
-            Log.w(TAG, "FTS 查询失败，回退到 LIKE 搜索: ${e.message}")
-            mediaDao.searchWithOcr(trimmed)
-        }
-        // FTS 返回空时也回退到 LIKE（避免 FTS 索引未填充时无结果）
-        val finalEntities = if (entities.isEmpty()) {
-            mediaDao.searchWithOcr(trimmed)
-        } else {
-            entities
-        }
-        _searchResults.value = finalEntities.map { it.toMediaItem() }
+        requireNotNull(mediaDeletionCoordinator) { "MediaDeletionCoordinator 未注入，禁止手工逐 DAO purge" }
+            .purge(paths)
     }
 
     /**
@@ -600,10 +654,6 @@ class AlbumRepository(
                 "\"$cleaned\"*"
             }
             .ifBlank { "\"$input\"*" }
-    }
-
-    fun clearSearch() {
-        _searchResults.value = emptyList()
     }
 
     // ---- 语义搜索 (Phase 4.1) ----
@@ -683,32 +733,11 @@ class AlbumRepository(
         )
     }
 
-    /**
-     * 混合检索：先语义召回，再关键词精排。
-     * 结合语义搜索（召回相关图片）和 FTS4 关键词搜索（精确匹配），
-     * 取并集并去重，语义结果在前。
-     *
-     * @param query 自然语言查询
-     */
-    suspend fun hybridSearch(query: String) = withContext(Dispatchers.IO) {
-        if (query.isBlank()) {
-            _searchResults.value = emptyList()
-            _semanticSearchResults.value = emptyList()
-            return@withContext
-        }
-
-        // 并行执行语义搜索和关键词搜索
-        val semanticDeferred = async { semanticSearch(query) }
-        val keywordDeferred = async { search(query) }
-        semanticDeferred.await()
-        keywordDeferred.await()
-    }
-
     // ---- 数据库导入导出 (Phase 4.2) ----
 
     /** 数据库导出器（Phase 4.2） */
     private val databaseExporter: DatabaseExporter? by lazy {
-        DatabaseExporter(mediaDao, faceDao, embeddingDao)
+        DatabaseExporter(mediaDao, faceDao, embeddingDao, database)
     }
 
     /** 数据库导入器（Phase 4.2） */
@@ -823,52 +852,68 @@ class AlbumRepository(
         mediaDao.searchByDateRange(startMs, endMs).map { it.toMediaItem() }
     }
 
-    // ---- 回收站 ----
-    val trashedItems: StateFlow<List<MediaItem>> = mediaDao.getTrashedFlow()
-        .map { entities -> entities.map { it.toMediaItem() } }
-        .stateIn(scope, SharingStarted.Eagerly, emptyList())
-
-    suspend fun getTrashed() = withContext(Dispatchers.IO) {
-        mediaDao.getTrashed().map { it.toMediaItem() }
-    }
-
     // ---- 地理位置 ----
     suspend fun getWithLocation() = withContext(Dispatchers.IO) {
         mediaDao.getWithLocation().map { it.toMediaItem() }
     }
 
-    // ---- 重复照片管理 ----
+    // ---- 重复照片离线维护 ----
 
-    /**
-     * 执行完全重复检测（SHA-256）并返回所有重复组。
-     *
-     * @return 重复照片组列表
-     */
-    suspend fun findDuplicateGroups(): List<DuplicateGroup> = withContext(Dispatchers.IO) {
-        val allPaths = mediaDao.getAllPaths()
-        if (allPaths.size < 2) return@withContext emptyList()
-        val files = allPaths.map { java.io.File(it) }.filter { it.exists() }
-        duplicateAnalyzer.findDuplicates(files, mediaDao)
+    private val duplicateDao get() = database?.duplicateMaintenanceDao()
+
+    val duplicateMaintenanceRun: Flow<MaintenanceRunEntity?> = duplicateDao
+        ?.observeLatestRun(MaintenanceRunEntity.TASK_DUPLICATE_EXACT)
+        ?: kotlinx.coroutines.flow.flowOf(null)
+
+    /** UI 只观察 active generation 的有限组窗口。 */
+    fun observeDuplicateGroups(limit: Int = 50): Flow<List<DuplicateGroup>> =
+        duplicateDao?.observeActiveGroups(MaintenanceRunEntity.TASK_DUPLICATE_EXACT, limit, 0)
+            ?.map { groups ->
+                groups.map { group ->
+                    val members = duplicateDao?.getMembersBounded(group.generation, group.groupId, 100).orEmpty()
+                    DuplicateGroup(
+                        groupId = group.groupId,
+                        filePaths = members.map { it.filePath },
+                        fileSizes = members.associate { it.filePath to it.fileSize },
+                        qualityScores = members.associate { it.filePath to it.qualityScore },
+                        modifiedTimes = members.associate { it.filePath to it.modifiedAtMs },
+                    )
+                }
+            } ?: kotlinx.coroutines.flow.flowOf(emptyList())
+
+    /** 仅调度唯一后台任务，不在调用协程检测文件。 */
+    fun startDuplicateMaintenance() {
+        appContext?.let(DuplicateMaintenanceWorker::enqueue)
     }
 
     /**
-     * "保留一项删除其余"：保留组内推荐项，其余移入回收站。
-     * @param groupId 重复组 ID
-     * @param keepPath 保留的文件路径（若为 null 则自动选择推荐项）
-     * @return 被移入回收站的路径列表
+     * 从 active generation 持久成员按 keyset 分批移入回收站；绝不重新检测。
+     * 组在操作前先失效，避免 UI 在多批更新中展示不一致快照。
      */
     suspend fun keepOneDeleteRest(groupId: String, keepPath: String? = null): List<String> =
         withContext(Dispatchers.IO) {
-            val groups = findDuplicateGroups()
-            val group = groups.find { it.groupId == groupId } ?: return@withContext emptyList()
-            val keep = keepPath ?: group.recommendedKeepPath
-            val toRemove = group.filePaths.filter { it != keep }
-            if (toRemove.isNotEmpty()) {
-                mediaDao.moveToTrash(toRemove, System.currentTimeMillis())
-                removeFromMemoryTree(toRemove.toSet())
-                refreshStats()
+            val dao = duplicateDao ?: return@withContext emptyList()
+            val run = dao.getActiveRun(MaintenanceRunEntity.TASK_DUPLICATE_EXACT)
+                ?: return@withContext emptyList()
+            val group = dao.getValidGroup(run.generation, groupId) ?: return@withContext emptyList()
+            val keep = keepPath?.takeIf { candidate ->
+                dao.getMembersBounded(run.generation, groupId, 100).any { it.filePath == candidate }
+            } ?: group.recommendedKeepPath
+            if (dao.invalidateGroup(run.generation, groupId) != 1) return@withContext emptyList()
+
+            val removed = mutableListOf<String>()
+            var cursor = ""
+            while (true) {
+                val batch = dao.getDeletionPathsAfter(run.generation, groupId, keep, cursor, 200)
+                if (batch.isEmpty()) break
+                mediaDao.moveToTrash(batch, System.currentTimeMillis())
+                dao.deleteMembers(run.generation, groupId, batch)
+                removeFromMemoryTree(batch.toSet())
+                removed += batch
+                cursor = batch.last()
             }
-            toRemove
+            if (removed.isNotEmpty()) refreshStats()
+            removed
         }
 
     // ---- 人脸聚类管理 (Phase 3.3) ----
@@ -883,13 +928,13 @@ class AlbumRepository(
         if (summaries.isEmpty()) return@withContext emptyList()
 
         summaries.map { summary ->
-            val photos = mediaDao.getByFaceCluster(summary.clusterId)
             FaceCluster(
                 clusterId = summary.clusterId,
                 personName = summary.personName,
                 faceCount = summary.faceCount,
                 representativeThumb = summary.representativeThumb,
-                filePaths = photos.map { it.filePath },
+                // 摘要只保留一个回退封面路径，人物详情通过 PagingSource 查询。
+                filePaths = listOfNotNull(summary.representativeFilePath),
             )
         }
     }
@@ -898,19 +943,19 @@ class AlbumRepository(
     val faceClusterSummaries: Flow<List<FaceClusterSummary>>?
         get() = faceDao?.getClusterSummariesFlow()
 
-    /** 获取某个聚类内的完整媒体项 */
-    suspend fun getPhotosInFaceCluster(clusterId: String): List<MediaItem> = withContext(Dispatchers.IO) {
-        mediaDao.getByFaceCluster(clusterId).map { it.toMediaItem() }
-    }
-
     /** 获取某个聚类内的人脸记录 */
     suspend fun getFacesInCluster(clusterId: String): List<FaceEntity> = withContext(Dispatchers.IO) {
         faceDao?.getByCluster(clusterId) ?: emptyList()
     }
 
-    /** 为聚类命名（人物名称） */
+    /** 为聚类命名；metadata 为权威映射，同时保留 faces.personName 兼容双写。 */
     suspend fun setPersonName(clusterId: String, name: String?) = withContext(Dispatchers.IO) {
-        faceDao?.setPersonName(clusterId, name)
+        database?.faceClusterDao()?.setPersonName(clusterId, name) ?: faceDao?.setPersonName(clusterId, name)
+    }
+
+    /** 显式调度人物原型维护；与强制重分析完全分离。 */
+    fun startFaceClusterMaintenance() {
+        appContext?.let(FaceClusterMaintenanceWorker::enqueue)
     }
 
     /** 获取人脸统计信息 */
@@ -951,8 +996,7 @@ class AlbumRepository(
 
     suspend fun updateAlbumCover(albumId: String, coverPath: String) {
         val album = findAlbumById(albumId) ?: return
-        val coverItem = album.mediaItems.find { it.filePath == coverPath } ?: return
-        val updated = album.copy(coverItem = coverItem)
+        val updated = album.copy(summaryCoverPaths = listOf(coverPath))
         val newTree = replaceAlbumInTree(_albumTree.value, updated)
         _albumTree.value = newTree
     }
@@ -971,6 +1015,35 @@ class AlbumRepository(
     }
 
     // ---- 内部方法 ----
+
+    /** 目录详情独立 Paging 数据源；查询对象变化会重建 Pager。 */
+    fun pagedMediaForDirectory(query: DirectoryMediaQuery): Flow<PagingData<MediaItem>> = Pager(
+        config = mediaPagingConfig,
+        pagingSourceFactory = {
+            mediaDao.directoryPagingSource(DirectoryMediaQueryMapper.paging(query).toRoomQuery())
+        },
+    ).flow.map { pagingData -> pagingData.map { it.toMediaItem() } }
+
+    private suspend fun rebuildTreeFromDirectorySummaries(
+        summaries: List<com.renyxin.localalbum.data.db.dao.DirectorySummary>? = null,
+    ) = withContext(Dispatchers.IO) {
+        val directorySummaries = summaries ?: mediaDao.getDirectorySummaries()
+        if (directorySummaries.isEmpty()) {
+            clearAll()
+            return@withContext
+        }
+        val settings = withTimeoutOrNull(5000L) { settingsRepository.state.first() }
+        val (tree, leaves) = albumBuilder.buildFromDirectorySummaries(
+            summaries = directorySummaries,
+            roots = settings?.scanRoots ?: emptyList(),
+            sortMode = settings?.albumSortMode ?: 0,
+        )
+        _albumTree.value = tree
+        _leafAlbums.value = leaves
+        // 目录树保持轻量摘要；精选通过独立的有界候选查询补充真实媒体属性。
+        // 每次数据库重建（包括扫描完成）都同步重建推荐，避免精选页永久为空。
+        rebuildRecommendationPool(leaves)
+    }
 
     /**
      * 从内存中的 [MediaItem] 列表重建相册树。
@@ -1006,12 +1079,34 @@ class AlbumRepository(
      * 当所有推荐都展示完毕后自动重新打乱循环。
      */
     suspend fun refreshRecommendations() = withContext(Dispatchers.IO) {
-        val leafs = _leafAlbums.value
-        if (leafs.isEmpty()) {
-            _recommendations.value = emptyList()
-            return@withContext
+        // 扫描期间媒体分析字段会持续更新；即使目录树尚未发布，也从已提交候选即时构建精选。
+        rebuildRecommendationPool(_leafAlbums.value)
+    }
+
+    /**
+     * 将轻量目录摘要与数据库中的有限媒体候选合并为推荐输入。
+     * 上限保证大图库不会因精选功能发生全库实体加载，同时最新媒体可在扫描期间逐步呈现。
+     */
+    private suspend fun rebuildRecommendationPool(leafs: List<Album>) {
+        val candidatesByDirectory = mediaDao.getRecommendationCandidates(RECOMMENDATION_CANDIDATE_LIMIT)
+            .map { it.toMediaItem() }
+            .groupBy { it.filePath.substringBeforeLast('/', "") }
+        val albumsByPath = leafs.associateBy { it.directoryPath }
+        val hydrated = candidatesByDirectory.map { (directoryPath, items) ->
+            albumsByPath[directoryPath]?.copy(
+                mediaItems = items,
+                directMediaCount = items.size,
+            ) ?: Album(
+                id = java.util.UUID.nameUUIDFromBytes(directoryPath.toByteArray()).toString(),
+                name = directoryPath.substringAfterLast('/').ifEmpty { directoryPath },
+                directoryPath = directoryPath,
+                mediaItems = items,
+                directMediaCount = items.size,
+            )
         }
-        refreshRecommendations(leafs)
+        diversifiedRecommendationPool = emptyList()
+        recommendationCursor = 0
+        refreshRecommendations(hydrated)
     }
 
     /**
@@ -1113,57 +1208,17 @@ class AlbumRepository(
         _recommendations.value = emptyList()
     }
 
-    private suspend fun removeFromMemoryTree(paths: Set<String>) = withContext(Dispatchers.IO) {
-        val remaining = _albumTree.value.flatMap { collectAllMedia(it) }
-            .filter { it.filePath !in paths }
-        rebuildTreeFromMediaItems(remaining)
-    }
+    private suspend fun removeFromMemoryTree(@Suppress("UNUSED_PARAMETER") paths: Set<String>) =
+        rebuildTreeFromDirectorySummaries()
 
-    /** 删除数据库中文件系统已不存在的记录（因文件已通过外部工具删除） */
-    private suspend fun removeOrphanedRecords(actualPaths: Set<String>) = withContext(Dispatchers.IO) {
-        val dbPaths = mediaDao.getAllPaths().toSet()
-        val orphaned = dbPaths - actualPaths
-        if (orphaned.isNotEmpty()) {
-            // 修复：分块删除，避免 SQLite IN 查询变量数超过 999 限制
-            orphaned.toList().chunked(500).forEach { chunk ->
-                mediaDao.deleteByPaths(chunk)
-                mediaDao.deleteFtsEntries(chunk)
-            }
-        }
-    }
-
-    /** 暴露 MediaDao 供 Worker 使用 */
+    /** 暴露 MediaDao 供兼容 Worker 使用。 */
     internal fun getMediaDao(): MediaDao = mediaDao
 
-    /** 获取已在库中的项目列表 (for TrashCleanupWorker) */
-    internal suspend fun getLoadedItems(): List<MediaItem> = withContext(Dispatchers.IO) {
-        mediaDao.getAll().map { it.toMediaItem() }
-    }
-
-    private fun updateFavoriteInMemory(path: String, favorite: Boolean) {
-        fun updateAlbum(album: Album): Album {
-            val updatedItems = album.mediaItems.map { item ->
-                if (item.filePath == path) item.copy(isFavorite = favorite) else item
-            }
-            val updatedChildren = album.children.map { updateAlbum(it) }
-            return album.copy(mediaItems = updatedItems, children = updatedChildren)
-        }
-        _albumTree.value = _albumTree.value.map { updateAlbum(it) }
-        _leafAlbums.value = _leafAlbums.value.map { updateAlbum(it) }
-    }
-
-    /** 内存中收集所有媒体项 */
-    private fun collectMediaItems(node: DirectoryNode, out: MutableList<MediaItem>) {
-        out.addAll(node.mediaItems)
-        node.children.forEach { collectMediaItems(it, out) }
-    }
-
-    /** 从 Album 树递归收集所有媒体项 */
-    private fun collectAllMedia(album: Album): List<MediaItem> {
-        val result = mutableListOf<MediaItem>()
-        result.addAll(album.mediaItems)
-        album.children.forEach { result.addAll(collectAllMedia(it)) }
-        return result
+    private fun updateFavoriteInMemory(
+        @Suppress("UNUSED_PARAMETER") path: String,
+        @Suppress("UNUSED_PARAMETER") favorite: Boolean,
+    ) {
+        // 轻量目录树不缓存媒体收藏状态；PagingSource 由 Room 写入自动失效刷新。
     }
 
     // ---- 实体映射 ----
@@ -1228,6 +1283,17 @@ class AlbumRepository(
         ocrText = ocrText,
     )
 }
+
+private fun com.renyxin.localalbum.core.model.DirectorySqlSpec.toRoomQuery() =
+    androidx.sqlite.db.SimpleSQLiteQuery(sql, args.toTypedArray())
+
+private fun MediaEntity.toDirectoryAnchor() = DirectoryMediaAnchor(
+    filePath = filePath,
+    fileName = fileName,
+    capturedAtMs = capturedAtMs,
+    modifiedAtMs = modifiedAtMs,
+    fileSize = fileSize,
+)
 
 /**
  * 人脸统计信息（Phase 3.3）。

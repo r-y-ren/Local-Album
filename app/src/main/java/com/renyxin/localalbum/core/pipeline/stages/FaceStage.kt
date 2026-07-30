@@ -2,6 +2,7 @@ package com.renyxin.localalbum.core.pipeline.stages
 
 import android.util.Log
 import com.renyxin.localalbum.core.analysis.FaceClusterer
+import com.renyxin.localalbum.core.analysis.IncrementalFaceClusterAssigner
 import com.renyxin.localalbum.core.plugin.FeatureSchema
 import com.renyxin.localalbum.core.plugin.PluginJsonCodec
 import com.renyxin.localalbum.core.plugin.capability.FaceProvider
@@ -11,6 +12,7 @@ import com.renyxin.localalbum.core.pipeline.FileProcessingStatus
 import com.renyxin.localalbum.core.pipeline.ParallelFileProcessor
 import com.renyxin.localalbum.core.pipeline.StageResult
 import com.renyxin.localalbum.core.pipeline.StageType
+import com.renyxin.localalbum.data.db.dao.FaceClusterDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.FeatureStoreDao
 import com.renyxin.localalbum.data.db.dao.MediaDao
@@ -30,6 +32,7 @@ class FaceStage(
     private val faceProvider: FaceProvider,
     private val mediaDao: MediaDao,
     private val faceDao: FaceDao,
+    faceClusterDao: FaceClusterDao,
     private val featureStoreDao: FeatureStoreDao? = null, // Phase 5: 可选注入
 ) : AnalysisStage {
 
@@ -39,10 +42,16 @@ class FaceStage(
     override val dependencies = emptyList<String>()
 
     private val faceClusterer = FaceClusterer()
+    private val clusterAssigner = IncrementalFaceClusterAssigner(
+        mediaDao = mediaDao,
+        faceDao = faceDao,
+        faceClusterDao = faceClusterDao,
+        providerScope = faceProvider.providerId,
+        modelScope = "dim:${faceProvider.embeddingDim}",
+        faceClusterer = faceClusterer,
+    )
 
     companion object {
-        /** 聚类时分页读取人脸，避免大型媒体库一次复制全部人脸实体。 */
-        private const val CLUSTER_PAGE_SIZE = 500
         /** SQL IN 参数安全上限。 */
         private const val DATABASE_BATCH_SIZE = 500
     }
@@ -148,41 +157,15 @@ class FaceStage(
                 }
             }
 
-            // 4. 执行 DBSCAN 聚类
-            var clusterCount = 0
-            var noiseCount = 0
-            if (faceCount > 0) {
-                faceDao.clearAllClusterIds()
-                val allFaces = loadFacesForClustering()
-
-                // 聚类前清空所有含人脸照片的 media_items.faceClusterId，使 noise 不残留旧聚类。
-                allFaces.asSequence().map { it.filePath }.distinct()
-                    .toList().chunked(DATABASE_BATCH_SIZE)
-                    .forEach { chunk -> mediaDao.clearFaceClusterId(chunk) }
-
-                val samples = allFaces.map { face ->
-                    FaceClusterer.FaceSample(
-                        id = face.faceId,
-                        embedding = faceClusterer.parseEmbedding(face.embedding),
-                    )
-                }
-
-                val clusterResult = faceClusterer.cluster(samples)
-                val facesById = allFaces.associateBy { it.faceId }
-
-                for (cluster in clusterResult.clusters) {
-                    cluster.sampleIds.chunked(DATABASE_BATCH_SIZE).forEach { ids ->
-                        faceDao.updateClusterIds(ids, cluster.clusterId)
-                    }
-                    // 同一照片可能出现多张同一人物的人脸；路径去重后一次更新，
-                    // 既保证列表/详情一致，也移除原 O(聚类样本数 × 全部人脸数) 的线性查找。
-                    cluster.sampleIds.asSequence().mapNotNull { facesById[it]?.filePath }.distinct()
-                        .toList().chunked(DATABASE_BATCH_SIZE)
-                        .forEach { paths -> mediaDao.updateFaceClusterId(paths, cluster.clusterId) }
-                }
-                clusterCount = clusterResult.clusterCount
-                noiseCount = clusterResult.noiseCount
+            // 4. 与内置回退路径复用同一个有界增量归类服务。常规扫描不运行 DBSCAN；
+            // 未命中代表向量的人脸进入 pending 临时簇，等待显式人物维护任务处理。
+            val assignment = if (allFaceEntities.isNotEmpty()) {
+                clusterAssigner.assign(filePaths)
+            } else {
+                IncrementalFaceClusterAssigner.AssignmentResult(0, 0)
             }
+            val clusterCount = assignment.matchedClusterCount
+            val noiseCount = assignment.pendingFaceCount
 
             enhancedCallback(total, total, null, null)
 
@@ -202,16 +185,4 @@ class FaceStage(
         }
     }
 
-    private suspend fun loadFacesForClustering(): List<FaceEntity> {
-        val faces = mutableListOf<FaceEntity>()
-        var offset = 0
-        while (true) {
-            val page = faceDao.getPaged(CLUSTER_PAGE_SIZE, offset)
-            if (page.isEmpty()) break
-            faces.addAll(page)
-            if (page.size < CLUSTER_PAGE_SIZE) break
-            offset += page.size
-        }
-        return faces
-    }
 }

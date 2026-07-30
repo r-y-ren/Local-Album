@@ -18,6 +18,13 @@ import com.renyxin.localalbum.core.model.MediaType
         Index(value = ["modifiedAtMs"]),
         Index(value = ["isCorrupted"]),
         Index(value = ["faceClusterId"]),
+        // 大图库热点查询：先过滤状态，再按时间读取分页；复合索引避免排序时扫描临时表。
+        Index(value = ["isTrashed", "capturedAtMs"]),
+        Index(value = ["isFavorite", "isTrashed", "capturedAtMs"]),
+        Index(value = ["parentPath", "isTrashed", "capturedAtMs"]),
+        Index(value = ["mediaType", "isTrashed", "capturedAtMs"]),
+        Index(value = ["sceneType", "isTrashed", "capturedAtMs"]),
+        Index(value = ["scanGeneration"]),
     ],
 )
 data class MediaEntity(
@@ -59,4 +66,6 @@ data class MediaEntity(
     @androidx.room.ColumnInfo(defaultValue = "0") val isCorrupted: Boolean = false,
     // ---- v4 新增: 人脸聚类 ID（代表该照片中出现的主要人物聚类） ----
     val faceClusterId: String? = null,
+    // ---- v17：扫描代次，用 SQL 领取未在本轮扫描出现的孤儿记录 ----
+    @androidx.room.ColumnInfo(defaultValue = "0") val scanGeneration: Long = 0L,
 )

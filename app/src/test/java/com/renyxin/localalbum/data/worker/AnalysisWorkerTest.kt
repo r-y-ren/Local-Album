@@ -1,0 +1,58 @@
+package com.renyxin.localalbum.data.worker
+
+import com.renyxin.localalbum.core.pipeline.PluginAnalysisPipeline
+import com.renyxin.localalbum.core.pipeline.StageResult
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class AnalysisWorkerTest {
+    @Test
+    fun `all stages successful can complete task`() {
+        assertNull(AnalysisWorker.failureSummary(mapOf("face" to StageResult(3, 0))))
+    }
+
+    @Test
+    fun `partial stage failure keeps task retryable`() {
+        assertEquals(
+            "semantic:2",
+            AnalysisWorker.failureSummary(mapOf(
+                "face" to StageResult(3, 0),
+                "semantic" to StageResult(1, 2),
+            )),
+        )
+    }
+
+    @Test
+    fun `empty pipeline is not marked done`() {
+        assertEquals("pipeline_no_stages", AnalysisWorker.failureSummary(emptyMap()))
+    }
+
+    @Test
+    fun `missing required stage is not marked done`() {
+        assertEquals(
+            "missing_stages:semantic",
+            AnalysisWorker.failureSummary(
+                mapOf("face" to StageResult(3, 0)),
+                setOf("face", "semantic"),
+            ),
+        )
+    }
+
+    @Test
+    fun `pipeline scope is stable and version sensitive`() {
+        val first = PluginAnalysisPipeline.buildPipelineScope(listOf("scene=provider-b", "core:scene@1"))
+        val reordered = PluginAnalysisPipeline.buildPipelineScope(listOf("core:scene@1", "scene=provider-b"))
+        val upgraded = PluginAnalysisPipeline.buildPipelineScope(listOf("core:scene@2", "scene=provider-b"))
+        assertEquals(first, reordered)
+        assertTrue(first != upgraded)
+    }
+
+    @Test
+    fun `retry delay is exponential and bounded`() {
+        assertEquals(60_000L, AnalysisWorker.retryDelay(1))
+        assertEquals(120_000L, AnalysisWorker.retryDelay(2))
+        assertTrue(AnalysisWorker.retryDelay(100) > 0)
+    }
+}

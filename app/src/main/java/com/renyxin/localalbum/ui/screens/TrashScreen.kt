@@ -19,7 +19,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.paging.compose.LazyPagingItems
+import androidx.paging.compose.itemKey
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -66,7 +67,7 @@ private const val TRASH_RETENTION_DAYS = 30L
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun TrashScreen(
-    trashedItems: List<MediaItem>,
+    trashedItems: LazyPagingItems<MediaItem>,
     onBack: () -> Unit,
     onRestore: (List<String>) -> Unit = {},
     onPermanentlyDelete: (List<String>) -> Unit = {},
@@ -143,7 +144,7 @@ fun TrashScreen(
 
     // 清空回收站确认
     if (showClearConfirm) {
-        val totalCount = trashedItems.size
+        val totalCount = trashedItems.itemCount
         AlertDialog(
             onDismissRequest = { showClearConfirm = false },
             icon = {
@@ -198,19 +199,6 @@ fun TrashScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = {
-                            if (selectedPaths.size == trashedItems.size) {
-                                selectedPaths.clear()
-                            } else {
-                                trashedItems.forEach { selectedPaths[it.filePath] = true }
-                            }
-                        }) {
-                            Icon(
-                                imageVector = if (selectedPaths.size == trashedItems.size)
-                                    Icons.Default.CheckCircle else Icons.Default.SelectAll,
-                                contentDescription = "全选",
-                            )
-                        }
                         // 恢复按钮
                         IconButton(onClick = {
                             if (selectedPaths.isNotEmpty()) {
@@ -255,14 +243,14 @@ fun TrashScreen(
                 )
             } else {
                 TopAppBar(
-                    title = { Text("回收站 (${trashedItems.size})") },
+                    title = { Text("回收站 (${trashedItems.itemCount})") },
                     navigationIcon = {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
                         }
                     },
                     actions = {
-                        if (trashedItems.isNotEmpty()) {
+                        if (trashedItems.itemCount > 0) {
                             IconButton(onClick = { showClearConfirm = true }) {
                                 Icon(
                                     Icons.Default.DeleteForever,
@@ -308,7 +296,7 @@ fun TrashScreen(
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 
-        if (trashedItems.isEmpty()) {
+        if (trashedItems.itemCount == 0 && trashedItems.loadState.refresh !is androidx.paging.LoadState.Loading) {
             // 空回收站 —— 增强空状态
             Box(
                 modifier = Modifier
@@ -346,9 +334,9 @@ fun TrashScreen(
             return@Scaffold
         }
 
-        // 天数提示条
+        // 天数提示条仅依据当前分页快照，不触发完整回收站加载。
         val now = Instant.now()
-        val oldestDeletedAt = trashedItems
+        val oldestDeletedAt = trashedItems.itemSnapshotList.items
             .filter { it.deletedAtMs > 0 }
             .minOfOrNull { it.deletedAtMs }
         val retentionBannerDays = if (oldestDeletedAt != null) {
@@ -405,7 +393,11 @@ fun TrashScreen(
                 }
             }
 
-            items(trashedItems, key = { it.id }) { item ->
+            items(
+                count = trashedItems.itemCount,
+                key = trashedItems.itemKey { it.filePath },
+            ) { index ->
+                val item = trashedItems[index] ?: return@items
                 TrashItemRow(
                     item = item,
                     isSelected = selectedPaths[item.filePath] == true,

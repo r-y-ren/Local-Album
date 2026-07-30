@@ -4,7 +4,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 apply(plugin = "com.android.application")
 apply(plugin = "org.jetbrains.kotlin.android")
-apply(plugin = "kotlin-kapt")
+apply(plugin = "com.google.devtools.ksp")
 
 // ── 签名配置 ──
 // 从项目根目录的 keystore.properties 读取签名信息（文件不入版本控制，见 .gitignore）。
@@ -195,7 +195,7 @@ dependencies {
     add("implementation", "androidx.room:room-runtime:$roomVersion")
     add("implementation", "androidx.room:room-ktx:$roomVersion")
     add("implementation", "androidx.room:room-paging:$roomVersion")
-    add("kapt", "androidx.room:room-compiler:$roomVersion")
+    add("ksp", "androidx.room:room-compiler:$roomVersion")
 
     // WorkManager
     add("implementation", "androidx.work:work-runtime-ktx:2.9.1")

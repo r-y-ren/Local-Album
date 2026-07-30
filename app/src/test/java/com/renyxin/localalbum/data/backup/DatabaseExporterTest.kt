@@ -4,6 +4,7 @@ import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.FaceClusterSummary
+import com.renyxin.localalbum.data.db.dao.DirectorySummary
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.entity.FaceEntity
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
@@ -19,6 +20,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.util.zip.ZipFile
 
 /**
  * DatabaseExporter / DatabaseImporter 单元测试（Phase 4.2 数据库导入导出）。
@@ -33,25 +35,65 @@ class DatabaseExporterTest {
         private val store = mutableMapOf<String, MediaEntity>()
         private val ftsStore = mutableMapOf<String, MediaFts>()
 
-        override fun getAllFlow(): Flow<List<MediaEntity>> = flowOf(store.values.toList())
-        override suspend fun getAll(): List<MediaEntity> = store.values.toList()
+        override suspend fun getAllForLegacyExport(): List<MediaEntity> = store.values.toList()
         override suspend fun getPaged(limit: Int, offset: Int): List<MediaEntity> =
             store.values.toList().drop(offset).take(limit)
+        override suspend fun getExportPageAfter(afterPath: String?, limit: Int): List<MediaEntity> =
+            store.toSortedMap().values.filter { afterPath == null || it.filePath > afterPath }.take(limit)
+        override suspend fun getRecommendationCandidates(limit: Int): List<MediaEntity> =
+            store.values
+                .asSequence()
+                .filterNot { it.isTrashed }
+                .sortedWith(compareByDescending<MediaEntity> { it.capturedAtMs }.thenBy { it.filePath })
+                .take(limit)
+                .toList()
         override fun pagingSource(): androidx.paging.PagingSource<Int, MediaEntity> =
             throw NotImplementedError("Not needed for test")
+        override fun directoryPagingSource(query: androidx.sqlite.db.SupportSQLiteQuery): androidx.paging.PagingSource<Int, MediaEntity> =
+            throw NotImplementedError("Not needed for test")
+        override fun searchPagingSource(ftsQuery: String, mediaType: String?, startMs: Long?, endMs: Long?, model: String?): androidx.paging.PagingSource<Int, MediaEntity> =
+            throw NotImplementedError("Not needed for test")
+        override fun trashPagingSource(): androidx.paging.PagingSource<Int, MediaEntity> =
+            throw NotImplementedError("Not needed for test")
+        override fun faceClusterPagingSource(clusterId: String): androidx.paging.PagingSource<Int, MediaEntity> =
+            throw NotImplementedError("Not needed for test")
+        override suspend fun timelineOffset(capturedAtMs: Long, path: String): Int = 0
+        override suspend fun directoryOffset(query: androidx.sqlite.db.SupportSQLiteQuery): Int = 0
+        override suspend fun favoritesOffset(capturedAtMs: Long, path: String): Int = 0
+        override suspend fun faceClusterOffset(clusterId: String, capturedAtMs: Long, path: String): Int = 0
+        override suspend fun searchOffset(
+            ftsQuery: String,
+            mediaType: String?,
+            startMs: Long?,
+            endMs: Long?,
+            model: String?,
+            capturedAtMs: Long,
+            path: String,
+        ): Int = 0
+        override suspend fun getDistinctModels(): List<String> = emptyList()
+        override suspend fun getDirectorySummaries(): List<DirectorySummary> = emptyList()
         override suspend fun getCount(): Int = store.size
         override suspend fun search(query: String): List<MediaEntity> = emptyList()
-        override suspend fun searchWithOcr(query: String): List<MediaEntity> = emptyList()
+        override suspend fun searchWithOcr(query: String, limit: Int): List<MediaEntity> = emptyList()
         override suspend fun searchPaged(query: String, limit: Int, offset: Int): List<MediaEntity> = emptyList()
         override suspend fun searchByDateRange(startMs: Long, endMs: Long): List<MediaEntity> = emptyList()
         override suspend fun getBySceneType(sceneType: String): List<MediaEntity> = emptyList()
-        override fun getFavorites(): Flow<List<MediaEntity>> = flowOf(emptyList())
+        override fun favoritesPagingSource(): androidx.paging.PagingSource<Int, MediaEntity> =
+            throw NotImplementedError("Not needed for test")
         override suspend fun setFavorite(path: String, favorite: Boolean) {}
         override suspend fun getFavoriteByPath(path: String): Boolean? = store[path]?.isFavorite
         override suspend fun batchSetFavorite(paths: List<String>, favorite: Boolean) {}
-        override suspend fun getTrashed(): List<MediaEntity> = emptyList()
         override suspend fun getTrashedCount(): Int = store.values.count { it.isTrashed }
-        override fun getTrashedFlow(): Flow<List<MediaEntity>> = flowOf(emptyList())
+        override fun getTrashedCountFlow(): Flow<Int> = flowOf(store.values.count { it.isTrashed })
+        override suspend fun getExpiredTrashPaths(before: Long, limit: Int): List<String> =
+            store.values.filter { it.isTrashed && it.deletedAtMs in 1L..before }.map { it.filePath }.take(limit)
+        override suspend fun getTrashedPathsAfter(afterPath: String, limit: Int): List<String> =
+            store.values.asSequence()
+                .filter { it.isTrashed && it.filePath > afterPath }
+                .map { it.filePath }
+                .sorted()
+                .take(limit)
+                .toList()
         override suspend fun moveToTrash(paths: List<String>, deletedAtMs: Long) {}
         override suspend fun restoreFromTrash(paths: List<String>) {}
         override suspend fun insertAll(items: List<MediaEntity>) {
@@ -65,13 +107,14 @@ class DatabaseExporterTest {
             store.clear()
             ftsStore.clear()
         }
+        override suspend fun markScanGeneration(paths: List<String>, generation: Long) {
+            paths.forEach { path -> store[path]?.let { store[path] = it.copy(scanGeneration = generation) } }
+        }
+        override suspend fun getPathsOutsideGeneration(generation: Long, limit: Int): List<String> =
+            store.values.filter { it.scanGeneration != generation }.map { it.filePath }.sorted().take(limit)
         override suspend fun getModifiedTimeMap(): List<com.renyxin.localalbum.data.db.dao.PathModifiedTime> = emptyList()
         override suspend fun getModifiedTimeForPath(path: String): com.renyxin.localalbum.data.db.dao.PathModifiedTime? = null
-        override suspend fun getAllPaths(): List<String> = store.keys.toList()
-        override suspend fun getImagePaths(): List<String> = store.values
-            .filter { it.mediaType == MediaType.IMAGE }
-            .map { it.filePath }
-        override suspend fun getAllTimelineItems(): List<MediaEntity> = store.values.toList()
+        override suspend fun getDuplicateCandidatesAfter(afterPath: String?, limit: Int): List<com.renyxin.localalbum.data.db.dao.DuplicateCandidate> = emptyList()
         override suspend fun getTimelineItemsByRange(startMs: Long, endMs: Long): List<MediaEntity> = emptyList()
         override suspend fun getCountByDateRange(startMs: Long, endMs: Long): Int = 0
         override suspend fun searchFts(ftsQuery: String, limit: Int, offset: Int): List<MediaEntity> = emptyList()
@@ -83,6 +126,8 @@ class DatabaseExporterTest {
         override suspend fun getAllFtsEntries(): List<MediaFts> = ftsStore.values.toList()
         override suspend fun getPagedFtsEntries(limit: Int, offset: Int): List<MediaFts> =
             ftsStore.values.toList().drop(offset).take(limit)
+        override suspend fun getFtsEntriesAfter(afterPath: String?, limit: Int): List<MediaFts> =
+            ftsStore.toSortedMap().values.filter { afterPath == null || it.filePath > afterPath }.take(limit)
         override suspend fun getFtsCount(): Int = ftsStore.size
         override suspend fun clearAllFts() { ftsStore.clear() }
         override suspend fun insertFtsEntry(filePath: String, fileName: String, ocrText: String?, make: String?, model: String?) {
@@ -109,6 +154,8 @@ class DatabaseExporterTest {
         override suspend fun updateThumbnail(filePath: String, thumbPath: String) {
             store[filePath]?.let { store[filePath] = it.copy(thumbnailPath = thumbPath) }
         }
+        override suspend fun getMissingThumbnailsAfter(afterPath: String, limit: Int): List<MediaEntity> =
+            store.toSortedMap().values.filter { it.filePath > afterPath && it.thumbnailPath == null && !it.isTrashed }.take(limit)
         override suspend fun getByFilePathLight(path: String): MediaEntity? = store[path]
         override suspend fun getByFilePathsLight(paths: List<String>): List<MediaEntity> =
             paths.mapNotNull { store[it] }
@@ -116,7 +163,6 @@ class DatabaseExporterTest {
         override suspend fun updateFaceClusterId(paths: List<String>, clusterId: String) {}
         override suspend fun clearFaceClusterId(paths: List<String>) {}
         override suspend fun getFaceClusterIds(): List<String> = emptyList()
-        override suspend fun getByFaceCluster(clusterId: String): List<MediaEntity> = emptyList()
         override suspend fun getWithFaceCluster(): List<MediaEntity> = emptyList()
     }
 
@@ -131,17 +177,24 @@ class DatabaseExporterTest {
             store.removeAll { it.filePath in filePaths }
         }
         override suspend fun clearAll() { store.clear() }
-        override suspend fun getAll(): List<FaceEntity> = store.toList()
+        override suspend fun getAllForLegacyExport(): List<FaceEntity> = store.toList()
         override suspend fun getPaged(limit: Int, offset: Int): List<FaceEntity> =
             store.drop(offset).take(limit)
+        override suspend fun getPagedAfter(afterId: Long, limit: Int): List<FaceEntity> =
+            store.sortedBy { it.faceId }.filter { it.faceId > afterId }.take(limit)
         override suspend fun getByFilePath(filePath: String): List<FaceEntity> = store.filter { it.filePath == filePath }
-        override suspend fun getClustered(): List<FaceEntity> = store.filter { it.clusterId != null }
+        override suspend fun getByFilePaths(filePaths: List<String>): List<FaceEntity> = store.filter { it.filePath in filePaths }
+        override suspend fun getClusteredAfter(afterId: Long, limit: Int): List<FaceEntity> =
+            store.sortedBy { it.faceId }.filter { it.faceId > afterId && it.clusterId != null }.take(limit)
+        override suspend fun getMaintenanceBatchAfter(afterId: Long, limit: Int): List<FaceEntity> =
+            store.sortedBy { it.faceId }.filter { it.faceId > afterId }.take(limit)
         override suspend fun getByCluster(clusterId: String): List<FaceEntity> = store.filter { it.clusterId == clusterId }
         override fun getByClusterFlow(clusterId: String): Flow<List<FaceEntity>> = flowOf(emptyList())
         override suspend fun getClusterIds(): List<String> = store.mapNotNull { it.clusterId }.distinct()
         override suspend fun getClusterSummaries(): List<FaceClusterSummary> = emptyList()
         override fun getClusterSummariesFlow(): Flow<List<FaceClusterSummary>> = flowOf(emptyList())
         override suspend fun updateClusterIds(faceIds: List<Long>, clusterId: String) {}
+        override suspend fun updateClusterIdsByFilePaths(filePaths: List<String>, clusterId: String) {}
         override suspend fun updateClusterId(faceId: Long, clusterId: String) {}
         override suspend fun clearAllClusterIds() {}
         override suspend fun setPersonName(clusterId: String, name: String?) {}
@@ -157,11 +210,18 @@ class DatabaseExporterTest {
             for (e in embeddings) store[e.filePath] = e
         }
         override suspend fun getByFilePath(filePath: String): MediaEmbedding? = store[filePath]
-        override suspend fun getAll(): List<MediaEmbedding> = store.values.toList()
+        override suspend fun getByFilePathInSpace(filePath: String, spaceId: String) = store[filePath]?.takeIf { it.spaceId == spaceId }
+        override suspend fun getAllForLegacyExport(): List<MediaEmbedding> = store.values.toList()
         override suspend fun getPaged(limit: Int, offset: Int): List<MediaEmbedding> =
             store.values.toList().drop(offset).take(limit)
+        override suspend fun getPagedAfter(afterPath: String?, limit: Int): List<MediaEmbedding> =
+            store.toSortedMap().values.filter { afterPath == null || it.filePath > afterPath }.take(limit)
+        override suspend fun getPagedAfterInSpace(spaceId: String, afterPath: String?, limit: Int) = store.toSortedMap().values.filter { it.spaceId == spaceId && (afterPath == null || it.filePath > afterPath) }.take(limit)
+        override suspend fun getLegacyBackfillPage(legacySpaceId: String, afterPath: String?, limit: Int) = getPagedAfterInSpace(legacySpaceId, afterPath, limit)
+        override suspend fun updateLegacyPayloadMetadata(filePath: String, legacySpaceId: String, blob: ByteArray, providerId: String, modelId: String, dimension: Int, generation: Long, codecId: String, formatVersion: Int) = 0
         override suspend fun getAllFilePaths(): List<String> = store.keys.toList()
         override suspend fun getCount(): Int = store.size
+        override suspend fun getCountInSpace(spaceId: String) = store.values.count { it.spaceId == spaceId }
         override suspend fun getCountByModelVersion(modelVersion: Int): Int =
             store.values.count { it.modelVersion == modelVersion }
         override suspend fun deleteByFilePath(filePath: String) { store.remove(filePath) }
@@ -304,7 +364,7 @@ class DatabaseExporterTest {
         assertEquals(2, result.ftsCount)
 
         // Verify media data
-        val restoredMedia = targetMediaDao.getAll()
+        val restoredMedia = targetMediaDao.getPaged(100, 0)
         assertEquals(2, restoredMedia.size)
         val entity = restoredMedia.find { it.filePath == "/photos/a.jpg" }
         assertNotNull(entity)
@@ -315,12 +375,12 @@ class DatabaseExporterTest {
         assertEquals("face-1", entity.faceClusterId)
 
         // Verify face data
-        val restoredFaces = targetFaceDao.getAll()
+        val restoredFaces = targetFaceDao.getPaged(100, 0)
         assertEquals(1, restoredFaces.size)
         assertEquals("Alice", restoredFaces[0].personName)
 
         // Verify embedding data
-        val restoredEmbeddings = targetEmbeddingDao.getAll()
+        val restoredEmbeddings = targetEmbeddingDao.getPaged(100, 0)
         assertEquals(1, restoredEmbeddings.size)
         assertEquals("0.1,0.2,0.3,0.4", restoredEmbeddings[0].embedding)
 
@@ -359,7 +419,79 @@ class DatabaseExporterTest {
 
         assertTrue(result.success)
         assertEquals(1, result.mediaCount)
-        assertEquals(1, targetMediaDao.getAll().size)
+        assertEquals(1, targetMediaDao.getPaged(100, 0).size)
+    }
+
+    @Test
+    fun `ZIP NDJSON backup round trip streams all tables`() = runBlocking {
+        val sourceMediaDao = FakeMediaDao()
+        val sourceFaceDao = FakeFaceDao()
+        val sourceEmbeddingDao = FakeEmbeddingDao()
+        val first = makeMediaEntity("/photos/stream-a.jpg")
+        val second = makeMediaEntity("/photos/stream-b.jpg")
+        sourceMediaDao.insertAll(listOf(first, second))
+        sourceMediaDao.insertFtsAll(listOf(makeFts(first.filePath), makeFts(second.filePath)))
+        sourceFaceDao.insertFaces(listOf(makeFaceEntity(first.filePath)))
+        sourceEmbeddingDao.insertEmbeddings(listOf(makeEmbedding(first.filePath)))
+
+        val backup = File.createTempFile("stream_backup", ".zip")
+        backup.deleteOnExit()
+        val export = DatabaseExporter(sourceMediaDao, sourceFaceDao, sourceEmbeddingDao)
+            .exportToFile(backup, "StreamDevice")
+        assertTrue(export.success)
+        ZipFile(backup).use { zip ->
+            val manifestEntry = zip.getEntry("manifest.json")
+            assertNotNull(manifestEntry)
+            assertNotNull(zip.getEntry("media.ndjson"))
+            assertNotNull(zip.getEntry("faces.ndjson"))
+            assertNotNull(zip.getEntry("embeddings.ndjson"))
+            assertNotNull(zip.getEntry("fts.ndjson"))
+            val manifest = org.json.JSONObject(
+                zip.getInputStream(manifestEntry).bufferedReader().use { it.readText() },
+            )
+            val mediaMeta = manifest.getJSONObject("entries").getJSONObject("media.ndjson")
+            assertEquals(2, mediaMeta.getInt("lines"))
+            assertTrue(mediaMeta.getLong("bytes") > 0)
+            assertEquals(64, mediaMeta.getString("sha256").length)
+        }
+
+        val targetMediaDao = FakeMediaDao()
+        val targetFaceDao = FakeFaceDao()
+        val targetEmbeddingDao = FakeEmbeddingDao()
+        val importer = DatabaseImporter(targetMediaDao, targetFaceDao, targetEmbeddingDao)
+        assertTrue(importer.validateFile(backup).second == null)
+        val restored = importer.importFromFile(backup)
+        assertTrue(restored.success)
+        assertEquals(2, restored.mediaCount)
+        assertEquals(1, restored.faceCount)
+        assertEquals(1, restored.embeddingCount)
+        assertEquals(2, restored.ftsCount)
+        assertEquals(2, targetMediaDao.getPaged(100, 0).size)
+        assertEquals(1, targetFaceDao.getPaged(100, 0).size)
+        assertEquals(1, targetEmbeddingDao.getPaged(100, 0).size)
+    }
+
+    @Test
+    fun `tampered ZIP entry is rejected before restore`() = runBlocking {
+        val mediaDao = FakeMediaDao()
+        mediaDao.insertAll(listOf(makeMediaEntity("/photos/tamper.jpg")))
+        val original = File.createTempFile("stream_original", ".zip")
+        val tampered = File.createTempFile("stream_tampered", ".zip")
+        DatabaseExporter(mediaDao).exportToFile(original)
+
+        java.util.zip.ZipOutputStream(tampered.outputStream()).use { output ->
+            ZipFile(original).use { input ->
+                input.entries().asSequence().forEach { entry ->
+                    output.putNextEntry(java.util.zip.ZipEntry(entry.name))
+                    val bytes = input.getInputStream(entry).readBytes()
+                    output.write(if (entry.name == "media.ndjson") bytes + "{}\n".toByteArray() else bytes)
+                    output.closeEntry()
+                }
+            }
+        }
+        val (counts, error) = DatabaseImporter(FakeMediaDao()).validateFile(tampered)
+        assertNull(counts)
+        assertTrue(error?.contains("完整性校验失败") == true)
     }
 
     @Test

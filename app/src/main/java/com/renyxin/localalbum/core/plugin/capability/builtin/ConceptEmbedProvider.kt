@@ -16,6 +16,8 @@ import java.io.File
 class ConceptEmbedProvider : SemanticEmbedProvider {
 
     override val providerId = "builtin:concept"
+    override val modelId = "concept-embedding"
+    override val modelVersion = SemanticEmbedder.MODEL_VERSION
     override val displayName = "概念向量语义嵌入 (默认)"
     override val embeddingDim = SemanticEmbedder.EMBEDDING_DIM // 32
 

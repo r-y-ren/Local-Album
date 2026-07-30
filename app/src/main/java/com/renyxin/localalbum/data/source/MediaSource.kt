@@ -14,6 +14,7 @@ import android.util.Size
 import androidx.annotation.RequiresApi
 import androidx.exifinterface.media.ExifInterface
 import com.renyxin.localalbum.core.index.IgnorePatternMatcher
+import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
 import com.renyxin.localalbum.core.model.DirectoryNode
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
@@ -85,6 +86,53 @@ class MediaSource(
     }
 
     /**
+     * 为索引器提供不构造 DirectoryNode 树的有界批次枚举。
+     * 单个目录的 listFiles 数组仍由平台 API 分配，但跨目录、跨图库不会累计媒体实体。
+     */
+    suspend fun enumerateMediaBatches(
+        rootPaths: List<String>,
+        cache: MediaMetadataCache? = null,
+        allowNomedia: Boolean = false,
+        ignorePatterns: List<String> = emptyList(),
+        batchSize: Int = 250,
+        emit: suspend (List<MediaItem>) -> Unit,
+    ) = withContext(Dispatchers.IO) {
+        require(batchSize > 0)
+        val compiled = IgnorePatternMatcher.compile(ignorePatterns)
+        val pendingDirs = java.util.ArrayDeque<File>()
+        rootPaths.forEach { rootPath ->
+            val root = File(rootPath)
+            require(root.exists() && root.isDirectory && root.canRead()) {
+                "扫描根目录不可访问: ${root.name}"
+            }
+            pendingDirs.addLast(root)
+        }
+        val batch = ArrayList<MediaItem>(batchSize)
+        while (pendingDirs.isNotEmpty()) {
+            val dir = pendingDirs.removeLast()
+            val files = dir.listFiles() ?: error("扫描目录遍历失败: ${dir.name}")
+            for (file in files) {
+                when {
+                    file.isDirectory -> {
+                        if (shouldIgnoreDir(file.name, compiled) || hasNoMedia(file, allowNomedia)) continue
+                        pendingDirs.addLast(file)
+                    }
+                    file.isFile -> {
+                        if (shouldIgnoreFile(file.name, compiled)) continue
+                        val type = detectMediaType(file.name) ?: continue
+                        batch += buildMediaItem(file, type, cache)
+                        if (batch.size == batchSize) {
+                            emit(batch.toList())
+                            batch.clear()
+                        }
+                    }
+                }
+            }
+        }
+        if (batch.isNotEmpty()) emit(batch.toList())
+    }
+
+    /**
      * 异步扫描多个根目录，返回每个根对应的 [DirectoryNode]。
      * @param allowNomedia 为 true 时不再跳过含 .nomedia 的目录
      * @param ignorePatterns 用户配置的忽略规则（正则字符串列表），同时匹配目录名与文件名。
@@ -95,15 +143,17 @@ class MediaSource(
         cache: MediaMetadataCache? = null,
         allowNomedia: Boolean = false,
         ignorePatterns: List<String> = emptyList(),
+        failOnUnreadable: Boolean = false,
     ): List<DirectoryNode> = withContext(Dispatchers.IO) {
         val compiled = IgnorePatternMatcher.compile(ignorePatterns)
         rootPaths.mapNotNull { rootPath ->
             val rootDir = File(rootPath)
-            if (!rootDir.exists() || !rootDir.isDirectory) {
-                Log.w(TAG, "跳过不存在的根目录: $rootPath")
+            if (!rootDir.exists() || !rootDir.isDirectory || !rootDir.canRead()) {
+                if (failOnUnreadable) error("扫描根目录不可访问: ${rootDir.name}")
+                Log.w(TAG, "跳过不存在或不可读的根目录: $rootPath")
                 return@mapNotNull null
             }
-            buildNode(rootDir, parentPath = null, cache = cache, allowNomedia = allowNomedia, ignorePatterns = compiled)
+            buildNode(rootDir, parentPath = null, cache = cache, allowNomedia = allowNomedia, ignorePatterns = compiled, failOnUnreadable = failOnUnreadable)
         }
     }
 
@@ -117,15 +167,17 @@ class MediaSource(
         cache: MediaMetadataCache? = null,
         allowNomedia: Boolean = false,
         ignorePatterns: List<String> = emptyList(),
+        failOnUnreadable: Boolean = false,
     ): List<DirectoryNode> = buildList {
         val compiled = IgnorePatternMatcher.compile(ignorePatterns)
         for (rootPath in rootPaths) {
             val rootDir = File(rootPath)
-            if (!rootDir.exists() || !rootDir.isDirectory) {
-                Log.w(TAG, "跳过不存在的根目录: $rootPath")
+            if (!rootDir.exists() || !rootDir.isDirectory || !rootDir.canRead()) {
+                if (failOnUnreadable) error("扫描根目录不可访问: ${rootDir.name}")
+                Log.w(TAG, "跳过不存在或不可读的根目录: $rootPath")
                 continue
             }
-            add(buildNode(rootDir, parentPath = null, cache = cache, allowNomedia = allowNomedia, ignorePatterns = compiled))
+            add(buildNode(rootDir, parentPath = null, cache = cache, allowNomedia = allowNomedia, ignorePatterns = compiled, failOnUnreadable = failOnUnreadable))
         }
     }
 
@@ -135,18 +187,22 @@ class MediaSource(
         cache: MediaMetadataCache?,
         allowNomedia: Boolean = false,
         ignorePatterns: List<Pattern> = emptyList(),
+        failOnUnreadable: Boolean = false,
     ): DirectoryNode {
         val children = mutableListOf<DirectoryNode>()
         val mediaItems = mutableListOf<MediaItem>()
 
         val files = dir.listFiles()
+        if (files == null && failOnUnreadable) {
+            error("扫描目录遍历失败: ${dir.name}")
+        }
         if (files != null) {
             for (file in files) {
                 when {
                     file.isDirectory -> {
                         if (shouldIgnoreDir(file.name, ignorePatterns)) continue
                         if (hasNoMedia(file, allowNomedia)) continue
-                        children += buildNode(file, parentPath = dir.absolutePath, cache = cache, allowNomedia = allowNomedia, ignorePatterns = ignorePatterns)
+                        children += buildNode(file, parentPath = dir.absolutePath, cache = cache, allowNomedia = allowNomedia, ignorePatterns = ignorePatterns, failOnUnreadable = failOnUnreadable)
                     }
                     file.isFile -> {
                         // 用户配置的正则忽略规则对文件名生效（如 ^.trash 命中以 .trash 开头的文件）
@@ -405,74 +461,103 @@ class MediaSource(
      */
     private fun generateThumbnail(file: File, type: MediaType): String? {
         val dir = thumbDir ?: return null
-        // 使用 .webp 扩展名（新格式），同时检查旧的 .jpg 缓存以保持兼容
-        val webpThumb = File(dir, "${file.absolutePath.hashCode()}.webp")
-        val jpgThumb = File(dir, "${file.absolutePath.hashCode()}.jpg")
+        val webpThumb = File(dir, thumbnailCacheFileName(file, ThumbnailSpec.SIZE_GRID))
+        // 兼容历史仅按路径命名的缓存；新缓存的 key 包含修改时间和文件大小，
+        // 可在源文件被替换后自动失效。
+        val legacyWebpThumb = File(dir, "${file.absolutePath.hashCode()}.webp")
+        val legacyJpgThumb = File(dir, "${file.absolutePath.hashCode()}.jpg")
         return when {
             webpThumb.exists() -> webpThumb.absolutePath
-            jpgThumb.exists() -> jpgThumb.absolutePath
+            legacyWebpThumb.exists() -> legacyWebpThumb.absolutePath
+            legacyJpgThumb.exists() -> legacyJpgThumb.absolutePath
             else -> null // 新文件不在此同步生成，交给 ThumbnailWorker
         }
     }
 
-    /**
-     * 实际生成缩略图并写入磁盘（WebP 格式，256px）。
-     * 供 [ThumbnailWorker] 异步调用，与扫描主流程解耦。
-     *
-     * @param file 原始媒体文件
-     * @param type 媒体类型
-     * @return 生成的缩略图路径，失败返回 null
-     */
-    fun generateThumbnailSync(file: File, type: MediaType): String? {
+    /** 按 grid(256px)/preview(1280px) 生成，并以临时文件 + rename 原子发布。 */
+    fun generateThumbnailSync(file: File, type: MediaType, sizeClass: String): String? {
         val dir = thumbDir ?: return null
-        val thumbFile = File(dir, "${file.absolutePath.hashCode()}.webp")
+        val targetPx = ThumbnailSpec.targetPx(sizeClass)
+        val thumbFile = File(dir, thumbnailCacheFileName(file, sizeClass))
         if (thumbFile.exists()) return thumbFile.absolutePath
+        val temporary = File(dir, ".${thumbFile.name}.${UUID.randomUUID()}.tmp")
 
         return runCatching {
-            val bitmap: Bitmap? = when (type) {
-                MediaType.IMAGE -> {
-                    // 使用 EXIF 缩略图或解码缩小后的版本
-                    val exif = ExifInterface(file.absolutePath)
-                    exif.thumbnailBitmap ?: run {
-                        // 使用 BitmapFactory 解码缩小后的版本
-                        val options = android.graphics.BitmapFactory.Options().apply {
-                            inSampleSize = 4
-                        }
-                        android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
-                    }
-                }
-                MediaType.VIDEO -> {
-                    val retriever = MediaMetadataRetriever()
-                    try {
-                        retriever.setDataSource(file.absolutePath)
-                        // 取视频 1/3 处的帧，避免黑屏
-                        val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                        val frameTime = if (durationMs > 0) durationMs * 1000 / 3 else 0L
-                        retriever.getFrameAtTime(frameTime, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    } finally {
-                        retriever.release()
-                    }
-                }
+            val bitmap = when (type) {
+                MediaType.IMAGE -> decodeImageForTarget(file, targetPx)
+                MediaType.VIDEO -> decodeVideoFrameForTarget(file, targetPx)
+            } ?: error("decode_failed")
+            encodeThumbnail(bitmap, temporary, targetPx)
+            check(temporary.renameTo(thumbFile) || (thumbFile.exists() && temporary.delete())) {
+                "cache_publish_failed"
             }
-            if (bitmap != null) {
-                encodeThumbnail(bitmap, thumbFile)
-            } else {
-                null
-            }
-        }.getOrNull()
+            thumbFile.absolutePath
+        }.onFailure { temporary.delete() }.getOrNull()
     }
 
-    /**
-     * 共享的缩略图编码函数：将 [Bitmap] 缩放到 256px 并以 WebP 格式写入 [targetFile]。
-     */
-    internal fun encodeThumbnail(bitmap: Bitmap, targetFile: File): String {
-        val scaled = ThumbnailUtils.extractThumbnail(bitmap, 256, 256)
-        FileOutputStream(targetFile).use { out ->
-            scaled.compress(Bitmap.CompressFormat.WEBP_LOSSY, 80, out)
+    private fun decodeImageForTarget(file: File, targetPx: Int): Bitmap? {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val options = android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, targetPx)
         }
-        bitmap.recycle()
+        return android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
+    }
+
+    /** minSdk 29：优先 retriever 目标尺寸取帧，再用 ThumbnailUtils(Size)，最后才取普通帧。 */
+    private fun decodeVideoFrameForTarget(file: File, targetPx: Int): Bitmap? {
+        val scaled = runCatching {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(file.absolutePath)
+                val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val frameTimeUs = if (durationMs > 0) durationMs * 1000 / 3 else 0L
+                retriever.getScaledFrameAtTime(
+                    frameTimeUs,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                    targetPx,
+                    targetPx,
+                )
+            } finally {
+                retriever.release()
+            }
+        }.getOrNull()
+        if (scaled != null) return scaled
+        return runCatching { ThumbnailUtils.createVideoThumbnail(file, Size(targetPx, targetPx), null) }
+            .getOrNull()
+            ?: runCatching {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(file.absolutePath)
+                    retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                } finally {
+                    retriever.release()
+                }
+            }.getOrNull()
+    }
+
+    internal fun encodeThumbnail(bitmap: Bitmap, targetFile: File, targetPx: Int): String {
+        val scaled = ThumbnailUtils.extractThumbnail(bitmap, targetPx, targetPx)
+        FileOutputStream(targetFile).use { out ->
+            check(scaled.compress(Bitmap.CompressFormat.WEBP_LOSSY, 80, out))
+            out.fd.sync()
+        }
+        if (bitmap !== scaled) bitmap.recycle()
         scaled.recycle()
         return targetFile.absolutePath
+    }
+
+    /** 以源身份、尺寸档和格式版本构成缓存文件名。 */
+    private fun thumbnailCacheFileName(file: File, sizeClass: String): String =
+        "${file.absolutePath.hashCode()}_${file.lastModified()}_${file.length()}_${sizeClass}_v$THUMBNAIL_CACHE_VERSION.webp"
+
+    private fun calculateInSampleSize(width: Int, height: Int, targetSize: Int): Int {
+        if (width <= 0 || height <= 0) return 1
+        var sample = 1
+        while (width / (sample * 2) >= targetSize && height / (sample * 2) >= targetSize) {
+            sample *= 2
+        }
+        return sample
     }
 
     // ---- 工具方法 ----
@@ -520,6 +605,7 @@ class MediaSource(
 
     internal companion object {
         const val TAG = "MediaSource"
+        private const val THUMBNAIL_CACHE_VERSION = 3
 
         val IMAGE_EXTS = setOf(
             "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "dng", "raw",

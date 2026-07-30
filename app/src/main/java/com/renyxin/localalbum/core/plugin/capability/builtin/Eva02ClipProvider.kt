@@ -78,6 +78,8 @@ class Eva02ClipProvider(
     }
 
     override val providerId = "builtin:eva02_clip"
+    override val modelId = "eva02-clip-l14-336"
+    override val modelVersion = MODEL_VERSION
     override val displayName = "EVA02-CLIP 跨模态语义检索"
     override val embeddingDim = EMBED_DIM
 

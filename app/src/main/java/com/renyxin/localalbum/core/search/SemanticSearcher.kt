@@ -2,6 +2,7 @@ package com.renyxin.localalbum.core.search
 
 import com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
+import com.renyxin.localalbum.data.db.dao.SemanticDao
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -29,7 +30,9 @@ import kotlin.math.sqrt
 class SemanticSearcher(
     private val provider: SemanticEmbedProvider,
     private val embeddingDao: EmbeddingDao,
-    private val modelVersion: Int = provider.modelVersion(),
+    private val semanticDao: SemanticDao? = null,
+    private val requestedSpace: SemanticVectorSpace = SemanticVectorSpace.from(provider),
+    private val modelVersion: Int = provider.modelVersion,
     private val embeddingDim: Int = provider.embeddingDim,
 ) {
     companion object {
@@ -40,6 +43,18 @@ class SemanticSearcher(
          *  CLIP 跨模态（文本→图像）余弦相似度通常较低（0.10~0.35），
          *  降至 0.10 以保留更多有效匹配。 */
         const val MIN_SIMILARITY = 0.10f
+        private const val EMBEDDING_PAGE_SIZE = 500
+
+        /** 仅供 legacy maintenance/import 验证使用；运行时搜索禁止 CSV fallback。 */
+        fun deserializeLegacyCsv(str: String): FloatArray {
+            require(str.isNotBlank()) { "语义向量为空" }
+            return str.split(",").mapIndexed { index, raw ->
+                val value = raw.trim().toFloatOrNull()
+                    ?: throw IllegalArgumentException("语义向量第 $index 项不是有效浮点数")
+                require(value.isFinite()) { "语义向量第 $index 项不是有限数值" }
+                value
+            }.toFloatArray()
+        }
     }
 
     /**
@@ -83,7 +98,11 @@ class SemanticSearcher(
         val results: List<SearchResult>,
         val queryEncoded: Boolean,
         val indexSize: Int,
+        val indexState: IndexState = IndexState.READY,
+        val spaceId: String = "",
     )
+
+    enum class IndexState { READY, NOT_BUILT, SPACE_MISMATCH }
 
     /**
      * 执行语义搜索。
@@ -107,40 +126,17 @@ class SemanticSearcher(
             return@withContext emptyList()
         }
 
-        // 2. 加载所有嵌入向量
-        val allEmbeddings = embeddingDao.getAll()
-        if (allEmbeddings.isEmpty()) {
+        // 2. 分页读取嵌入并以固定容量最小堆维护 Top-K。不得一次性将全库向量
+        // （以及 CSV 反序列化得到的 FloatArray）同时留在堆内存。
+        val scan = vectorIndex.search(requestedSpace.spaceId, queryVec, topK, minSimilarity)
+        if (scan.scannedCount == 0) {
             safeLog("i", "无已索引的语义嵌入，跳过搜索")
             return@withContext emptyList()
         }
 
-        // 3. 计算相似度并排序
-        val results = ArrayList<SearchResult>(allEmbeddings.size)
-        for (emb in allEmbeddings) {
-            val mediaVec = try {
-                deserialize(emb.embedding)
-            } catch (e: Exception) {
-                safeLog("w", "反序列化嵌入失败: ${emb.filePath}", e)
-                continue
-            }
-            if (mediaVec.size != queryVec.size) {
-                safeLog("w", "向量维度不匹配: ${emb.filePath} (${mediaVec.size} vs ${queryVec.size})")
-                continue
-            }
-            val sim = cosineSimilarity(queryVec, mediaVec)
-            if (sim >= minSimilarity) {
-                results.add(SearchResult(emb.filePath, sim))
-            }
-        }
-
-        // 4. 排序并截取 Top-K
-        results.sortByDescending { it.similarity }
-        val finalResults = if (results.size > topK) results.take(topK) else results
-
-        safeLog("i", "语义搜索 \"$query\": ${allEmbeddings.size} 条嵌入, 命中 ${finalResults.size} 条, " +
-                "最高相似度 ${finalResults.firstOrNull()?.similarity ?: 0f}")
-
-        finalResults
+        safeLog("i", "语义搜索 \"$query\": ${scan.scannedCount} 条嵌入, 命中 ${scan.results.size} 条, " +
+                "最高相似度 ${scan.results.firstOrNull()?.similarity ?: 0f}")
+        scan.results.map { SearchResult(it.filePath, it.similarity) }
     }
 
     /**
@@ -155,7 +151,7 @@ class SemanticSearcher(
         minSimilarity: Float = MIN_SIMILARITY,
     ): SearchDiagnostics = withContext(Dispatchers.IO) {
         if (query.isBlank()) {
-            return@withContext SearchDiagnostics(emptyList(), queryEncoded = false, indexSize = 0)
+            return@withContext SearchDiagnostics(emptyList(), queryEncoded = false, indexSize = 0, indexState = IndexState.NOT_BUILT, spaceId = requestedSpace.spaceId)
         }
 
         // 1. 编码查询
@@ -163,44 +159,30 @@ class SemanticSearcher(
         val queryEncoded = !queryVec.all { it == 0f }
         if (!queryEncoded) {
             safeLog("w", "查询 \"$query\" 无法编码为有效语义向量（模型可能未加载）")
-            val indexSize = embeddingDao.getCount()
-            return@withContext SearchDiagnostics(emptyList(), queryEncoded = false, indexSize = indexSize)
+            val indexSize = embeddingDao.getCountInSpace(requestedSpace.spaceId)
+            return@withContext SearchDiagnostics(emptyList(), queryEncoded = false, indexSize = indexSize, spaceId = requestedSpace.spaceId)
         }
 
-        // 2. 加载所有嵌入向量
-        val allEmbeddings = embeddingDao.getAll()
-        if (allEmbeddings.isEmpty()) {
-            safeLog("i", "无已索引的语义嵌入，跳过搜索")
-            return@withContext SearchDiagnostics(emptyList(), queryEncoded = true, indexSize = 0)
+        val active = semanticDao?.getActiveIndexMeta()
+        val requestedCount = embeddingDao.getCountInSpace(requestedSpace.spaceId)
+        if (requestedCount == 0) {
+            val state = if (embeddingDao.getCount() > 0 || (active != null && active.spaceId != requestedSpace.spaceId)) {
+                IndexState.SPACE_MISMATCH
+            } else IndexState.NOT_BUILT
+            safeLog("i", "语义空间不可查询: $state, requested=${requestedSpace.spaceId}")
+            return@withContext SearchDiagnostics(emptyList(), true, 0, state, requestedSpace.spaceId)
         }
+        val scan = vectorIndex.search(requestedSpace.spaceId, queryVec, topK, minSimilarity)
 
-        // 3. 计算相似度并排序
-        val results = ArrayList<SearchResult>(allEmbeddings.size)
-        for (emb in allEmbeddings) {
-            val mediaVec = try {
-                deserialize(emb.embedding)
-            } catch (e: Exception) {
-                safeLog("w", "反序列化嵌入失败: ${emb.filePath}", e)
-                continue
-            }
-            if (mediaVec.size != queryVec.size) {
-                safeLog("w", "向量维度不匹配: ${emb.filePath} (${mediaVec.size} vs ${queryVec.size})")
-                continue
-            }
-            val sim = cosineSimilarity(queryVec, mediaVec)
-            if (sim >= minSimilarity) {
-                results.add(SearchResult(emb.filePath, sim))
-            }
-        }
-
-        // 4. 排序并截取 Top-K
-        results.sortByDescending { it.similarity }
-        val finalResults = if (results.size > topK) results.take(topK) else results
-
-        safeLog("i", "语义搜索 \"$query\": ${allEmbeddings.size} 条嵌入, 命中 ${finalResults.size} 条, " +
-                "最高相似度 ${finalResults.firstOrNull()?.similarity ?: 0f}")
-
-        SearchDiagnostics(finalResults, queryEncoded = true, indexSize = allEmbeddings.size)
+        safeLog("i", "语义搜索 \"$query\": ${scan.scannedCount} 条嵌入, 命中 ${scan.results.size} 条, " +
+                "最高相似度 ${scan.results.firstOrNull()?.similarity ?: 0f}")
+        SearchDiagnostics(
+            results = scan.results.map { SearchResult(it.filePath, it.similarity) },
+            queryEncoded = true,
+            indexSize = scan.scannedCount,
+            indexState = IndexState.READY,
+            spaceId = requestedSpace.spaceId,
+        )
     }
 
     /**
@@ -216,28 +198,15 @@ class SemanticSearcher(
         topK: Int = DEFAULT_TOP_K,
         excludeSelf: Boolean = true,
     ): List<SearchResult> = withContext(Dispatchers.IO) {
-        val refEmbedding = embeddingDao.getByFilePath(filePath) ?: return@withContext emptyList()
-        val refVec = deserialize(refEmbedding.embedding)
-
-        val allEmbeddings = embeddingDao.getAll()
-        val results = ArrayList<SearchResult>(allEmbeddings.size)
-
-        for (emb in allEmbeddings) {
-            if (excludeSelf && emb.filePath == filePath) continue
-            val mediaVec = try {
-                deserialize(emb.embedding)
-            } catch (e: Exception) {
-                continue
-            }
-            if (mediaVec.size != refVec.size) continue
-            val sim = cosineSimilarity(refVec, mediaVec)
-            if (sim >= MIN_SIMILARITY) {
-                results.add(SearchResult(emb.filePath, sim))
-            }
-        }
-
-        results.sortByDescending { it.similarity }
-        if (results.size > topK) results.take(topK) else results
+        val refEmbedding = embeddingDao.getByFilePathInSpace(filePath, requestedSpace.spaceId) ?: return@withContext emptyList()
+        val refVec = deserialize(refEmbedding)
+        vectorIndex.search(
+            spaceId = requestedSpace.spaceId,
+            queryVector = refVec,
+            topK = topK,
+            minSimilarity = MIN_SIMILARITY,
+            excludedPath = if (excludeSelf) filePath else null,
+        ).results.map { SearchResult(it.filePath, it.similarity) }
     }
 
     /**
@@ -245,11 +214,26 @@ class SemanticSearcher(
      */
     suspend fun getStats(): SemanticSearchStats = withContext(Dispatchers.IO) {
         SemanticSearchStats(
-            totalEmbeddings = embeddingDao.getCount(),
+            totalEmbeddings = embeddingDao.getCountInSpace(requestedSpace.spaceId),
             modelVersion = modelVersion,
             embeddingDim = embeddingDim,
         )
     }
+
+    /** 默认精确分页索引；未来 ANN 实现可通过相同接口替换，无须修改公开搜索 API。 */
+    private val vectorIndex: VectorIndex = ExactPagedVectorIndex(
+        embeddingDao = embeddingDao,
+        pageSize = EMBEDDING_PAGE_SIZE,
+        decode = ::deserialize,
+        cosineSimilarity = ::cosineSimilarity,
+        onInvalidEmbedding = { path, error ->
+            safeLog("w", "嵌入不可用: $path", error)
+        },
+    )
+
+    /** 运行时只读取已物化 BLOB；legacy CSV 仅由维护 Worker 解码，避免静默混扫。 */
+    private fun deserialize(embedding: com.renyxin.localalbum.data.db.entity.MediaEmbedding): FloatArray =
+        EmbeddingCodec.decode(requireNotNull(embedding.embeddingBlob) { "向量 BLOB 尚未建立" })
 
     // ---- 通用向量编解码（与 Provider 无关，逗号分隔 Float 字符串） ----
 
@@ -270,13 +254,7 @@ class SemanticSearcher(
      * 遇到空值、非法数值或非有限数值时明确抛出异常，由搜索调用点隔离该条记录。
      */
     fun deserialize(str: String): FloatArray {
-        require(str.isNotBlank()) { "语义向量为空" }
-        return str.split(",").mapIndexed { index, raw ->
-            val value = raw.trim().toFloatOrNull()
-                ?: throw IllegalArgumentException("语义向量第 $index 项不是有效浮点数")
-            require(value.isFinite()) { "语义向量第 $index 项不是有限数值" }
-            value
-        }.toFloatArray()
+        return deserializeLegacyCsv(str)
     }
 
     /**
@@ -305,15 +283,3 @@ data class SemanticSearchStats(
     val modelVersion: Int = 0,
     val embeddingDim: Int = 0,
 )
-
-/**
- * 从 [SemanticEmbedProvider] 推断模型版本号。
- * CLIP 类 Provider 通过常量暴露版本；概念向量 Provider 退回 1。
- */
-private fun SemanticEmbedProvider.modelVersion(): Int = when (this) {
-    is com.renyxin.localalbum.core.plugin.capability.builtin.Eva02ClipProvider ->
-        com.renyxin.localalbum.core.plugin.capability.builtin.Eva02ClipProvider.MODEL_VERSION
-    is com.renyxin.localalbum.core.plugin.capability.builtin.ConceptEmbedProvider ->
-        com.renyxin.localalbum.core.analysis.SemanticEmbedder.MODEL_VERSION
-    else -> 1
-}

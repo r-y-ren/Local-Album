@@ -3,7 +3,11 @@ package com.renyxin.localalbum.core.recommendation
 import com.renyxin.localalbum.core.analysis.SemanticEmbedder
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
+import com.renyxin.localalbum.data.db.dao.MediaDao
+import com.renyxin.localalbum.data.db.dao.SemanticDao
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
+import com.renyxin.localalbum.core.search.SemanticVectorSpace
+import com.renyxin.localalbum.data.db.entity.MediaEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.time.Clock
@@ -11,7 +15,8 @@ import java.time.Duration
 import java.time.Instant
 import kotlin.math.exp
 import kotlin.math.sqrt
-import kotlin.random.Random
+import java.util.PriorityQueue
+import java.util.UUID
 
 /**
  * 语义聚类推荐策略（Phase 5 推荐增强）。
@@ -35,32 +40,118 @@ import kotlin.random.Random
 class SemanticClusterRecommender(
     private val clock: Clock = Clock.systemUTC(),
     private val embeddingDao: EmbeddingDao? = null,
+    private val mediaDao: MediaDao? = null,
+    private val semanticDao: SemanticDao? = null,
+    private val spaceIdProvider: (suspend () -> String?)? = null,
     private val k: Int = 8,
     private val maxIterations: Int = 20,
     private val topNPerCluster: Int = 20,
     private val minClusterSize: Int = 5,
+    private val sampleLimit: Int = DEFAULT_SAMPLE_LIMIT,
+    private val pageSize: Int = DEFAULT_PAGE_SIZE,
 ) {
+    init {
+        require(sampleLimit > 0) { "sampleLimit must be positive" }
+        require(pageSize > 0) { "pageSize must be positive" }
+    }
+
+    companion object {
+        /** 推荐路径任一时刻持有的嵌入记录与解析向量总数硬上限。 */
+        const val DEFAULT_SAMPLE_LIMIT = 2_048
+        const val DEFAULT_PAGE_SIZE = 256
+        private const val MEDIA_QUERY_CHUNK_SIZE = 500
+        private val SAMPLE_ORDER = compareBy<SampledEmbedding> { it.priority }.thenBy { it.embedding.filePath }
+    }
+
+    /** 生产入口：v25 只读 active generation 的持久 Top-N，不再遍历 embedding 页。 */
+    suspend fun generate(): List<Recommendation> = withContext(Dispatchers.IO) {
+        val clusterDao = semanticDao ?: return@withContext emptyList()
+        val spaceId = spaceIdProvider?.invoke() ?: clusterDao.getActiveIndexMeta()?.spaceId ?: return@withContext emptyList()
+        val generation = clusterDao.getActiveClusterGeneration(spaceId) ?: return@withContext emptyList()
+        val metadataDao = mediaDao ?: return@withContext emptyList()
+        clusterDao.getClusters(spaceId, generation.generation).mapNotNull { cluster ->
+            val paths = clusterDao.getClusterMembers(spaceId, generation.generation, cluster.clusterId, topNPerCluster).map { it.filePath }
+            val items = paths.chunked(MEDIA_QUERY_CHUNK_SIZE).flatMap { metadataDao.getByFilePathsLight(it) }
+                .filterNot { it.isTrashed }.associateBy { it.filePath }
+            val ordered = paths.mapNotNull(items::get).map { it.toMediaItem() }
+            if (ordered.size < minClusterSize) return@mapNotNull null
+            Recommendation(
+                albumId = "semantic-${generation.generation}-${cluster.clusterId}",
+                albumName = cluster.title,
+                directoryPath = "语义聚合",
+                windowStart = ordered.minOf { it.capturedAt },
+                windowEnd = ordered.maxOf { it.capturedAt },
+                mediaItems = ordered,
+                reason = "语义聚合·${cluster.memberCount}张",
+                score = cluster.score,
+                category = RecommendationCategory.SEMANTIC_CLUSTER,
+            )
+        }
+    }
+
     /**
-     * 基于语义嵌入向量生成聚类推荐。
-     *
-     * @param allItems 全部媒体项（用于获取质量分、时间、收藏等元数据）
-     * @return 语义聚类推荐列表，按评分降序排列；无嵌入数据时返回空列表
+     * 兼容入口。调用方提供的列表只作为元数据源；嵌入仍使用稳定 keyset 有界采样。
+     * 生产调用链应使用无参 [generate]，不得在此传入整库列表。
      */
-    suspend fun generate(allItems: List<MediaItem>): List<Recommendation> = withContext(Dispatchers.IO) {
-        if (embeddingDao == null || allItems.size < minClusterSize) return@withContext emptyList()
+    suspend fun generate(allItems: List<MediaItem>): List<Recommendation> = generateInternal(allItems)
 
-        // 1. 加载全部嵌入向量
-        val embeddings = embeddingDao.getAll()
-        if (embeddings.size < minClusterSize) return@withContext emptyList()
+    private suspend fun generateInternal(compatibilityItems: List<MediaItem>?): List<Recommendation> = withContext(Dispatchers.IO) {
+        val dao = embeddingDao ?: return@withContext emptyList()
+        // 该入口仅为测试/旧调用兼容；仍必须显式选择空间。没有 active provider 时只读 legacy，
+        // 绝不与任何当前 Provider space 混合。生产无参入口不经过此扫描路径。
+        val scanSpaceId = spaceIdProvider?.invoke() ?: SemanticVectorSpace.LEGACY_SPACE_ID
 
-        // 2. 建立 filePath → MediaItem 映射，过滤无对应媒体的嵌入
-        val itemByPath = allItems.associateBy { it.filePath }
-        val validEmbeddings = embeddings.filter { it.filePath in itemByPath }
-        if (validEmbeddings.size < minClusterSize) return@withContext emptyList()
+        // bottom-k：对路径使用稳定散列并保留最小 N 个，遍历顺序不影响结果。
+        // DAO 当前页与 reservoir 合计不超过 sampleLimit；解析时逐条移除嵌入并替换为向量，
+        // 因而任意图库规模下「原始嵌入 + 已解析向量」始终 <= sampleLimit。
+        val boundedPageSize = minOf(pageSize, maxOf(1, sampleLimit / 4))
+        val reservoirCapacity = sampleLimit - boundedPageSize
+        if (reservoirCapacity < minClusterSize) return@withContext emptyList()
+        val reservoir = PriorityQueue<SampledEmbedding>(
+            compareByDescending<SampledEmbedding> { it.priority }.thenByDescending { it.embedding.filePath },
+        )
+        var afterPath: String? = null
+        do {
+            val page = dao.getPagedAfterInSpace(scanSpaceId, afterPath, boundedPageSize)
+            page.forEach { embedding ->
+                val sampled = SampledEmbedding(stablePriority(embedding.filePath), embedding)
+                if (reservoir.size < reservoirCapacity) {
+                    reservoir += sampled
+                } else if (SAMPLE_ORDER.compare(sampled, reservoir.peek()) < 0) {
+                    reservoir.poll()
+                    reservoir += sampled
+                }
+            }
+            afterPath = page.lastOrNull()?.filePath
+        } while (page.size == boundedPageSize)
+        if (reservoir.size < minClusterSize) return@withContext emptyList()
 
-        // 3. 解析向量为 FloatArray
-        val vectors = validEmbeddings.map { it.filePath to parseVector(it.embedding) }
-        val validVectors = vectors.filter { it.second.isNotEmpty() }
+        val selected = ArrayList<SampledEmbedding>(reservoir.size)
+        while (reservoir.isNotEmpty()) {
+            reservoir.poll()?.let(selected::add)
+        }
+        selected.sortWith(SAMPLE_ORDER)
+        val itemByPath = if (compatibilityItems != null) {
+            val selectedPaths = selected.asSequence().map { it.embedding.filePath }.toHashSet()
+            compatibilityItems.asSequence().filter { it.filePath in selectedPaths }.associateBy { it.filePath }
+        } else {
+            val metadataDao = mediaDao ?: return@withContext emptyList()
+            selected.map { it.embedding.filePath }
+                .chunked(MEDIA_QUERY_CHUNK_SIZE)
+                .flatMap { metadataDao.getByFilePathsLight(it) }
+                .asSequence()
+                .filterNot { it.isTrashed }
+                .associate { it.filePath to it.toMediaItem() }
+        }
+
+        val validVectors = ArrayList<Pair<String, FloatArray>>(minOf(selected.size, sampleLimit))
+        while (selected.isNotEmpty()) {
+            val embedding = selected.removeAt(selected.lastIndex).embedding
+            if (embedding.filePath !in itemByPath) continue
+            val vector = parseVector(embedding.embedding)
+            if (vector.isNotEmpty()) validVectors += embedding.filePath to vector
+        }
+        validVectors.sortBy { it.first }
         if (validVectors.size < minClusterSize) return@withContext emptyList()
 
         // 4. 执行 K-Means 聚类
@@ -175,9 +266,8 @@ class SemanticClusterRecommender(
         dim: Int,
     ): Array<FloatArray> {
         val centroids = Array(k) { FloatArray(dim) }
-        // 随机选第一个中心
-        val firstIdx = Random.nextInt(data.size)
-        centroids[0] = data[firstIdx].second.copyOf()
+        // 输入已按路径稳定排序；首中心固定，避免默认 Random 导致推荐波动。
+        centroids[0] = data.first().second.copyOf()
 
         for (c in 1 until k) {
             // 计算每个点到最近中心的距离
@@ -189,19 +279,11 @@ class SemanticClusterRecommender(
                 }
                 minDist
             }
-            // 选择距离最大的点（带概率加权）
-            val total = dists.sum()
-            if (total <= 0f) {
-                centroids[c] = data[Random.nextInt(data.size)].second.copyOf()
-            } else {
-                var r = Random.nextFloat() * total
-                var selected = 0
-                for (i in dists.indices) {
-                    r -= dists[i]
-                    if (r <= 0f) { selected = i; break }
-                }
-                centroids[c] = data[selected].second.copyOf()
-            }
+            // 确定性 farthest-first；同距离时保留路径排序中更早的点。
+            val selected = dists.indices.maxWithOrNull(
+                compareBy<Int> { dists[it] }.thenByDescending { data[it].first },
+            ) ?: 0
+            centroids[c] = data[selected].second.copyOf()
         }
         return centroids
     }
@@ -253,6 +335,35 @@ class SemanticClusterRecommender(
     }
 
     // ---- 辅助函数 ----
+
+    private data class SampledEmbedding(val priority: Long, val embedding: MediaEmbedding)
+
+    private fun stablePriority(path: String): Long {
+        var hash = -0x340d631b7bdddcdbL // FNV-1a 64 offset basis 的有符号表示
+        path.toByteArray(Charsets.UTF_8).forEach { byte ->
+            hash = hash xor (byte.toLong() and 0xffL)
+            hash *= 0x100000001b3L
+        }
+        return hash xor Long.MIN_VALUE
+    }
+
+    private fun MediaEntity.toMediaItem() = MediaItem(
+        id = UUID.nameUUIDFromBytes(filePath.toByteArray()).toString(),
+        filePath = filePath,
+        fileName = fileName,
+        type = mediaType,
+        capturedAt = Instant.ofEpochMilli(capturedAtMs),
+        modifiedAt = Instant.ofEpochMilli(modifiedAtMs),
+        fileSize = fileSize,
+        width = width,
+        height = height,
+        durationMs = durationMs,
+        latitude = latitude,
+        longitude = longitude,
+        isFavorite = isFavorite,
+        qualityScore = qualityScore,
+        thumbnailPath = thumbnailPath,
+    )
 
     /** 簇内凝聚度：平均到中心余弦距离的倒数，归一化到 [0,1] */
     private fun computeCohesion(members: List<FloatArray>, centroid: FloatArray): Double {
@@ -311,4 +422,5 @@ class SemanticClusterRecommender(
         if (favoriteCount > 0) parts += "含${favoriteCount}张收藏"
         return parts.joinToString("·")
     }
+
 }

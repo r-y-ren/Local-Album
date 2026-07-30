@@ -7,6 +7,7 @@ import android.util.Log
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.VideoFrameDecoder
+import com.renyxin.localalbum.data.worker.DeletionRetryWorker
 import com.renyxin.localalbum.data.worker.TrashCleanupWorker
 import org.opencv.android.OpenCVLoader
 
@@ -54,6 +55,7 @@ class LocalAlbumApplication : Application(), ImageLoaderFactory {
         // Phase 0: 提前创建扫描进度通知渠道（幂等），确保首次 acquire 时渠道就绪
         com.renyxin.localalbum.data.worker.ScanServiceController.ensureChannel(this)
         TrashCleanupWorker.schedule(this)
+        DeletionRetryWorker.enqueue(this)
         // 注册 MediaStore ContentObserver，监听图片/视频变更并触发防抖增量扫描
         container.registerContentObserver()
         // 加载所有已安装的 AI 插件（Phase 2.5）

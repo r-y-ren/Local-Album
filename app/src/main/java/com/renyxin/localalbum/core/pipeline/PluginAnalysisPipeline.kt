@@ -49,9 +49,23 @@ class PluginAnalysisPipeline(
     private val dagSorter: StageDagSorter = StageDagSorter,
     val progressManager: ProgressManager = ProgressManager(),
     private val analysisStateDao: com.renyxin.localalbum.data.db.dao.AnalysisStateDao? = null,
+    private val pipelineScopeOverride: String? = null,
 ) {
+    /** 当前任务身份范围；包含阶段集合、阶段模型版本及工厂注入的 Provider 身份。 */
+    val pipelineScope: String by lazy {
+        pipelineScopeOverride ?: buildPipelineScope(
+            stages.map { "${it.stageId}@${it.modelVersion}" },
+        )
+    }
+
+    /** Worker 用它验证所有预期阶段都返回了结果，防止部分 DAG 被误判为完成。 */
+    val requiredStageIds: Set<String> by lazy { stages.mapTo(linkedSetOf()) { it.stageId } }
     companion object {
         private const val TAG = "PluginPipeline"
+        private const val PIPELINE_SCOPE_VERSION = 1
+
+        internal fun buildPipelineScope(parts: List<String>): String =
+            "pipeline:v$PIPELINE_SCOPE_VERSION|" + parts.sorted().joinToString("|")
 
         /**
          * 工厂方法（Phase 2 重构）：从 [CapabilityRegistry] 获取激活的 Provider，
@@ -69,9 +83,11 @@ class PluginAnalysisPipeline(
         fun create(
             mediaDao: com.renyxin.localalbum.data.db.dao.MediaDao,
             faceDao: com.renyxin.localalbum.data.db.dao.FaceDao,
+            faceClusterDao: com.renyxin.localalbum.data.db.dao.FaceClusterDao,
             embeddingDao: com.renyxin.localalbum.data.db.dao.EmbeddingDao,
             capabilityRegistry: CapabilityRegistryV2,
             analysisStateDao: com.renyxin.localalbum.data.db.dao.AnalysisStateDao? = null,
+            semanticDao: com.renyxin.localalbum.data.db.dao.SemanticDao? = null,
         ): PluginAnalysisPipeline {
             val stages = mutableListOf<AnalysisStage>()
 
@@ -81,7 +97,12 @@ class PluginAnalysisPipeline(
                     "face" -> {
                         val provider = capabilityRegistry.getActiveProvider<FaceProvider>("face")
                         if (provider != null) {
-                            com.renyxin.localalbum.core.pipeline.stages.FaceStage(provider, mediaDao, faceDao)
+                            com.renyxin.localalbum.core.pipeline.stages.FaceStage(
+                                provider,
+                                mediaDao,
+                                faceDao,
+                                faceClusterDao,
+                            )
                         } else {
                             Log.w(TAG, "人脸检测 Provider 未就绪，跳过 FaceStage")
                             null
@@ -99,7 +120,12 @@ class PluginAnalysisPipeline(
                     "semantic" -> {
                         val provider = capabilityRegistry.getActiveProvider<SemanticEmbedProvider>("semantic")
                         if (provider != null) {
-                            com.renyxin.localalbum.core.pipeline.stages.SemanticStage(provider, mediaDao, embeddingDao)
+                            com.renyxin.localalbum.core.pipeline.stages.SemanticStage(
+                                provider,
+                                mediaDao,
+                                embeddingDao,
+                                semanticDao = semanticDao,
+                            )
                         } else {
                             Log.w(TAG, "语义嵌入 Provider 未就绪，跳过 SemanticStage")
                             null
@@ -131,14 +157,19 @@ class PluginAnalysisPipeline(
                 if (stage != null) stages.add(stage)
             }
 
+            val activeProviders = capabilityRegistry.slotMetadataList.value
+                .filter { metadata -> stages.any { it.stageId.substringAfter(':') == metadata.slotId } }
+                .map { metadata -> "${metadata.slotId}=${metadata.activeProviderId}" }
+            val stageVersions = stages.map { stage -> "${stage.stageId}@${stage.modelVersion}" }
             return PluginAnalysisPipeline(
                 stages = stages,
                 analysisStateDao = analysisStateDao,
+                pipelineScopeOverride = buildPipelineScope(activeProviders + stageVersions),
             )
         }
 
         /**
-         * @deprecated 使用 [create(MediaDao, FaceDao, EmbeddingDao, CapabilityRegistry)] 替代。
+         * @deprecated 使用带 FaceClusterDao 的 create 工厂替代。
          * 保留用于向后兼容，扩展插件不再参与批处理管道。
          */
         @Deprecated(
@@ -150,13 +181,14 @@ class PluginAnalysisPipeline(
             context: android.content.Context,
             mediaDao: com.renyxin.localalbum.data.db.dao.MediaDao,
             faceDao: com.renyxin.localalbum.data.db.dao.FaceDao,
+            faceClusterDao: com.renyxin.localalbum.data.db.dao.FaceClusterDao,
             embeddingDao: com.renyxin.localalbum.data.db.dao.EmbeddingDao,
             featureStoreDao: com.renyxin.localalbum.data.db.dao.FeatureStoreDao,
             pluginRegistry: com.renyxin.localalbum.core.plugin.PluginRegistry,
         ): PluginAnalysisPipeline {
             // 降级：使用硬编码内置分析器（兼容旧代码路径）
             val builtinStages: List<AnalysisStage> = listOf(
-                com.renyxin.localalbum.core.pipeline.stages.BuiltinFaceStage(context, mediaDao, faceDao),
+                com.renyxin.localalbum.core.pipeline.stages.BuiltinFaceStage(context, mediaDao, faceDao, faceClusterDao),
                 com.renyxin.localalbum.core.pipeline.stages.BuiltinQualityStage(mediaDao),
                 com.renyxin.localalbum.core.pipeline.stages.BuiltinSceneStage(mediaDao),
                 com.renyxin.localalbum.core.pipeline.stages.BuiltinSemanticStage(mediaDao, embeddingDao),
@@ -256,10 +288,12 @@ class PluginAnalysisPipeline(
         progressManager.onStageStart(stage.stageId, stage.displayName, targetPaths.size)
 
         try {
-            // Phase 1 断点续跑：缓存型阶段跳过已完成文件，仅对 pending 子集推理。
-            // 粒度为 (file, stage)：一个文件可能已完成 face 但未完成 ocr，各阶段独立判定。
+            // 断点续跑只查询当前调用批次，禁止为一个 250 条批次加载该阶段数万条历史路径。
+            // chunked 同时保护未来调用方传入较大批次时不超过 SQLite IN 参数上限。
             val donePaths: Set<String> = if (stage.isCacheable && analysisStateDao != null) {
-                analysisStateDao.getDonePaths(stage.stageId, stage.modelVersion).toSet()
+                targetPaths.chunked(500).flatMap { batch ->
+                    analysisStateDao.getDonePathsInBatch(stage.stageId, stage.modelVersion, batch)
+                }.toSet()
             } else {
                 emptySet()
             }

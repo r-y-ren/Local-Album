@@ -2,7 +2,10 @@ package com.renyxin.localalbum.core.pipeline.stages
 
 import android.util.Log
 import com.renyxin.localalbum.core.analysis.SemanticEmbedder
+import com.renyxin.localalbum.core.search.EmbeddingCodec
 import com.renyxin.localalbum.core.pipeline.AnalysisStage
+import com.renyxin.localalbum.core.plugin.capability.builtin.ConceptEmbedProvider
+import com.renyxin.localalbum.core.search.SemanticVectorSpace
 import com.renyxin.localalbum.core.pipeline.EnhancedProgressCallback
 import com.renyxin.localalbum.core.pipeline.FileProcessingStatus
 import com.renyxin.localalbum.core.pipeline.ParallelFileProcessor
@@ -47,6 +50,8 @@ class BuiltinSemanticStage(
     ): StageResult {
         val total = filePaths.size
         val embeddings = mutableListOf<MediaEmbedding>()
+        val provider = ConceptEmbedProvider()
+        val space = SemanticVectorSpace.from(provider)
         var success = 0
         var failed = 0
 
@@ -64,9 +69,17 @@ class BuiltinSemanticStage(
                     MediaEmbedding(
                         filePath = path,
                         embedding = embedder.serialize(vec),
+                        embeddingBlob = EmbeddingCodec.encode(vec),
                         modelVersion = SemanticEmbedder.MODEL_VERSION,
                         generatedAtMs = System.currentTimeMillis(),
                         source = "concept",
+                        providerId = space.providerId,
+                        modelId = space.modelId,
+                        dimension = space.dimension,
+                        spaceId = space.spaceId,
+                        generation = 1,
+                        codecId = space.codecId,
+                        formatVersion = space.formatVersion,
                     )
                 }
             }

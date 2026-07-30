@@ -2,6 +2,7 @@ package com.renyxin.localalbum.core.album
 
 import com.renyxin.localalbum.core.model.Album
 import com.renyxin.localalbum.core.model.DirectoryNode
+import com.renyxin.localalbum.data.db.dao.DirectorySummary
 import java.util.UUID
 
 class AlbumBuilder {
@@ -81,6 +82,71 @@ class AlbumBuilder {
         node.children.forEach { collectLeafNodes(it, out) }
     }
 
+    /**
+     * 从数据库聚合摘要构建轻量目录树。节点只持有目录级元数据，不持有媒体实体。
+     */
+    fun buildFromDirectorySummaries(
+        summaries: List<DirectorySummary>,
+        roots: List<String>,
+        sortMode: Int = 0,
+    ): Pair<List<Album>, List<Album>> {
+        if (summaries.isEmpty()) return emptyList<Album>() to emptyList()
+        val nodes = linkedMapOf<String, SummaryNode>()
+        summaries.forEach { summary ->
+            nodes[summary.parentPath] = SummaryNode(summary = summary)
+            var parent = summary.parentPath.substringBeforeLast('/', "")
+            while (parent.isNotEmpty() && roots.any { isUnderRoot(parent, it) }) {
+                nodes.putIfAbsent(parent, SummaryNode())
+                parent = parent.substringBeforeLast('/', "")
+            }
+        }
+        nodes.keys.forEach { path ->
+            val parent = path.substringBeforeLast('/', "")
+            if (parent in nodes) nodes.getValue(parent).childPaths += path
+        }
+
+        fun build(path: String, parentPath: String?, depth: Int): Album {
+            val node = nodes.getValue(path)
+            val summary = node.summary
+            val children = node.childPaths.map { build(it, path, depth + 1) }
+            val album = Album(
+                id = albumId(path),
+                name = path.substringAfterLast('/').ifEmpty { path },
+                directoryPath = path,
+                parentPath = parentPath,
+                depth = depth,
+                children = children,
+                directMediaCount = summary?.mediaCount ?: 0,
+                latestCapturedAtMs = summary?.latestCapturedAtMs ?: 0L,
+                summaryCoverPaths = listOfNotNull(
+                    summary?.coverThumbnailPath ?: summary?.coverFilePath,
+                ),
+            )
+            return album.copy(children = children.sortedWith(albumComparator(sortMode)))
+        }
+
+        val childPaths = nodes.values.flatMap { it.childPaths }.toSet()
+        val rootPaths = nodes.keys.filter { path ->
+            path !in childPaths && (roots.isEmpty() || roots.any { isUnderRoot(path, it) })
+        }
+        val tree = rootPaths.map { build(it, null, 0) }.sortedWith(albumComparator(sortMode))
+        val leaves = mutableListOf<Album>()
+        fun collect(album: Album) {
+            if (album.mediaCount > 0) leaves += album
+            album.children.forEach(::collect)
+        }
+        tree.forEach(::collect)
+        return tree to leaves.sortedWith(albumComparator(sortMode))
+    }
+
+    private data class SummaryNode(
+        var summary: DirectorySummary? = null,
+        val childPaths: MutableList<String> = mutableListOf(),
+    )
+
+    private fun isUnderRoot(path: String, root: String): Boolean =
+        path == root || path.startsWith("$root/")
+
     private fun albumId(path: String): String =
         UUID.nameUUIDFromBytes(path.toByteArray()).toString()
 
@@ -92,8 +158,9 @@ class AlbumBuilder {
      * - 3=数量（媒体数量降序）
      */
     private fun albumComparator(sortMode: Int): Comparator<Album> = when (sortMode) {
-        1 -> compareByDescending { it.dateRange?.start ?: java.time.Instant.EPOCH }
-        2 -> compareByDescending { it.mediaItems.sumOf { item -> item.fileSize } }
+        1 -> compareByDescending { it.latestCapturedAtMs }
+        // 轻量摘要不持有文件大小总和；模式 2 使用媒体数作为稳定近似，避免全表读取。
+        2 -> compareByDescending { it.mediaCount }
         3 -> compareByDescending { it.mediaCount }
         else -> compareBy { it.directoryPath }
     }

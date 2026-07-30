@@ -15,8 +15,14 @@ import java.io.File
  * @see com.renyxin.localalbum.core.plugin.capability.builtin.ConceptEmbedProvider 内置默认实现
  */
 interface SemanticEmbedProvider {
-    /** Provider 唯一标识 */
+    /** Provider 唯一标识；用于能力选择，不等同于 pipelineScope 或向量 spaceId。 */
     val providerId: String
+
+    /** 模型稳定标识。默认与 Provider 相同，组合 Provider 可覆盖为实际模型身份。 */
+    val modelId: String get() = providerId
+
+    /** 模型/权重或预处理发生不兼容变化时必须递增。 */
+    val modelVersion: Int get() = 1
 
     /** 人类可读显示名称 */
     val displayName: String

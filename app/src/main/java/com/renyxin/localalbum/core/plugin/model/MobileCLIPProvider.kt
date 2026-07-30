@@ -42,6 +42,7 @@ class MobileCLIPProvider(
         const val TEXT_MODEL_URL =
             "https://huggingface.co/apple/MobileCLIP-S0/resolve/main/text_encoder.tflite"
 
+        const val MODEL_VERSION = 1
         const val IMAGE_SIZE = 256
         const val EMBEDDING_DIM = 512
         const val MAX_TEXT_LENGTH = 77
@@ -51,6 +52,8 @@ class MobileCLIPProvider(
     }
 
     override val providerId = "model:mobileclip"
+    override val modelId = "mobileclip-s0"
+    override val modelVersion = MODEL_VERSION
     override val displayName = "MobileCLIP 语义检索"
     override val embeddingDim = EMBEDDING_DIM
 

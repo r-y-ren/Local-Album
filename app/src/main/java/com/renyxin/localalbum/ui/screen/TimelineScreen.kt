@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -53,6 +54,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -72,6 +74,7 @@ import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.core.timeline.TimelineGrouper
 import com.renyxin.localalbum.core.timeline.TimelineSection
+import kotlinx.coroutines.flow.distinctUntilChanged
 import java.time.Instant
 import java.time.ZoneId
 import kotlin.math.roundToInt
@@ -426,6 +429,7 @@ fun YearHeader(yearLabel: String, itemCount: Int, modifier: Modifier = Modifier)
 fun PagedTimelineScreen(
     pagedItems: androidx.paging.compose.LazyPagingItems<MediaItem>,
     onItemClick: (MediaItem) -> Unit = {},
+    onThumbnailWindowChanged: (visible: List<MediaItem>, prefetch: List<MediaItem>) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
     headerContent: (@androidx.compose.runtime.Composable androidx.compose.foundation.lazy.grid.LazyGridItemScope.() -> Unit)? = null,
 ) {
@@ -437,6 +441,22 @@ fun PagedTimelineScreen(
             screenWidthDp < 840 -> 5
             else -> 6
         }
+    }
+
+    val gridState = rememberLazyGridState()
+    val headerOffset = if (headerContent == null) 0 else 1
+    LaunchedEffect(gridState, pagedItems, headerOffset) {
+        snapshotFlow { gridState.layoutInfo.visibleItemsInfo.map { it.index } }
+            .distinctUntilChanged()
+            .collect { gridIndices ->
+                val mediaIndices = gridIndices.map { it - headerOffset }
+                    .filter { it in 0 until pagedItems.itemCount }
+                val visible = mediaIndices.mapNotNull { pagedItems.peek(it) }
+                val after = (mediaIndices.maxOrNull() ?: -1) + 1
+                val prefetch = (after until minOf(after + 20, pagedItems.itemCount))
+                    .mapNotNull { pagedItems.peek(it) }
+                onThumbnailWindowChanged(visible, prefetch)
+            }
     }
 
     val refreshLoadState = pagedItems.loadState.refresh
@@ -474,6 +494,7 @@ fun PagedTimelineScreen(
             }
         } else {
             LazyVerticalGrid(
+                state = gridState,
                 columns = GridCells.Fixed(columns),
                 contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),

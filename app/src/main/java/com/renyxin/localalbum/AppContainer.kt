@@ -250,8 +250,10 @@ class AppContainer(context: Context) {
         PluginAnalysisPipeline.create(
             mediaDao = database.mediaDao(),
             faceDao = database.faceDao(),
+            faceClusterDao = database.faceClusterDao(),
             embeddingDao = database.embeddingDao(),
             capabilityRegistry = capabilityRegistry,
+            semanticDao = database.semanticDao(),
             analysisStateDao = database.analysisStateDao(),
         )
     }
@@ -487,14 +489,34 @@ class AppContainer(context: Context) {
         android.util.Log.i("AppContainer", "后台协程资源已释放")
     }
 
+    private val thumbnailScheduler = com.renyxin.localalbum.data.repo.ThumbnailScheduler(
+        context = appContext,
+        taskDao = database.thumbnailTaskDao(),
+        cacheDao = database.thumbnailCacheDao(),
+    )
+
+    val mediaDeletionCoordinator = com.renyxin.localalbum.data.repo.MediaDeletionCoordinator(database)
+    val deletionService = com.renyxin.localalbum.data.repo.PersistentDeletionService(
+        database.deletionTombstoneDao(),
+        mediaDeletionCoordinator,
+    )
+
     private val hybridIndexer = HybridIndexer(
         context = context.applicationContext,
         mediaDao = database.mediaDao(),
+        database = database,
         faceDao = database.faceDao(),
         embeddingDao = database.embeddingDao(),
         mediaSource = mediaSource,
         pluginPipeline = pluginAnalysisPipeline,
         analysisStateDao = database.analysisStateDao(),
+        analysisTaskDao = database.analysisTaskDao(),
+        featureStoreDao = database.featureStoreDao(),
+        thumbnailTaskDao = database.thumbnailTaskDao(),
+        scanRunDao = database.scanRunDao(),
+        scanStagingDao = database.scanStagingDao(),
+        deletionTombstoneDao = database.deletionTombstoneDao(),
+        mediaDeletionCoordinator = mediaDeletionCoordinator,
     )
 
     val albumRepository = AlbumRepository(
@@ -509,9 +531,14 @@ class AppContainer(context: Context) {
         recommendationEngine = RecommendationEngine(
             semanticClusterRecommender = com.renyxin.localalbum.core.recommendation.SemanticClusterRecommender(
                 embeddingDao = database.embeddingDao(),
+                mediaDao = database.mediaDao(),
+                semanticDao = database.semanticDao(),
             ),
         ),
         hybridIndexer = hybridIndexer,
+        thumbnailScheduler = thumbnailScheduler,
+        deletionService = deletionService,
+        mediaDeletionCoordinator = mediaDeletionCoordinator,
         // 语义搜索使用当前激活的 SemanticEmbedProvider（CLIP / 概念向量…），
         // 保证搜索侧与索引侧向量空间一致
         semanticProviderFactory = {

@@ -22,6 +22,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.paging.PagingData
+import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.compose.itemKey
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -72,8 +75,10 @@ import coil.request.ImageRequest
 import androidx.compose.ui.platform.LocalContext
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
+import com.renyxin.localalbum.data.repo.MediaSearchQuery
 import com.renyxin.localalbum.data.repo.SemanticSearchResult
 import com.renyxin.localalbum.data.repo.SemanticSearchState
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.delay
 import java.time.Instant
 import java.time.LocalDate
@@ -89,7 +94,8 @@ private enum class SearchFilterType(val label: String) {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SearchScreen(
-    searchResults: List<MediaItem>,
+    pagedSearch: (MediaSearchQuery) -> Flow<PagingData<MediaItem>>,
+    cameraModels: List<String>,
     semanticSearchResults: List<SemanticSearchResult> = emptyList(),
     isSemanticMode: Boolean = false,
     semanticSearchState: SemanticSearchState = SemanticSearchState.IDLE,
@@ -97,7 +103,7 @@ fun SearchScreen(
     onSearch: (String) -> Unit,
     onClearSearch: () -> Unit,
     onBack: () -> Unit,
-    onMediaClick: (List<MediaItem>, Int) -> Unit,
+    onMediaClick: (MediaItem, MediaSearchQuery?, List<String>?) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     var showFilters by remember { mutableStateOf(false) }
@@ -107,18 +113,6 @@ fun SearchScreen(
     var dateFrom by remember { mutableStateOf<LocalDate?>(null) }
     var dateTo by remember { mutableStateOf<LocalDate?>(null) }
 
-    // Filters for camera model
-    val cameraModels = remember(searchResults, semanticSearchResults) {
-        val allItems = if (isSemanticMode) {
-            semanticSearchResults.map { it.mediaItem }
-        } else {
-            searchResults
-        }
-        allItems.mapNotNull { it.model }
-            .filter { it.isNotBlank() }
-            .distinct()
-            .sorted()
-    }
     var cameraFilter by remember { mutableStateOf<String?>(null) }
 
     // Debounce search
@@ -140,16 +134,24 @@ fun SearchScreen(
         }
     }
 
-    // In semantic mode, use semantic results; otherwise use keyword results
-    val displayResults = if (isSemanticMode) {
-        semanticSearchResults
-    } else {
-        searchResults.map { SemanticSearchResult(it, 0f) }
+    val searchQuery = remember(query, typeFilter, dateFrom, dateTo, cameraFilter) {
+        MediaSearchQuery(
+            text = query,
+            mediaType = when (typeFilter) {
+                SearchFilterType.ALL -> null
+                SearchFilterType.IMAGES -> MediaType.IMAGE
+                SearchFilterType.VIDEOS -> MediaType.VIDEO
+            },
+            startMs = dateFrom?.atStartOfDay(ZoneId.systemDefault())?.toInstant()?.toEpochMilli(),
+            endMs = dateTo?.plusDays(1)?.atStartOfDay(ZoneId.systemDefault())?.toInstant()?.toEpochMilli()?.minus(1),
+            model = cameraFilter,
+        )
     }
+    val keywordItems = remember(searchQuery) { pagedSearch(searchQuery) }.collectAsLazyPagingItems()
 
-    // Apply local filters on search results
-    val filteredResults = remember(displayResults, typeFilter, dateFrom, dateTo, cameraFilter) {
-        displayResults.filter { result ->
+    // 语义搜索保持有界列表；其筛选仍可在内存执行。
+    val filteredResults = remember(semanticSearchResults, typeFilter, dateFrom, dateTo, cameraFilter) {
+        semanticSearchResults.filter { result ->
             val item = result.mediaItem
             val typeMatch = when (typeFilter) {
                 SearchFilterType.ALL -> true
@@ -272,9 +274,10 @@ fun SearchScreen(
                                     else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        if (query.isNotEmpty() && filteredResults.isNotEmpty()) {
+                        val visibleCount = if (isSemanticMode) filteredResults.size else keywordItems.itemCount
+                        if (query.isNotEmpty() && visibleCount > 0) {
                             Text(
-                                text = "${filteredResults.size}",
+                                text = "$visibleCount",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline,
                             )
@@ -518,7 +521,9 @@ fun SearchScreen(
             return@Scaffold
         }
 
-        if (filteredResults.isEmpty()) {
+        val noResults = if (isSemanticMode) filteredResults.isEmpty()
+            else keywordItems.itemCount == 0 && keywordItems.loadState.refresh !is androidx.paging.LoadState.Loading
+        if (noResults) {
             Box(
                 modifier = Modifier
                     .padding(padding)
@@ -571,24 +576,34 @@ fun SearchScreen(
 
         LazyVerticalGrid(
             columns = GridCells.Fixed(3),
-            modifier = Modifier
-                .padding(padding)
-                .fillMaxSize(),
+            modifier = Modifier.padding(padding).fillMaxSize(),
             contentPadding = PaddingValues(4.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            items(filteredResults, key = { it.mediaItem.id }) { result ->
-                SearchMediaThumbnail(
-                    item = result.mediaItem,
-                    similarity = result.similarity,
-                    showScore = isSemanticMode,
-                    onClick = {
-                        val items = filteredResults.map { it.mediaItem }
-                        val index = filteredResults.indexOf(result)
-                        onMediaClick(items, index)
-                    },
-                )
+            if (isSemanticMode) {
+                items(filteredResults, key = { it.mediaItem.id }) { result ->
+                    SearchMediaThumbnail(
+                        item = result.mediaItem,
+                        similarity = result.similarity,
+                        showScore = true,
+                        onClick = {
+                            onMediaClick(result.mediaItem, null, filteredResults.map { it.mediaItem.filePath })
+                        },
+                    )
+                }
+            } else {
+                items(
+                    count = keywordItems.itemCount,
+                    key = keywordItems.itemKey { it.filePath },
+                ) { index ->
+                    keywordItems[index]?.let { item ->
+                        SearchMediaThumbnail(
+                            item = item,
+                            onClick = { onMediaClick(item, searchQuery, null) },
+                        )
+                    }
+                }
             }
         }
     }

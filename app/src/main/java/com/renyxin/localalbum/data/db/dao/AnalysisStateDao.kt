@@ -25,6 +25,21 @@ interface AnalysisStateDao {
     )
     suspend fun getDonePaths(stageId: String, modelVersion: Int): List<String>
 
+    /**
+     * 只查询调用方当前批次中已完成的路径，避免每个 250 条分析批次加载阶段历史全集。
+     * 调用方需将 filePaths 控制在 SQLite 参数上限以内。
+     */
+    @Query(
+        "SELECT filePath FROM analysis_state " +
+            "WHERE stageId = :stageId AND status = 'done' AND modelVersion = :modelVersion " +
+            "AND filePath IN (:filePaths)"
+    )
+    suspend fun getDonePathsInBatch(
+        stageId: String,
+        modelVersion: Int,
+        filePaths: List<String>,
+    ): List<String>
+
     /** 批量写入阶段完成状态（覆盖同主键旧记录）。 */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(states: List<AnalysisStateEntity>)
