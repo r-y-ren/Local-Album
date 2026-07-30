@@ -146,6 +146,7 @@ import com.renyxin.localalbum.ui.vm.AlbumViewModel
 import com.renyxin.localalbum.ui.vm.PluginViewModel
 import com.renyxin.localalbum.ui.vm.SettingsViewModel
 import java.time.Instant
+import kotlinx.coroutines.delay
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
@@ -444,6 +445,15 @@ fun LocalAlbumApp(
                     albumViewModel.loadFaceClusters()
                 }
                 wasScanning = isScanning
+            }
+            // 人脸阶段每批写库后即可显示新聚类，不必等待全量扫描完成。
+            // 适度轮询避免为每张人脸建立 UI 查询，同时保证进度中的新结果可见。
+            LaunchedEffect(isPipelineRunning) {
+                while (isPipelineRunning) {
+                    albumViewModel.loadFaceClusters()
+                    delay(1_500L)
+                }
+                albumViewModel.loadFaceClusters()
             }
             FacesScreen(
                 faceClusters = faceClusters,

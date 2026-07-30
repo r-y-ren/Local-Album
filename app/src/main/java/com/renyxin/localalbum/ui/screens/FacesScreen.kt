@@ -150,9 +150,24 @@ fun FacesScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             } else if (isPipelineRunning && stageFileProgress.files.isNotEmpty()) {
-                // Phase 6.1: 管道运行中显示 per-file 进度网格（完成后自动隐藏，展示聚类结果）
+                // 扫描期间同时展示已完成的聚类；进度网格仅作为增量结果的提示，
+                // 不再覆盖已有结果，用户可随扫描推进浏览新加入的人物。
                 Column(modifier = Modifier.fillMaxSize()) {
-                    AnalysisProgressGrid(stageProgress = stageFileProgress)
+                    AnalysisProgressGrid(
+                        stageProgress = stageFileProgress,
+                        modifier = Modifier.weight(0.42f),
+                    )
+                    if (faceClusters.isNotEmpty()) {
+                        FaceClusterGrid(
+                            faceClusters = faceClusters,
+                            faceStats = faceStats,
+                            onClusterClick = { cluster ->
+                                selectedClusterId = cluster.clusterId
+                                onClusterClick(cluster.clusterId)
+                            },
+                            modifier = Modifier.weight(0.58f),
+                        )
+                    }
                 }
             } else if (isLoading && faceClusters.isEmpty()) {
                 Box(
@@ -168,47 +183,15 @@ fun FacesScreen(
             } else if (faceClusters.isEmpty()) {
                 EmptyFacesState(modifier = Modifier.fillMaxSize())
             } else {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    // 统计信息
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                        ) {
-                            StatItem(label = "人物", value = "${faceStats.clusterCount}")
-                            StatItem(label = "人脸", value = "${faceStats.totalFaces}")
-                            StatItem(label = "已聚类", value = "${faceStats.clusteredFaces}")
-                        }
-                    }
-
-                    // 人脸聚类网格
-                    LazyVerticalGrid(
-                        columns = GridCells.Adaptive(minSize = 110.dp),
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        items(faceClusters, key = { it.clusterId }) { cluster ->
-                            FaceClusterCard(
-                                cluster = cluster,
-                                onClick = {
-                                    selectedClusterId = cluster.clusterId
-                                    onClusterClick(cluster.clusterId)
-                                },
-                                onLongPress = { namingClusterId = cluster.clusterId },
-                            )
-                        }
-                    }
-                }
+                FaceClusterGrid(
+                    faceClusters = faceClusters,
+                    faceStats = faceStats,
+                    onClusterClick = { cluster ->
+                        selectedClusterId = cluster.clusterId
+                        onClusterClick(cluster.clusterId)
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
         }
     }
@@ -253,6 +236,49 @@ fun FacesScreen(
                 TextButton(onClick = { namingClusterId = null }) { Text("取消") }
             },
         )
+    }
+}
+
+@Composable
+private fun FaceClusterGrid(
+    faceClusters: List<FaceCluster>,
+    faceStats: FaceStats,
+    onClusterClick: (FaceCluster) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+            ) {
+                StatItem(label = "人物", value = "${faceStats.clusterCount}")
+                StatItem(label = "人脸", value = "${faceStats.totalFaces}")
+                StatItem(label = "已聚类", value = "${faceStats.clusteredFaces}")
+            }
+        }
+        // 显式占用统计卡片之外的剩余高度，确保扫描进度下方的聚类区获得
+        // 有界高度；LazyVerticalGrid 因而可独立处理纵向滑动，不会被上方进度网格吞掉。
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = 110.dp),
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(faceClusters, key = { it.clusterId }) { cluster ->
+                FaceClusterCard(
+                    cluster = cluster,
+                    onClick = { onClusterClick(cluster) },
+                )
+            }
+        }
     }
 }
 
@@ -318,7 +344,6 @@ private fun FaceClusterDetailContent(
 private fun FaceClusterCard(
     cluster: FaceCluster,
     onClick: () -> Unit,
-    onLongPress: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current

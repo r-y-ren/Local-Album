@@ -46,6 +46,8 @@ class DatabaseImporter(
 ) {
     companion object {
         private const val TAG = "DatabaseImporter"
+        /** 同时规避 SQLite 绑定变量上限及导入大备份时的单次事务内存峰值。 */
+        private const val INSERT_BATCH_SIZE = 500
     }
 
     /**
@@ -110,12 +112,13 @@ class DatabaseImporter(
                 faceDao?.clearAll()
                 embeddingDao?.clearAll()
 
-                if (mediaItems.isNotEmpty()) mediaDao.insertAll(mediaItems)
-                if (ftsEntries.isNotEmpty()) {
-                    ftsEntries.chunked(500).forEach { chunk -> mediaDao.insertFtsAll(chunk) }
-                }
-                if (faces.isNotEmpty()) faceDao?.insertFaces(faces)
-                if (embeddings.isNotEmpty()) embeddingDao?.insertEmbeddings(embeddings)
+                // Room 的批量 @Insert 会把整个 List 一次交给 SQLite。
+                // 大备份中的媒体、人脸与高维嵌入可达数万条，分块可避免 Binder/SQLite
+                // 参数数组及事务缓存同时膨胀而造成导入缓慢或 OOM。
+                mediaItems.chunked(INSERT_BATCH_SIZE).forEach { chunk -> mediaDao.insertAll(chunk) }
+                ftsEntries.chunked(INSERT_BATCH_SIZE).forEach { chunk -> mediaDao.insertFtsAll(chunk) }
+                faces.chunked(INSERT_BATCH_SIZE).forEach { chunk -> faceDao?.insertFaces(chunk) }
+                embeddings.chunked(INSERT_BATCH_SIZE).forEach { chunk -> embeddingDao?.insertEmbeddings(chunk) }
             }
             if (database != null) {
                 database.withTransaction { restoreAll() }

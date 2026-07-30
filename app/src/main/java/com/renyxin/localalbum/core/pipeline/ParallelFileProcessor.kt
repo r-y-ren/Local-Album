@@ -73,42 +73,45 @@ object ParallelFileProcessor {
         val semaphore = Semaphore(concurrency.coerceAtLeast(1))
 
         return coroutineScope {
-            filePaths.map { path ->
-                async(dispatcher) {
-                    semaphore.withPermit {
-                        // 文件存在性预检（IO 轻操作，不占推理配额意义不大但避免无谓推理）
-                        if (!File(path).exists()) {
-                            val done = processed.incrementAndGet()
-                            enhancedCallback(done, total, path, FileProcessingStatus.FAILED)
-                            FileResult<T>(path, success = false)
-                        } else {
-                            enhancedCallback(processed.get(), total, path, FileProcessingStatus.PROCESSING)
-                            try {
-                                // D7 日志治理：移除每文件 2 条 CrashDebug 日志（5 万文件 = 10 万条 logcat）。
-                                // 仅保留失败路径的错误日志，成功路径通过 enhancedCallback 上报进度。
-                                // 指标仅按并行批处理聚合，不记录文件路径，避免高基数和隐私泄露。
-                                val value = InferenceMetrics.measure(
-                                    operation = "pipeline:file",
-                                    backend = InferenceMetrics.Backend.CPU_DEFAULT,
-                                ) {
-                                    process(path)
-                                }
-                                val done = processed.incrementAndGet()
-                                enhancedCallback(done, total, path, FileProcessingStatus.COMPLETED)
-                                FileResult(path, success = true, value = value)
-                            } catch (e: Throwable) {
-                                // 修复：catch Throwable 而非 Exception，捕获 OOM/Error 等，
-                                // 避免 native 层抛出 Error 时冒泡导致进程闪退。
-                                if (e is CancellationException) throw e
-                                android.util.Log.e("CrashDebug", "!! 文件处理异常: $path -> ${e.javaClass.name}: ${e.message}", e)
+            // 不为每个文件同时创建一个协程：一万张照片会产生一万个 Job、Continuation
+            // 和捕获对象，即使 Semaphore 限制了实际推理数，仍可能在扫描开始时耗尽堆内存。
+            // 分波提交，每波最多创建 concurrency 个协程，保留原有的并发度与输入顺序。
+            val results = ArrayList<FileResult<T>>(total)
+            for (pathsInWave in filePaths.chunked(concurrency.coerceAtLeast(1))) {
+                val waveResults = pathsInWave.map { path ->
+                    async(dispatcher) {
+                        semaphore.withPermit {
+                            // 文件存在性预检（IO 轻操作，不占推理配额意义不大但避免无谓推理）
+                            if (!File(path).exists()) {
                                 val done = processed.incrementAndGet()
                                 enhancedCallback(done, total, path, FileProcessingStatus.FAILED)
-                                FileResult(path, success = false, error = e)
+                                FileResult<T>(path, success = false)
+                            } else {
+                                enhancedCallback(processed.get(), total, path, FileProcessingStatus.PROCESSING)
+                                try {
+                                    val value = InferenceMetrics.measure(
+                                        operation = "pipeline:file",
+                                        backend = InferenceMetrics.Backend.CPU_DEFAULT,
+                                    ) {
+                                        process(path)
+                                    }
+                                    val done = processed.incrementAndGet()
+                                    enhancedCallback(done, total, path, FileProcessingStatus.COMPLETED)
+                                    FileResult(path, success = true, value = value)
+                                } catch (e: Throwable) {
+                                    if (e is CancellationException) throw e
+                                    android.util.Log.e("CrashDebug", "!! 文件处理异常: $path -> ${e.javaClass.name}: ${e.message}", e)
+                                    val done = processed.incrementAndGet()
+                                    enhancedCallback(done, total, path, FileProcessingStatus.FAILED)
+                                    FileResult(path, success = false, error = e)
+                                }
                             }
                         }
                     }
-                }
-            }.awaitAll()
+                }.awaitAll()
+                results.addAll(waveResults)
+            }
+            results
         }
     }
 

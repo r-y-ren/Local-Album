@@ -30,6 +30,9 @@ interface EmbeddingDao {
     @Query("SELECT * FROM media_embeddings")
     suspend fun getAll(): List<MediaEmbedding>
 
+    @Query("SELECT * FROM media_embeddings LIMIT :limit OFFSET :offset")
+    suspend fun getPaged(limit: Int, offset: Int): List<MediaEmbedding>
+
     @Query("SELECT filePath FROM media_embeddings")
     suspend fun getAllFilePaths(): List<String>
 

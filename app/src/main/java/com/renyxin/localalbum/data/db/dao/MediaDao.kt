@@ -170,6 +170,12 @@ interface MediaDao {
     @Query("SELECT filePath, fileName, ocrText, make, model FROM media_items_fts")
     suspend fun getAllFtsEntries(): List<com.renyxin.localalbum.data.db.entity.MediaFts>
 
+    @Query("SELECT filePath, fileName, ocrText, make, model FROM media_items_fts LIMIT :limit OFFSET :offset")
+    suspend fun getPagedFtsEntries(limit: Int, offset: Int): List<com.renyxin.localalbum.data.db.entity.MediaFts>
+
+    @Query("SELECT COUNT(*) FROM media_items_fts")
+    suspend fun getFtsCount(): Int
+
     /**
      * 清空 FTS 索引表（Phase 4.2 数据库导入使用）。
      */

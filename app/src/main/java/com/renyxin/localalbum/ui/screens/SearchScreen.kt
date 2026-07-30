@@ -131,6 +131,15 @@ fun SearchScreen(
         }
     }
 
+    // 语义索引会在扫描期间按批次逐步写入数据库。首次查询可能早于首批落库而得到
+    // NO_INDEX；在该状态下定时重试当前查询，首批可搜索向量出现后立即展示结果。
+    LaunchedEffect(query, isSemanticMode, semanticSearchState) {
+        if (isSemanticMode && query.isNotBlank() && semanticSearchState == SemanticSearchState.NO_INDEX) {
+            delay(1_000L)
+            onSearch(query)
+        }
+    }
+
     // In semantic mode, use semantic results; otherwise use keyword results
     val displayResults = if (isSemanticMode) {
         semanticSearchResults

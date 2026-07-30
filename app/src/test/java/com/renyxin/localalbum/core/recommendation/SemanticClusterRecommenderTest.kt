@@ -26,6 +26,8 @@ class SemanticClusterRecommenderTest {
         override suspend fun insertEmbeddings(embeddings: List<MediaEmbedding>) {}
         override suspend fun getByFilePath(filePath: String): MediaEmbedding? = embeddings.find { it.filePath == filePath }
         override suspend fun getAll(): List<MediaEmbedding> = embeddings
+        override suspend fun getPaged(limit: Int, offset: Int): List<MediaEmbedding> =
+            embeddings.drop(offset).take(limit)
         override suspend fun getAllFilePaths(): List<String> = embeddings.map { it.filePath }
         override suspend fun getCount(): Int = embeddings.size
         override suspend fun getCountByModelVersion(modelVersion: Int): Int = embeddings.count { it.modelVersion == modelVersion }

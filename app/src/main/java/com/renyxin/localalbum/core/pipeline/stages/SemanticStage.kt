@@ -22,7 +22,8 @@ import java.io.File
  *
  * 结果双写到 [EmbeddingDao] + [FeatureStoreDao]（Phase 5）。
  *
- * 依赖 [SceneStage] 和 [OcrStage] 的输出作为 [SemanticEmbedProvider.ImageContext]。
+ * 若场景/OCR 已就绪则使用其结果补充 [SemanticEmbedProvider.ImageContext]；
+ * 图像向量本身不依赖这些可选字段，因此允许与它们并行执行以支持扫描中搜索。
  */
 class SemanticStage(
     private val embedProvider: SemanticEmbedProvider,
@@ -34,13 +35,17 @@ class SemanticStage(
     override val stageId = "core:semantic"
     override val stageType = StageType.BUILTIN
     override val displayName = "语义索引"
-    override val dependencies = listOf("core:scene", "core:ocr")
+    // scene/OCR 仅是可选增强上下文，不能让语义索引等到两个全量阶段结束，
+    // 否则大相册在扫描绝大部分时间里始终没有可搜索向量。
+    override val dependencies = emptyList<String>()
 
     companion object {
         /** 模型版本号，Provider 升级后递增触发增量重建。
          *  v2: 默认 Provider 切换为 CLIP-ViT-bigG（1280 维），与概念向量（32 维）不兼容，需全量重建。
          *  v3: 默认 Provider 切换为 EVA02-CLIP-L-14（768 维），与 bigG（1280 维）不兼容，需全量重建。 */
         const val MODEL_VERSION = 3
+        /** 每批完成后立即落库，使语义搜索可在扫描尚未结束时查询已分析照片。 */
+        private const val INDEX_WRITE_BATCH_SIZE = 32
     }
 
     override suspend fun execute(
@@ -65,20 +70,24 @@ class SemanticStage(
             // 清除旧嵌入
             embeddingDao.deleteByFilePaths(filePaths)
 
-            // 文件级并行语义嵌入
-            val results = ParallelFileProcessor.mapParallel(filePaths, enhancedCallback) { path ->
-                // 从数据库获取已分析的上下文信息辅助嵌入
-                val entity = mediaDao.getByFilePathLight(path)
-                val context = SemanticEmbedProvider.ImageContext(
-                    sceneType = entity?.sceneType,
-                    ocrText = entity?.ocrText,
-                    qualityScore = entity?.qualityScore ?: 0f,
-                )
-                val vec = embedProvider.embedImage(File(path), context)
-                if (vec == null || vec.all { it == 0f }) {
-                    null
-                } else {
-                    MediaEmbedding(
+            // 分批推理并立即写入：此前会将整个扫描的向量保留到最后才 insert，
+            // 所以即使首批图片已完成，搜索侧仍只能看到“尚未建立语义索引”。
+            var completedBeforeBatch = 0
+            for (pathsInBatch in filePaths.chunked(INDEX_WRITE_BATCH_SIZE)) {
+                val batchOffset = completedBeforeBatch
+                val results = ParallelFileProcessor.mapParallel(pathsInBatch, { processed, _, path, status ->
+                    // ParallelFileProcessor 的计数在每个批次内从零开始；转换为整个语义阶段的
+                    // 累计进度，避免 UI 在批次切换时回退或停留在首批进度。
+                    enhancedCallback(batchOffset + processed, total, path, status)
+                }) { path ->
+                    val entity = mediaDao.getByFilePathLight(path)
+                    val context = SemanticEmbedProvider.ImageContext(
+                        sceneType = entity?.sceneType,
+                        ocrText = entity?.ocrText,
+                        qualityScore = entity?.qualityScore ?: 0f,
+                    )
+                    val vec = embedProvider.embedImage(File(path), context)
+                    if (vec == null || vec.all { it == 0f }) null else MediaEmbedding(
                         filePath = path,
                         embedding = serializeEmbedding(vec),
                         modelVersion = MODEL_VERSION,
@@ -86,51 +95,49 @@ class SemanticStage(
                         source = embedProvider.providerId.split(":").firstOrNull() ?: "plugin",
                     )
                 }
-            }
-            for (r in results) {
-                if (r.success && r.value != null) {
-                    embeddings.add(r.value)
-                    success++
-                } else {
-                    if (!r.success) Log.w("SemanticStage", "语义嵌入失败: ${r.path}", r.error)
-                    failed++
+                val batchEmbeddings = results.mapNotNull { result ->
+                    if (!result.success) Log.w("SemanticStage", "语义嵌入失败: ${result.path}", result.error)
+                    result.value
                 }
+                success += batchEmbeddings.size
+                failed += results.size - batchEmbeddings.size
+                if (batchEmbeddings.isNotEmpty()) {
+                    embeddingDao.insertEmbeddings(batchEmbeddings)
+                    embeddings.addAll(batchEmbeddings)
+                }
+                completedBeforeBatch += pathsInBatch.size
             }
 
-            if (embeddings.isNotEmpty()) {
-                embeddingDao.insertEmbeddings(embeddings)
-
-                // Phase 5: 双写到 FeatureStoreDao
-                if (featureStoreDao != null) {
-                    try {
-                        featureStoreDao.deleteByPluginAndFilePaths("core:semantic", filePaths)
-                        val schemaJson = PluginJsonCodec.schemaToJsonObj(
-                            FeatureSchema(
-                                pluginId = "core:semantic",
-                                featureType = "semantic",
-                                fields = listOf(
-                                    FeatureSchema.FieldSpec("embedding", FeatureSchema.DataType.FLOAT_ARRAY, listOf(embedProvider.embeddingDim)),
-                                ),
-                                modelVersion = MODEL_VERSION,
+            // Phase 5: 双写 FeatureStore。主语义索引已按批写入，双写失败不影响扫描中搜索。
+            if (featureStoreDao != null && embeddings.isNotEmpty()) {
+                try {
+                    featureStoreDao.deleteByPluginAndFilePaths("core:semantic", filePaths)
+                    val schemaJson = PluginJsonCodec.schemaToJsonObj(
+                        FeatureSchema(
+                            pluginId = "core:semantic",
+                            featureType = "semantic",
+                            fields = listOf(
+                                FeatureSchema.FieldSpec("embedding", FeatureSchema.DataType.FLOAT_ARRAY, listOf(embedProvider.embeddingDim)),
                             ),
-                        ).toString()
-                        val now = System.currentTimeMillis()
-                        val featureEntities = embeddings.map { emb ->
-                            FeatureStoreEntity(
-                                filePath = emb.filePath,
-                                pluginId = "core:semantic",
-                                featureType = "semantic",
-                                dataJson = """{"embedding":"${emb.embedding}","dim":${embedProvider.embeddingDim}}""",
-                                schemaJson = schemaJson,
-                                modelVersion = MODEL_VERSION,
-                                generatedAtMs = now,
-                            )
-                        }
-                        featureStoreDao.insertAll(featureEntities)
-                        Log.d("SemanticStage", "双写到 feature_store: ${featureEntities.size} 条语义嵌入")
-                    } catch (e: Exception) {
-                        Log.w("SemanticStage", "FeatureStore 双写失败（不影响主流程）", e)
+                            modelVersion = MODEL_VERSION,
+                        ),
+                    ).toString()
+                    val now = System.currentTimeMillis()
+                    val featureEntities = embeddings.map { emb ->
+                        FeatureStoreEntity(
+                            filePath = emb.filePath,
+                            pluginId = "core:semantic",
+                            featureType = "semantic",
+                            dataJson = """{"embedding":"${emb.embedding}","dim":${embedProvider.embeddingDim}}""",
+                            schemaJson = schemaJson,
+                            modelVersion = MODEL_VERSION,
+                            generatedAtMs = now,
+                        )
                     }
+                    featureStoreDao.insertAll(featureEntities)
+                    Log.d("SemanticStage", "双写到 feature_store: ${featureEntities.size} 条语义嵌入")
+                } catch (e: Exception) {
+                    Log.w("SemanticStage", "FeatureStore 双写失败（不影响主流程）", e)
                 }
             }
         } catch (e: Exception) {

@@ -79,6 +79,8 @@ class HybridIndexer(
     companion object {
         private const val TAG = "HybridIndexer"
         private const val HEAD_HASH_BYTES = 4096 // 读取前4KB计算头部哈希
+        /** 每批入库上限：限制大相册扫描时实体列表和单次 SQLite 事务的内存峰值。 */
+        private const val DATABASE_BATCH_SIZE = 500
     }
 
     /** 后台 AI 分析协程作用域（fire-and-forget，不阻塞扫描状态） */
@@ -196,17 +198,22 @@ class HybridIndexer(
         val totalForProgress = merged.size
         val processedCounter = AtomicInteger(0)
         val fingerprintSemaphore = Semaphore(InferenceDispatchers.cpuCores)
-        val entities = coroutineScope {
-            merged.map { item ->
-                async(InferenceDispatchers.ioBound) {
-                    fingerprintSemaphore.withPermit {
-                        val entity = item.toEntity()
-                        val done = processedCounter.incrementAndGet()
-                        progress?.invoke(done, totalForProgress)
-                        entity
+        val entities = ArrayList<MediaEntity>(merged.size)
+        // 与 AI 管道一样分波创建协程，避免 1W+ 文件时瞬间分配大量 Job/闭包导致 OOM。
+        for (itemsInWave in merged.chunked(InferenceDispatchers.cpuCores.coerceAtLeast(1))) {
+            val waveEntities = coroutineScope {
+                itemsInWave.map { item ->
+                    async(InferenceDispatchers.ioBound) {
+                        fingerprintSemaphore.withPermit {
+                            val entity = item.toEntity()
+                            val done = processedCounter.incrementAndGet()
+                            progress?.invoke(done, totalForProgress)
+                            entity
+                        }
                     }
-                }
-            }.awaitAll()
+                }.awaitAll()
+            }
+            entities.addAll(waveEntities)
         }
 
         // 全量枚举仍会对同一路径执行 REPLACE；若直接写入新实体，会清空既有 AI 结果，
@@ -248,9 +255,12 @@ class HybridIndexer(
             .toList()
         changedPaths.chunked(500).forEach { chunk -> analysisStateDao?.deleteByPaths(chunk) }
 
-        // P2-4: 先插入新数据（REPLACE 策略），再删除孤儿记录，避免全量扫描期间 UI 空窗
-        mediaDao.insertAll(entitiesToUpsert)
-        val newPaths = entitiesToUpsert.map { it.filePath }.toSet()
+        // 分批 upsert：首批写入后 Room Flow/Paging 即可发出数据，用户可在扫描尚未结束时
+        // 浏览相册、搜索已完成语义索引的文件；同时避免大事务造成瞬时内存和 WAL 峰值。
+        entitiesToUpsert.chunked(DATABASE_BATCH_SIZE).forEach { batch ->
+            mediaDao.insertAll(batch)
+        }
+        val newPaths = entitiesToUpsert.asSequence().map { it.filePath }.toHashSet()
         val orphaned = mediaDao.getAllPaths().toSet() - newPaths
         if (orphaned.isNotEmpty()) {
             // 修复：分块删除，避免 SQLite IN 查询变量数超过 999 限制
@@ -266,12 +276,14 @@ class HybridIndexer(
         }
 
         // 1.1: 重建 FTS 索引（fileName/make/model），OCR 文本由 OCR 阶段后续补充
-        entitiesToUpsert.map { it.filePath }.chunked(500).forEach { chunk ->
+        entitiesToUpsert.asSequence().map { it.filePath }.chunked(DATABASE_BATCH_SIZE).forEach { chunk ->
             mediaDao.deleteFtsEntries(chunk)
         }
-        mediaDao.insertFtsAll(entitiesToUpsert.map {
-            MediaFts(it.filePath, it.fileName, it.ocrText, it.make, it.model)
-        })
+        entitiesToUpsert.chunked(DATABASE_BATCH_SIZE).forEach { batch ->
+            mediaDao.insertFtsAll(batch.map {
+                MediaFts(it.filePath, it.fileName, it.ocrText, it.make, it.model)
+            })
+        }
 
         // === P0-A: 全量扫描完成后异步触发 AI 分析管道 ===
         // 修复：原实现同步调用 runFullScan，对所有文件串行执行 5 个 AI 阶段（每阶段内 for 循环串行），
@@ -281,7 +293,10 @@ class HybridIndexer(
         // 视频过滤：AI 识别管道（人脸/场景/OCR/质量/语义）全部基于 BitmapFactory.decodeFile，
         // 仅支持图片解码。视频文件传入后 decodeFile 返回 null，产生无谓的失败计数与日志噪音。
         // 此处仅将图片路径传入分析管道，视频跳过。
-        val allPaths = entitiesToUpsert.filter { it.mediaType == MediaType.IMAGE }.map { it.filePath }
+        val allPaths = entitiesToUpsert.asSequence()
+            .filter { it.mediaType == MediaType.IMAGE }
+            .map { it.filePath }
+            .toList()
         val skippedVideoCount = entitiesToUpsert.size - allPaths.size
         if (skippedVideoCount > 0) {
             Log.i(TAG, "全量扫描: 跳过 $skippedVideoCount 个视频文件（AI 识别仅支持图片）")

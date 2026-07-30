@@ -40,6 +40,13 @@ class FaceStage(
 
     private val faceClusterer = FaceClusterer()
 
+    companion object {
+        /** 聚类时分页读取人脸，避免大型媒体库一次复制全部人脸实体。 */
+        private const val CLUSTER_PAGE_SIZE = 500
+        /** SQL IN 参数安全上限。 */
+        private const val DATABASE_BATCH_SIZE = 500
+    }
+
     override suspend fun execute(
         filePaths: List<String>,
         progressCallback: suspend (Int, Int) -> Unit,
@@ -63,9 +70,9 @@ class FaceStage(
 
             // 1. 清除旧的人脸记录，并同步清空这些照片的 media_items.faceClusterId，
             //    避免不再含人脸的照片残留旧聚类 ID（faces 表与 media_items 表不一致）
-            faceDao.deleteByFilePaths(filePaths)
-            if (filePaths.isNotEmpty()) {
-                filePaths.chunked(500).forEach { chunk -> mediaDao.clearFaceClusterId(chunk) }
+            filePaths.chunked(DATABASE_BATCH_SIZE).forEach { chunk ->
+                faceDao.deleteByFilePaths(chunk)
+                mediaDao.clearFaceClusterId(chunk)
             }
 
             // 2. 并发检测人脸（文件级并行，充分利用多核）
@@ -146,16 +153,12 @@ class FaceStage(
             var noiseCount = 0
             if (faceCount > 0) {
                 faceDao.clearAllClusterIds()
-                val allFaces = faceDao.getAll()
+                val allFaces = loadFacesForClustering()
 
-                // 修复：聚类前清空所有含人脸照片的 media_items.faceClusterId，
-                // 使变为 noise 的照片不残留旧 clusterId，保证 faces 表与 media_items 表一致
-                // （列表来自 faces 表 getClusterSummaries，详情来自 media_items 表 getByFaceCluster，
-                //  两表必须同步，否则数量与图片不符）
-                val allFacePaths = allFaces.map { it.filePath }.distinct()
-                if (allFacePaths.isNotEmpty()) {
-                    allFacePaths.chunked(500).forEach { chunk -> mediaDao.clearFaceClusterId(chunk) }
-                }
+                // 聚类前清空所有含人脸照片的 media_items.faceClusterId，使 noise 不残留旧聚类。
+                allFaces.asSequence().map { it.filePath }.distinct()
+                    .toList().chunked(DATABASE_BATCH_SIZE)
+                    .forEach { chunk -> mediaDao.clearFaceClusterId(chunk) }
 
                 val samples = allFaces.map { face ->
                     FaceClusterer.FaceSample(
@@ -165,13 +168,17 @@ class FaceStage(
                 }
 
                 val clusterResult = faceClusterer.cluster(samples)
+                val facesById = allFaces.associateBy { it.faceId }
 
                 for (cluster in clusterResult.clusters) {
-                    faceDao.updateClusterIds(cluster.sampleIds, cluster.clusterId)
-                    for (sampleId in cluster.sampleIds) {
-                        val face = allFaces.find { it.faceId == sampleId } ?: continue
-                        mediaDao.setFaceClusterId(face.filePath, cluster.clusterId)
+                    cluster.sampleIds.chunked(DATABASE_BATCH_SIZE).forEach { ids ->
+                        faceDao.updateClusterIds(ids, cluster.clusterId)
                     }
+                    // 同一照片可能出现多张同一人物的人脸；路径去重后一次更新，
+                    // 既保证列表/详情一致，也移除原 O(聚类样本数 × 全部人脸数) 的线性查找。
+                    cluster.sampleIds.asSequence().mapNotNull { facesById[it]?.filePath }.distinct()
+                        .toList().chunked(DATABASE_BATCH_SIZE)
+                        .forEach { paths -> mediaDao.updateFaceClusterId(paths, cluster.clusterId) }
                 }
                 clusterCount = clusterResult.clusterCount
                 noiseCount = clusterResult.noiseCount
@@ -193,5 +200,18 @@ class FaceStage(
             Log.w("FaceStage", "人脸检测阶段失败", e)
             return StageResult(successCount = 0, failedCount = total)
         }
+    }
+
+    private suspend fun loadFacesForClustering(): List<FaceEntity> {
+        val faces = mutableListOf<FaceEntity>()
+        var offset = 0
+        while (true) {
+            val page = faceDao.getPaged(CLUSTER_PAGE_SIZE, offset)
+            if (page.isEmpty()) break
+            faces.addAll(page)
+            if (page.size < CLUSTER_PAGE_SIZE) break
+            offset += page.size
+        }
+        return faces
     }
 }

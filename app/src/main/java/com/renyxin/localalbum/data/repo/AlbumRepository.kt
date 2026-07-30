@@ -735,7 +735,12 @@ class AlbumRepository(
                 success = false,
                 errorMessage = "DatabaseExporter 未初始化",
             )
-        exporter.exportToFile(outputFile, deviceModel)
+        // 导出会全量读取多张表；若与扫描的批量 REPLACE、FTS 重建及 AI 写库交错，
+        // 峰值内存、SQLite WAL 和游标数量都会放大，1W+ 文件时容易触发闪退。
+        // 与扫描/导入共享同一把锁，导出得到完整一致的数据库快照；扫描结束后才开始导出。
+        scanMutex.withLock {
+            exporter.exportToFile(outputFile, deviceModel)
+        }
     }
 
     /**

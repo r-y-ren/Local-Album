@@ -81,6 +81,9 @@ class DatabaseExporterTest {
             for (p in filePaths) ftsStore.remove(p)
         }
         override suspend fun getAllFtsEntries(): List<MediaFts> = ftsStore.values.toList()
+        override suspend fun getPagedFtsEntries(limit: Int, offset: Int): List<MediaFts> =
+            ftsStore.values.toList().drop(offset).take(limit)
+        override suspend fun getFtsCount(): Int = ftsStore.size
         override suspend fun clearAllFts() { ftsStore.clear() }
         override suspend fun insertFtsEntry(filePath: String, fileName: String, ocrText: String?, make: String?, model: String?) {
             ftsStore[filePath] = MediaFts(filePath, fileName, ocrText, make, model)
@@ -129,6 +132,8 @@ class DatabaseExporterTest {
         }
         override suspend fun clearAll() { store.clear() }
         override suspend fun getAll(): List<FaceEntity> = store.toList()
+        override suspend fun getPaged(limit: Int, offset: Int): List<FaceEntity> =
+            store.drop(offset).take(limit)
         override suspend fun getByFilePath(filePath: String): List<FaceEntity> = store.filter { it.filePath == filePath }
         override suspend fun getClustered(): List<FaceEntity> = store.filter { it.clusterId != null }
         override suspend fun getByCluster(clusterId: String): List<FaceEntity> = store.filter { it.clusterId == clusterId }
@@ -153,6 +158,8 @@ class DatabaseExporterTest {
         }
         override suspend fun getByFilePath(filePath: String): MediaEmbedding? = store[filePath]
         override suspend fun getAll(): List<MediaEmbedding> = store.values.toList()
+        override suspend fun getPaged(limit: Int, offset: Int): List<MediaEmbedding> =
+            store.values.toList().drop(offset).take(limit)
         override suspend fun getAllFilePaths(): List<String> = store.keys.toList()
         override suspend fun getCount(): Int = store.size
         override suspend fun getCountByModelVersion(modelVersion: Int): Int =

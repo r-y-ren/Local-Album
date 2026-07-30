@@ -43,6 +43,9 @@ interface FaceDao {
     @Query("SELECT * FROM faces")
     suspend fun getAll(): List<FaceEntity>
 
+    @Query("SELECT * FROM faces ORDER BY faceId LIMIT :limit OFFSET :offset")
+    suspend fun getPaged(limit: Int, offset: Int): List<FaceEntity>
+
     @Query("SELECT * FROM faces WHERE filePath = :filePath")
     suspend fun getByFilePath(filePath: String): List<FaceEntity>
 
@@ -62,17 +65,18 @@ interface FaceDao {
     suspend fun getClusterIds(): List<String>
 
     /**
-     * 查询每个聚类的代表信息（clusterId + 人脸数量 + 代表缩略图路径）。
-     * 代表缩略图取该聚类中最早检测到的人脸。
+     * 查询每个聚类的代表信息（clusterId + 去重后的照片数量 + 代表缩略图路径）。
+     * 一个文件可能检测到多张同一人物的人脸，界面展示的是照片而非人脸框，
+     * 因此必须使用 COUNT(DISTINCT filePath)，使卡片数量与详情相册一致。
      */
     @Query("""
-        SELECT clusterId, COUNT(*) AS faceCount,
+        SELECT clusterId, COUNT(DISTINCT filePath) AS faceCount,
                (SELECT thumbnailPath FROM faces f2
-                WHERE f2.clusterId = f1.clusterId
-                ORDER BY f2.detectedAtMs ASC LIMIT 1) AS representativeThumb,
+                 WHERE f2.clusterId = f1.clusterId
+                 ORDER BY f2.detectedAtMs ASC LIMIT 1) AS representativeThumb,
                (SELECT personName FROM faces f3
-                WHERE f3.clusterId = f1.clusterId AND f3.personName IS NOT NULL
-                LIMIT 1) AS personName
+                 WHERE f3.clusterId = f1.clusterId AND f3.personName IS NOT NULL
+                 LIMIT 1) AS personName
         FROM faces f1
         WHERE clusterId IS NOT NULL
         GROUP BY clusterId
@@ -84,13 +88,13 @@ interface FaceDao {
      * 查询每个聚类的代表信息（Flow 版本，用于 UI 实时更新）。
      */
     @Query("""
-        SELECT clusterId, COUNT(*) AS faceCount,
+        SELECT clusterId, COUNT(DISTINCT filePath) AS faceCount,
                (SELECT thumbnailPath FROM faces f2
-                WHERE f2.clusterId = f1.clusterId
-                ORDER BY f2.detectedAtMs ASC LIMIT 1) AS representativeThumb,
+                 WHERE f2.clusterId = f1.clusterId
+                 ORDER BY f2.detectedAtMs ASC LIMIT 1) AS representativeThumb,
                (SELECT personName FROM faces f3
-                WHERE f3.clusterId = f1.clusterId AND f3.personName IS NOT NULL
-                LIMIT 1) AS personName
+                 WHERE f3.clusterId = f1.clusterId AND f3.personName IS NOT NULL
+                 LIMIT 1) AS personName
         FROM faces f1
         WHERE clusterId IS NOT NULL
         GROUP BY clusterId

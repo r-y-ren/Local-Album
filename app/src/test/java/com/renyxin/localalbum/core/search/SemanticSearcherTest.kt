@@ -36,6 +36,9 @@ class SemanticSearcherTest {
 
         override suspend fun getAll(): List<MediaEmbedding> = store.values.toList()
 
+        override suspend fun getPaged(limit: Int, offset: Int): List<MediaEmbedding> =
+            store.values.toList().drop(offset).take(limit)
+
         override suspend fun getAllFilePaths(): List<String> = store.keys.toList()
 
         override suspend fun getCount(): Int = store.size
