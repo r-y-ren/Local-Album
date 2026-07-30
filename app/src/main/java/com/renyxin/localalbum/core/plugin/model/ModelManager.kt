@@ -50,7 +50,7 @@ interface ModelManager {
         /** ONNX 模型子目录（相对于 assets/models/），用于多文件模型 */
         val assetSubDir: String? = null,
         /** assets/models/ 下的实际文件名（不含子目录路径）。
-         *  例如 "inswapper_128.onnx"、"scrfd_person_2.5g.onnx"。
+         *  例如 "inswapper_128.onnx"、"w600k_r50.onnx"。
          *  若为空则尝试直接用 modelId 匹配。 */
         val assetFileName: String? = null,
     )

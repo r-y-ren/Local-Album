@@ -24,8 +24,6 @@ import com.renyxin.localalbum.core.plugin.model.ArcFaceProvider
 import com.renyxin.localalbum.core.plugin.model.GLMOcrProvider
 import com.renyxin.localalbum.core.plugin.capability.builtin.InsightFaceProvider
 import com.renyxin.localalbum.core.plugin.capability.builtin.PaddleOCRProvider
-import com.renyxin.localalbum.core.plugin.capability.builtin.RetinaFaceProvider
-import com.renyxin.localalbum.core.plugin.capability.builtin.SCRFDProvider
 import com.renyxin.localalbum.core.plugin.extension.InSwapperPlugin
 import com.renyxin.localalbum.core.plugin.capability.builtin.Eva02ClipProvider
 import com.renyxin.localalbum.core.plugin.model.CompositeModelCatalog
@@ -146,15 +144,9 @@ class AppContainer(context: Context) {
 
         // ---- 注册 Provider 到槽位 ----
 
-        // 人脸 — InsightFace 为主, RetinaFace + SCRFD + ArcFace + MLKit 为备用
+        // 人脸 — InsightFace 为默认方案；ArcFace + ML Kit 为备用
         registerProvider("face", "model:insightface",
             InsightFaceProvider(modelManager, context.applicationContext), isDefault = true,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
-        registerProvider("face", "model:retinaface",
-            RetinaFaceProvider(modelManager, context.applicationContext), isDefault = false,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
-        registerProvider("face", "model:scrfd",
-            SCRFDProvider(modelManager, context.applicationContext), isDefault = false,
             providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
         registerProvider("face", "model:arcface",
             ComposedFaceProvider(
@@ -205,10 +197,6 @@ class AppContainer(context: Context) {
         // 多模型 Provider：需要注册所有关联的底层 modelId
         registerProviderModelIds("face", "model:insightface",
             listOf("model:insightface_det", "model:insightface_rec"))
-        registerProviderModelIds("face", "model:retinaface",
-            listOf("model:retinaface"))
-        registerProviderModelIds("face", "model:scrfd",
-            listOf("model:scrfd"))
         registerProviderModelIds("face", "model:arcface",
             listOf("model:arcface"))
         registerProviderModelIds("scene", "model:mobilenet_v2",

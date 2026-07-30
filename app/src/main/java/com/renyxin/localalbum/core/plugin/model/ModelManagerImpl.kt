@@ -796,7 +796,7 @@ class ModelManagerImpl(
     // ===================== 内部 =====================
 
     /**
-     * 将内置资产模型解析为 modelId 格式的文件名（如 "model:retinaface.onnx"）。
+     * 将内置资产模型解析为其 modelId 对应的本地文件。
      *
      * 采用「直接从 assets 复制」而非「重命名 modelDir 中已复制文件」的方式，原因：
      * 1. 不依赖 [copyBundledModels] 的后台延迟复制，消除首秒竞态；
@@ -810,7 +810,7 @@ class ModelManagerImpl(
         targetFile.parentFile?.mkdirs()
         val assetName = descriptor.assetFileName
 
-        // 1. 直接从 assets 复制单文件模型（retinaface/scrfd/inswapper/sam2/PP-OCR/Moondream2）
+        // 1. 直接从 assets 复制单文件模型（inswapper/sam2/PP-OCR/Moondream2）
         if (assetName != null) {
             val assetPath = if (descriptor.assetSubDir != null) {
                 "models/${descriptor.assetSubDir}/$assetName"

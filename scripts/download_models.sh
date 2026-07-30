@@ -63,17 +63,17 @@ download "$RELEASE_URL/eva02_visual_336_int8.onnx" "eva02_visual_336_int8.onnx" 
 # ── 2. 换脸模型 inswapper_128 (~529MB) ──
 download "$RELEASE_URL/inswapper_128.onnx" "inswapper_128.onnx" "$ASSETS_DIR/inswapper_128.onnx"
 
-# ── 3. 人脸检测模型 ──
-download "$RELEASE_URL/retinaface-resnet50.onnx" "retinaface-resnet50.onnx" "$ASSETS_DIR/retinaface-resnet50.onnx"
-download "$RELEASE_URL/scrfd_person_2.5g.onnx" "scrfd_person_2.5g.onnx" "$ASSETS_DIR/scrfd_person_2.5g.onnx"
-
-# ── 4. 人脸模型包 buffalo_l (~276MB) ──
+# ── 3. 默认人脸模型包 buffalo_l (~276MB) ──
+# 默认 InsightFace Provider 从包内按需解压 det_10g.onnx 与 w600k_r50.onnx。
 download "$RELEASE_URL/buffalo_l.zip" "buffalo_l.zip" "$ASSETS_DIR/buffalo_l.zip"
 
-# ── 5. emap 矩阵 (换脸用, ~1MB) ──
+# 不再随项目分发仅供备用 Provider 使用的检测模型；同时清理旧下载残留。
+rm -f "$ASSETS_DIR/retinaface-resnet50.onnx" "$ASSETS_DIR/scrfd_person_2.5g.onnx"
+
+# ── 4. emap 矩阵 (换脸用, ~1MB) ──
 download "$RELEASE_URL/emap_512.bin" "emap_512.bin" "$ASSETS_DIR/emap_512.bin"
 
-# ── 6. PP-OCR 模型 (~25MB) ──
+# ── 5. PP-OCR 模型 (~25MB) ──
 mkdir -p "$ASSETS_DIR/PP-OCRv5_mobile_rec_infer"
 download "$RELEASE_URL/PP-OCRv5_mobile_rec_inference.onnx" "PP-OCRv5_mobile_rec_inference.onnx" "$ASSETS_DIR/PP-OCRv5_mobile_rec_infer/inference.onnx"
 
