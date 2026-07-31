@@ -66,6 +66,7 @@ class InSwapperPlugin(
 
     companion object {
         private const val TAG = "InSwapper"
+        private const val CONSUMER_ID_PREFIX = "InSwapper:execute"
         const val MODEL_ID = "model:inswapper"
         private const val INPUT_SIZE = 128
         private const val SOURCE_EMBED_DIM = 512
@@ -326,10 +327,25 @@ class InSwapperPlugin(
             val alignedTargetBmp = FaceAligner.matBGRToBitmap(alignedTargetMat)
             Log.i(TAG, "底图仿射对齐完成: ${alignedTargetMat.cols()}x${alignedTargetMat.rows()}, 均值RGB=${bitmapMeanRgb(alignedTargetBmp)}")
 
-            // 3. 换脸推理：从池中独占一个 session，避免并发调用同一 OrtSession。
+            // 3. 换脸推理：模型可能已被批处理阶段结束时的 evictUnusedModels() 卸载。
+            // 插件的 ready 只表示资产与运行环境可用，不能代表 session 永远驻留内存，
+            // 因此每次交互式执行都必须按需恢复模型。消费者注册覆盖 ensure + run，
+            // 防止并发结束的分析阶段在 session 使用期间将其淘汰。
             Log.i(TAG, "step: runSwap begin")
-            val swappedCrop = modelManager.withOnnxSession(MODEL_ID) { session ->
-                runSwap(session, alignedTargetBmp, sourceLatent)
+            val consumerId = "$CONSUMER_ID_PREFIX:${System.nanoTime()}"
+            modelManager.registerConsumer(MODEL_ID, consumerId)
+            val swappedCrop = try {
+                val modelReady = modelManager.ensureModelReady(MODEL_ID)
+                if (modelReady.isFailure) {
+                    Log.w(TAG, "换脸模型按需恢复失败", modelReady.exceptionOrNull())
+                    null
+                } else {
+                    modelManager.withOnnxSession(MODEL_ID) { session ->
+                        runSwap(session, alignedTargetBmp, sourceLatent)
+                    }
+                }
+            } finally {
+                modelManager.unregisterConsumer(MODEL_ID, consumerId)
             }
             if (swappedCrop == null) {
                 alignedTargetBmp.recycle()
@@ -356,7 +372,6 @@ class InSwapperPlugin(
     }
 
     override suspend fun release() {
-        modelManager.unregisterConsumer(MODEL_ID, "InSwapper")
         ready = false
     }
 

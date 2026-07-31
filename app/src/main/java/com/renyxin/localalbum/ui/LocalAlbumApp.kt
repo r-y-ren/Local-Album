@@ -805,7 +805,6 @@ private fun currentTabContent(
             viewModel = settingsViewModel,
             albumViewModel = albumViewModel,
             onNavigateToTrash = { navigateTo(Screen.Trash) },
-            onNavigateToRecommendations = { navigateTo(Screen.Recommendations) },
             onNavigateToPluginManager = { navigateTo(Screen.PluginManager) },
             onNavigateToAnalysisPerformance = { navigateTo(Screen.AnalysisPerformance) },
             onNavigateToAiAnalysisPreferences = { navigateTo(Screen.AiAnalysisPreferences) },
@@ -1811,13 +1810,64 @@ private fun AlbumCover(
 
 /* ---- 设置 Tab ---- */
 
+@Composable
+private fun MoreFeatureListItem(
+    title: String,
+    description: String,
+    imageVector: androidx.compose.ui.graphics.vector.ImageVector,
+    iconTint: androidx.compose.ui.graphics.Color,
+    onClick: () -> Unit,
+) {
+    // Material ListItem 会根据文字行数改变 leadingContent 的垂直布局规则。
+    // 使用自定义 Row 后，图标和箭头始终相对于整项（包括换行描述）垂直居中。
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier.size(40.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = imageVector,
+                contentDescription = null,
+                modifier = Modifier.size(24.dp),
+                tint = iconTint,
+            )
+        }
+        Spacer(Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(16.dp))
+        Icon(
+            imageVector = Icons.Default.ChevronRight,
+            contentDescription = null,
+            modifier = Modifier.size(24.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SettingsTab(
     viewModel: SettingsViewModel,
     albumViewModel: AlbumViewModel,
     onNavigateToTrash: () -> Unit = {},
-    onNavigateToRecommendations: () -> Unit = {},
     onNavigateToPluginManager: () -> Unit = {},
     onNavigateToAnalysisPerformance: () -> Unit = {},
     onNavigateToAiAnalysisPreferences: () -> Unit = {},
@@ -1845,7 +1895,7 @@ private fun SettingsTab(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        // Section 0: 更多功能入口（回收站 / 精选推荐）
+        // Section 0: 更多功能入口
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -1861,117 +1911,42 @@ private fun SettingsTab(
                         fontWeight = FontWeight.Bold,
                     )
                     Spacer(Modifier.height(8.dp))
-                    ListItem(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable(onClick = onNavigateToRecommendations),
-                        headlineContent = { Text("精选推荐") },
-                        supportingContent = { Text("查看智能推荐的相册精选") },
-                        leadingContent = {
-                            Icon(
-                                Icons.Default.AutoAwesome,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                        },
-                        trailingContent = {
-                            Icon(Icons.Default.ChevronRight, contentDescription = null)
-                        },
-                        colors = ListItemDefaults.colors(
-                            containerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        ),
+                    MoreFeatureListItem(
+                        title = "AI 插件管理",
+                        description = "导入和管理 AI 模型插件",
+                        imageVector = Icons.Filled.PlayArrow,
+                        iconTint = MaterialTheme.colorScheme.primary,
+                        onClick = onNavigateToPluginManager,
                     )
                     HorizontalDivider(
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                     )
-                    ListItem(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable(onClick = onNavigateToPluginManager),
-                        headlineContent = { Text("AI 插件管理") },
-                        supportingContent = { Text("导入和管理 AI 模型插件") },
-                        leadingContent = {
-                            Icon(
-                                Icons.Filled.PlayArrow,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                        },
-                        trailingContent = {
-                            Icon(Icons.Default.ChevronRight, contentDescription = null)
-                        },
-                        colors = ListItemDefaults.colors(
-                            containerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        ),
+                    MoreFeatureListItem(
+                        title = "扫描与分析性能",
+                        description = "按设备能力选择稳定、均衡或性能调度",
+                        imageVector = Icons.Default.Settings,
+                        iconTint = MaterialTheme.colorScheme.primary,
+                        onClick = onNavigateToAnalysisPerformance,
                     )
                     HorizontalDivider(
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                     )
-                    ListItem(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable(onClick = onNavigateToAnalysisPerformance),
-                        headlineContent = { Text("扫描与分析性能") },
-                        supportingContent = { Text("按设备能力选择稳定、均衡或性能调度") },
-                        leadingContent = {
-                            Icon(
-                                Icons.Default.Settings,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                        },
-                        trailingContent = {
-                            Icon(Icons.Default.ChevronRight, contentDescription = null)
-                        },
-                        colors = ListItemDefaults.colors(
-                            containerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        ),
+                    MoreFeatureListItem(
+                        title = "AI 识别与结果偏好",
+                        description = "调整人物归并、OCR、语义搜索和精选推荐",
+                        imageVector = Icons.Default.AutoAwesome,
+                        iconTint = MaterialTheme.colorScheme.primary,
+                        onClick = onNavigateToAiAnalysisPreferences,
                     )
                     HorizontalDivider(
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                     )
-                    ListItem(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable(onClick = onNavigateToAiAnalysisPreferences),
-                        headlineContent = { Text("AI 识别与结果偏好") },
-                        supportingContent = { Text("调整人物归并、OCR、语义搜索和精选推荐") },
-                        leadingContent = {
-                            Icon(
-                                Icons.Default.AutoAwesome,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                        },
-                        trailingContent = { Icon(Icons.Default.ChevronRight, contentDescription = null) },
-                        colors = ListItemDefaults.colors(
-                            containerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        ),
-                    )
-                    HorizontalDivider(
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                    )
-                    ListItem(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable(onClick = onNavigateToTrash),
-                        headlineContent = { Text("回收站") },
-                        supportingContent = {
-                            Text(if (trashedCount == 0) "空" else "$trashedCount 项待清理")
-                        },
-                        leadingContent = {
-                            Icon(
-                                Icons.Default.DeleteOutline,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.error,
-                            )
-                        },
-                        trailingContent = {
-                            Icon(Icons.Default.ChevronRight, contentDescription = null)
-                        },
-                        colors = ListItemDefaults.colors(
-                            containerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        ),
+                    MoreFeatureListItem(
+                        title = "回收站",
+                        description = if (trashedCount == 0) "空" else "$trashedCount 项待清理",
+                        imageVector = Icons.Default.DeleteOutline,
+                        iconTint = MaterialTheme.colorScheme.error,
+                        onClick = onNavigateToTrash,
                     )
                 }
             }

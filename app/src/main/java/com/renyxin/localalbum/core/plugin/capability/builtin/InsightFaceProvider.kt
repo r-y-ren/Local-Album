@@ -27,6 +27,7 @@ class InsightFaceProvider(
 
     companion object {
         private const val TAG = "InsightFace"
+        private const val CONSUMER_ID_PREFIX = "InsightFace:detect"
         const val DET_MODEL_ID = "model:insightface_det"
         const val REC_MODEL_ID = "model:insightface_rec"
         private const val DET_INPUT_SIZE = 640
@@ -66,54 +67,61 @@ class InsightFaceProvider(
     }
 
     override suspend fun detectFaces(file: File): List<FaceProvider.DetectedFace> = withContext(Dispatchers.IO) {
-        val original = decodeBitmap(file) ?: return@withContext emptyList()
-        val detResult = modelManager.ensureModelReady(DET_MODEL_ID)
-        if (detResult.isFailure) return@withContext emptyList()
-        val faces = modelManager.withOnnxSession(DET_MODEL_ID) { detSession ->
-            detectFacesOnnx(original, detSession)
-        } ?: return@withContext emptyList()
+        // 保护完整的检测 + 特征提取事务。批处理阶段结束时会调用 evictUnusedModels()；
+        // 若不登记消费者，它可能在交互式换脸刚 ensure 完模型后关闭 session，导致换脸失效。
+        val consumerId = "$CONSUMER_ID_PREFIX:${System.nanoTime()}"
+        modelManager.registerConsumer(DET_MODEL_ID, consumerId)
+        modelManager.registerConsumer(REC_MODEL_ID, consumerId)
+        try {
+            val original = decodeBitmap(file) ?: return@withContext emptyList()
+            val detResult = modelManager.ensureModelReady(DET_MODEL_ID)
+            if (detResult.isFailure) return@withContext emptyList()
+            val faces = modelManager.withOnnxSession(DET_MODEL_ID) { detSession ->
+                detectFacesOnnx(original, detSession)
+            } ?: return@withContext emptyList()
 
-        // 群像、海报或误检可能使单图人脸数异常膨胀。仅保留面积最大的有限人脸，
-        // 控制 ArcFace 调用次数与临时 Bitmap/仿射矩阵的峰值内存。
-        val facesForRecognition = faces
-            .sortedByDescending { face -> face.box.width() * face.box.height() }
-            .take(MAX_FACES_PER_IMAGE)
-        if (facesForRecognition.size < faces.size) {
-            Log.i(TAG, "人脸识别限流: detected=${faces.size}, selected=${facesForRecognition.size}")
-        }
-        val recResult = modelManager.ensureModelReady(REC_MODEL_ID)
-        if (recResult.isFailure) {
-            return@withContext facesForRecognition.map { FaceProvider.DetectedFace(it.box, FloatArray(EMBEDDING_DIM)) }
-        }
-        val results = mutableListOf<FaceProvider.DetectedFace>()
-        for (face in facesForRecognition) {
-            // 通过 session 池获取独立 rec session（独立 intra-op 线程池），实现多核并行
-            val emb = modelManager.withOnnxSession(REC_MODEL_ID) { recSession ->
-                // ArcFace 嵌入必须基于 5 关键点对齐到 112×112（ReActor ArcFaceONNX.get 的 norm_crop）。
-                // 仅用 bbox 裁剪会产生劣质嵌入，导致 inswapper 换脸无效（输出≈输入）。
-                if (face.landmarks != null) {
-                    val lmkPx = FaceAligner.denormalizeLandmarks(face.landmarks, original.width, original.height)
-                    val affineM = FaceAligner.computeAffineMatrix(lmkPx, REC_INPUT_SIZE)
-                    val aligned = if (!affineM.empty()) FaceAligner.warpAffine(original, affineM, REC_INPUT_SIZE) else null
-                    affineM.release()
-                    aligned?.let { extractEmbedding(it, recSession) } ?: run {
+            // 群像、海报或误检可能使单图人脸数异常膨胀。仅保留面积最大的有限人脸，
+            // 控制 ArcFace 调用次数与临时 Bitmap/仿射矩阵的峰值内存。
+            val facesForRecognition = faces
+                .sortedByDescending { face -> face.box.width() * face.box.height() }
+                .take(MAX_FACES_PER_IMAGE)
+            if (facesForRecognition.size < faces.size) {
+                Log.i(TAG, "人脸识别限流: detected=${faces.size}, selected=${facesForRecognition.size}")
+            }
+            val recResult = modelManager.ensureModelReady(REC_MODEL_ID)
+            if (recResult.isFailure) {
+                return@withContext facesForRecognition.map { FaceProvider.DetectedFace(it.box, FloatArray(EMBEDDING_DIM)) }
+            }
+            val results = mutableListOf<FaceProvider.DetectedFace>()
+            for (face in facesForRecognition) {
+                // 通过 session 池获取独立 rec session（独立 intra-op 线程池），实现多核并行
+                val emb = modelManager.withOnnxSession(REC_MODEL_ID) { recSession ->
+                    // ArcFace 嵌入必须基于 5 关键点对齐到 112×112（ReActor ArcFaceONNX.get 的 norm_crop）。
+                    // 仅用 bbox 裁剪会产生劣质嵌入，导致 inswapper 换脸无效（输出≈输入）。
+                    if (face.landmarks != null) {
+                        val lmkPx = FaceAligner.denormalizeLandmarks(face.landmarks, original.width, original.height)
+                        val affineM = FaceAligner.computeAffineMatrix(lmkPx, REC_INPUT_SIZE)
+                        val aligned = if (!affineM.empty()) FaceAligner.warpAffine(original, affineM, REC_INPUT_SIZE) else null
+                        affineM.release()
+                        aligned?.let { extractEmbedding(it, recSession) } ?: run {
+                            val crop = cropFace(original, face.box)
+                            crop?.let { extractEmbedding(it, recSession) } ?: FloatArray(EMBEDDING_DIM)
+                        }
+                    } else {
                         val crop = cropFace(original, face.box)
                         crop?.let { extractEmbedding(it, recSession) } ?: FloatArray(EMBEDDING_DIM)
                     }
-                } else {
-                    val crop = cropFace(original, face.box)
-                    crop?.let { extractEmbedding(it, recSession) } ?: FloatArray(EMBEDDING_DIM)
                 }
+                results.add(FaceProvider.DetectedFace(face.box, emb, face.landmarks))
             }
-            results.add(FaceProvider.DetectedFace(face.box, emb, face.landmarks))
+            results
+        } finally {
+            modelManager.unregisterConsumer(REC_MODEL_ID, consumerId)
+            modelManager.unregisterConsumer(DET_MODEL_ID, consumerId)
         }
-        results
     }
 
-    override suspend fun release() {
-        modelManager.unregisterConsumer(DET_MODEL_ID, "InsightFace")
-        modelManager.unregisterConsumer(REC_MODEL_ID, "InsightFace")
-    }
+    override suspend fun release() = Unit
 
     private fun detectFacesOnnx(bitmap: Bitmap, session: OrtSession): List<FaceProvider.DetectedFace>? {
         val env = OrtEnvironment.getEnvironment()
