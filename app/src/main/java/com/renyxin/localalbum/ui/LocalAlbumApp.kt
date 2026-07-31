@@ -126,7 +126,9 @@ import com.renyxin.localalbum.core.model.Album
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaQueryContext
 import com.renyxin.localalbum.core.recommendation.Recommendation
+import com.renyxin.localalbum.data.repo.AlbumSyncState
 import com.renyxin.localalbum.data.repo.ScanState
+import com.renyxin.localalbum.ui.components.AlbumSyncStatusBanner
 import com.renyxin.localalbum.ui.components.DirectoryPickerDialog
 import com.renyxin.localalbum.ui.screens.AlbumDetailScreen
 import com.renyxin.localalbum.ui.screens.AiAnalysisPreferencesScreen
@@ -1365,6 +1367,7 @@ private fun AlbumsTab(
 ) {
     val tree by viewModel.albumTree.collectAsStateWithLifecycle()
     val scanState by viewModel.scanState.collectAsStateWithLifecycle()
+    val syncState by viewModel.albumSyncState.collectAsStateWithLifecycle()
 
     // 视图模式：树形展开 / 平铺网格
     var isTreeView by remember { mutableStateOf(true) }
@@ -1372,7 +1375,9 @@ private fun AlbumsTab(
     // 将树形结构扁平化为相册列表（用于平铺网格视图）
     val flatAlbums = remember(tree) { flattenAlbums(tree) }
 
-    if (scanState is ScanState.Scanning && tree.isEmpty()) {
+    // 只有确实没有任何已提交快照时才使用阻塞式首次构建页；
+    // 有缓存的冷启动和后台校准因 tree 非空，始终保留旧相册供用户操作。
+    if (tree.isEmpty() && scanState is ScanState.Scanning) {
         Box(
             modifier = modifier.fillMaxSize(),
             contentAlignment = Alignment.Center,
@@ -1380,7 +1385,7 @@ private fun AlbumsTab(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator()
                 Spacer(Modifier.height(16.dp))
-                Text("正在构建相册结构…", style = MaterialTheme.typography.bodyLarge)
+                Text("正在首次建立相册…", style = MaterialTheme.typography.bodyLarge)
             }
         }
         return
@@ -1400,6 +1405,10 @@ private fun AlbumsTab(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
+        AlbumSyncStatusBanner(
+            state = syncState,
+            onRetry = viewModel::rescan,
+        )
         // 视图切换栏
         Row(
             modifier = Modifier

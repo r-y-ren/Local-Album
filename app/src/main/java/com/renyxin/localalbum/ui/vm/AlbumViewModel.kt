@@ -48,6 +48,7 @@ class AlbumViewModel(
     val leafAlbums: StateFlow<List<Album>> = repository.leafAlbums
     val recommendations: StateFlow<List<Recommendation>> = repository.recommendations
     val scanState: StateFlow<ScanState> = repository.scanState
+    val albumSyncState = repository.albumSyncState
     val favoriteCount: StateFlow<Int> = repository.favoriteCount
     val trashedCount: StateFlow<Int> = repository.trashedCount
     val stats: StateFlow<AlbumStats> = repository.stats

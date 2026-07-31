@@ -26,6 +26,8 @@ import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.FaceClusterSummary
 import com.renyxin.localalbum.data.db.dao.MediaDao
+import com.renyxin.localalbum.data.db.dao.DirectorySummary
+import com.renyxin.localalbum.data.db.entity.AlbumSnapshotDirectoryEntity
 import com.renyxin.localalbum.data.db.entity.FaceEntity
 import com.renyxin.localalbum.data.db.entity.MaintenanceRunEntity
 import com.renyxin.localalbum.data.db.entity.MediaEntity
@@ -44,6 +46,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.Flow
@@ -68,6 +71,21 @@ sealed interface ScanState {
     ) : ScanState
     data object Done : ScanState
     data class Failed(val message: String) : ScanState
+}
+
+/** 相册快照与后台媒体校准状态；独立于 AI 分析进度。 */
+sealed interface AlbumSyncState {
+    data object Restoring : AlbumSyncState
+    data object FirstBuild : AlbumSyncState
+    data class Checking(val hasCachedAlbums: Boolean) : AlbumSyncState
+    data class Updating(
+        val hasCachedAlbums: Boolean,
+        val processed: Int = 0,
+        val total: Int = 0,
+    ) : AlbumSyncState
+    data class UpToDate(val updatedAtMs: Long) : AlbumSyncState
+    data class Paused(val hasCachedAlbums: Boolean) : AlbumSyncState
+    data class Failed(val message: String, val hasCachedAlbums: Boolean) : AlbumSyncState
 }
 
 data class AlbumStats(
@@ -235,6 +253,12 @@ class AlbumRepository(
     private val _scanState = MutableStateFlow<ScanState>(ScanState.Idle)
     val scanState: StateFlow<ScanState> = _scanState.asStateFlow()
 
+    private val _albumSyncState = MutableStateFlow<AlbumSyncState>(AlbumSyncState.Restoring)
+    val albumSyncState: StateFlow<AlbumSyncState> = _albumSyncState.asStateFlow()
+
+    @Volatile
+    private var albumCacheRestored = false
+
     /** 语义搜索结果（Phase 4.1），含相似度评分 */
     private val _semanticSearchResults = MutableStateFlow<List<SemanticSearchResult>>(emptyList())
     val semanticSearchResults: StateFlow<List<SemanticSearchResult>> = _semanticSearchResults.asStateFlow()
@@ -391,31 +415,48 @@ class AlbumRepository(
     }
 
     suspend fun loadFromDb() = withContext(Dispatchers.IO) {
-        rebuildTreeFromDirectorySummaries()
+        publishCommittedAlbumSnapshot()
         refreshStats()
     }
 
+    /**
+     * 冷启动只读取最后完整发布的目录快照，不等待扫描锁，也不执行推荐和统计查询。
+     * 迁移后的数据库会预填首份快照；快照意外缺失时才从媒体表聚合一次并立即持久化。
+     */
     suspend fun restoreFromDbIfNeeded() = withContext(Dispatchers.IO) {
-        Log.i(TAG, "restoreFromDbIfNeeded: 开始，等待 scanMutex…")
-        // 修复：串行化，避免与并发 rescan 交错重建相册树
-        scanMutex.withLock {
-            Log.i(TAG, "restoreFromDbIfNeeded: 获得 scanMutex")
-            if (_albumTree.value.isNotEmpty()) {
-                Log.i(TAG, "restoreFromDbIfNeeded: 相册树已非空，跳过")
-                return@withLock
+        if (albumCacheRestored) return@withContext
+        _albumSyncState.value = AlbumSyncState.Restoring
+        val snapshotDao = database?.albumSnapshotDao()
+        var meta = snapshotDao?.getMeta()
+        var summaries = snapshotDao?.getDirectories().orEmpty().map { it.toDirectorySummary() }
+        if (summaries.isEmpty()) {
+            summaries = mediaDao.getDirectorySummaries()
+            if (summaries.isNotEmpty() && snapshotDao != null) {
+                val version = System.currentTimeMillis()
+                snapshotDao.replaceSnapshot(
+                    entries = summaries.map { it.toSnapshotEntity(version) },
+                    version = version,
+                    updatedAtMs = version,
+                )
+                meta = snapshotDao.getMeta()
             }
-            val summaries = mediaDao.getDirectorySummaries()
-            Log.i(TAG, "restoreFromDbIfNeeded: DB 中有 ${summaries.size} 个媒体目录")
-            if (summaries.isEmpty()) return@withLock
-            rebuildTreeFromDirectorySummaries(summaries)
-            _scanState.value = ScanState.Done
-            refreshStats()
-            Log.i(TAG, "restoreFromDbIfNeeded: 完成")
         }
+        if (summaries.isNotEmpty()) {
+            rebuildTreeFromDirectorySummaries(summaries, rebuildRecommendations = false)
+            _scanState.value = ScanState.Done
+            _albumSyncState.value = AlbumSyncState.UpToDate(meta?.updatedAtMs ?: 0L)
+        } else {
+            _albumSyncState.value = AlbumSyncState.FirstBuild
+        }
+        albumCacheRestored = true
+        Log.i(TAG, "restoreFromDbIfNeeded: 发布 ${summaries.size} 个缓存目录")
     }
 
     // ---- 扫描 ----
     suspend fun rescan() = withContext(Dispatchers.IO) {
+        restoreFromDbIfNeeded()
+        val hadCachedAlbums = _albumTree.value.isNotEmpty()
+        _albumSyncState.value = AlbumSyncState.Checking(hadCachedAlbums)
         Log.i(TAG, "rescan: 开始，等待 scanMutex…")
         // 修复：串行化扫描，避免并发 rescan 互相覆盖数据与 _scanState
         scanMutex.withLock {
@@ -442,9 +483,15 @@ class AlbumRepository(
             // 用户配置的忽略规则（正则），同时匹配目录名与文件名；复用 ignoreDirNames 通路
             val ignorePatterns = settings?.ignoreDirNames ?: emptyList()
             if (roots.isEmpty()) {
-                Log.w(TAG, "rescan: scanRoots 为空，清空并返回 Idle")
-                clearAll()
+                Log.w(TAG, "rescan: scanRoots 为空，保留已提交快照并返回 Idle")
                 _scanState.value = ScanState.Idle
+                _albumSyncState.value = if (_albumTree.value.isEmpty()) {
+                    AlbumSyncState.FirstBuild
+                } else {
+                    AlbumSyncState.UpToDate(
+                        database?.albumSnapshotDao()?.getMeta()?.updatedAtMs ?: 0L
+                    )
+                }
                 return@runCatching
             }
 
@@ -455,6 +502,7 @@ class AlbumRepository(
             if (hybridIndexer != null) {
                 // ---- 混合索引路径：优先使用 HybridIndexer ----
                 val isFirstScan = mediaDao.getCount() == 0
+                _albumSyncState.value = AlbumSyncState.Updating(hadCachedAlbums)
                 _scanState.value = ScanState.Scanning(
                     if (isFirstScan) "首次全量扫描…" else "增量扫描…"
                 )
@@ -462,6 +510,7 @@ class AlbumRepository(
                     // Phase 3: 全量扫描进度填充（D10）——指纹阶段上报 processed/total
                     hybridIndexer.fullScan(roots, allowNomedia, ignorePatterns) { processed, total ->
                         _scanState.value = ScanState.Scanning("首次全量扫描…", processed, total)
+                        _albumSyncState.value = AlbumSyncState.Updating(hadCachedAlbums, processed, total)
                     }
                 } else {
                     hybridIndexer.incrementalScan(roots, allowNomedia, ignorePatterns)
@@ -469,16 +518,30 @@ class AlbumRepository(
                 // 修复：移除无效的"兜底孤儿清理"调用。原调用 removeOrphanedRecords(mediaDao.getAllPaths())
                 // 把数据库路径当作"文件系统实际路径"传入，差集恒为空，是 no-op（还白做两次全表路径查询）。
                 // 孤儿清理由 fullScan/incrementalScan 内部基于真实文件系统快照完成，此处无需重复。
-                loadFromDb()
+                publishCommittedAlbumSnapshot()
                 _scanState.value = ScanState.Done
-                refreshStats()
+                _albumSyncState.value = AlbumSyncState.UpToDate(
+                    database?.albumSnapshotDao()?.getMeta()?.updatedAtMs ?: System.currentTimeMillis()
+                )
+                scope.launch {
+                    refreshStats()
+                    rebuildRecommendationPool(_leafAlbums.value)
+                }
             } else {
                 // 依赖注入异常必须显式失败，禁止静默退回构造多份全库映射的旧扫描路径。
                 error("HybridIndexer 未注入，已拒绝执行高风险全量扫描兜底")
             }
         }.onFailure { e ->
-            Log.e(TAG, "扫描失败", e)
-            _scanState.value = ScanState.Failed(e.message ?: "扫描失败")
+            if (e is kotlinx.coroutines.CancellationException) {
+                Log.i(TAG, "扫描已取消，继续保留上次完整相册快照")
+                _scanState.value = ScanState.Done
+                _albumSyncState.value = AlbumSyncState.Paused(_albumTree.value.isNotEmpty())
+            } else {
+                Log.e(TAG, "扫描失败", e)
+                val message = e.message ?: "扫描失败"
+                _scanState.value = ScanState.Failed(message)
+                _albumSyncState.value = AlbumSyncState.Failed(message, _albumTree.value.isNotEmpty())
+            }
         }
             } finally {
                 // Phase 0: 仅在已 acquire 时释放，避免误减引用计数影响 AI 分析侧服务
@@ -1042,7 +1105,8 @@ class AlbumRepository(
     ).flow.map { pagingData -> pagingData.map { it.toMediaItem() } }
 
     private suspend fun rebuildTreeFromDirectorySummaries(
-        summaries: List<com.renyxin.localalbum.data.db.dao.DirectorySummary>? = null,
+        summaries: List<DirectorySummary>? = null,
+        rebuildRecommendations: Boolean = true,
     ) = withContext(Dispatchers.IO) {
         val directorySummaries = summaries ?: mediaDao.getDirectorySummaries()
         if (directorySummaries.isEmpty()) {
@@ -1059,7 +1123,19 @@ class AlbumRepository(
         _leafAlbums.value = leaves
         // 目录树保持轻量摘要；精选通过独立的有界候选查询补充真实媒体属性。
         // 每次数据库重建（包括扫描完成）都同步重建推荐，避免精选页永久为空。
-        rebuildRecommendationPool(leaves)
+        if (rebuildRecommendations) rebuildRecommendationPool(leaves)
+    }
+
+    /** 完整扫描成功后构造并原子发布新快照，再更新内存树。 */
+    private suspend fun publishCommittedAlbumSnapshot() {
+        val summaries = mediaDao.getDirectorySummaries()
+        val now = System.currentTimeMillis()
+        database?.albumSnapshotDao()?.replaceSnapshot(
+            entries = summaries.map { it.toSnapshotEntity(now) },
+            version = now,
+            updatedAtMs = now,
+        )
+        rebuildTreeFromDirectorySummaries(summaries, rebuildRecommendations = false)
     }
 
     /**
@@ -1303,6 +1379,23 @@ class AlbumRepository(
 
 private fun com.renyxin.localalbum.core.model.DirectorySqlSpec.toRoomQuery() =
     androidx.sqlite.db.SimpleSQLiteQuery(sql, args.toTypedArray())
+
+private fun DirectorySummary.toSnapshotEntity(version: Long) = AlbumSnapshotDirectoryEntity(
+    directoryPath = parentPath,
+    mediaCount = mediaCount,
+    latestCapturedAtMs = latestCapturedAtMs,
+    coverThumbnailPath = coverThumbnailPath,
+    coverFilePath = coverFilePath,
+    snapshotVersion = version,
+)
+
+private fun AlbumSnapshotDirectoryEntity.toDirectorySummary() = DirectorySummary(
+    parentPath = directoryPath,
+    mediaCount = mediaCount,
+    latestCapturedAtMs = latestCapturedAtMs,
+    coverThumbnailPath = coverThumbnailPath,
+    coverFilePath = coverFilePath,
+)
 
 private fun MediaEntity.toDirectoryAnchor() = DirectoryMediaAnchor(
     filePath = filePath,

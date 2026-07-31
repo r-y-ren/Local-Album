@@ -613,14 +613,25 @@ class AppContainer(context: Context) {
     @Volatile
     private var lastForegroundRescanMs = 0L
 
+    @Volatile
+    private var startupRestoreCompleted = false
+
+    /**
+     * 首次前台严格执行“快照恢复 → 后台校准”，避免扫描先抢到互斥锁而阻塞相册首屏。
+     * 后续回前台仍沿用节流；恢复入口幂等，因此与 Compose 初始化并发也安全。
+     */
     fun maybeRescanOnForeground() {
         val now = System.currentTimeMillis()
-        if (now - lastForegroundRescanMs < FOREGROUND_RESCAN_THROTTLE_MS) {
+        if (startupRestoreCompleted && now - lastForegroundRescanMs < FOREGROUND_RESCAN_THROTTLE_MS) {
             android.util.Log.d("AppContainer", "回前台节流：距上次扫描不足 ${FOREGROUND_RESCAN_THROTTLE_MS}ms，跳过")
             return
         }
         lastForegroundRescanMs = now
         appScope.launch {
+            if (!startupRestoreCompleted) {
+                albumRepository.restoreFromDbIfNeeded()
+                startupRestoreCompleted = true
+            }
             val currentState = albumRepository.scanState.value
             if (currentState is ScanState.Scanning) return@launch
             albumRepository.rescan()

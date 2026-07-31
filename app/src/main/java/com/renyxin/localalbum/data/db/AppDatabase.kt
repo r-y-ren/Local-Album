@@ -6,6 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.renyxin.localalbum.data.db.dao.AlbumSnapshotDao
 import com.renyxin.localalbum.data.db.dao.AnalysisStateDao
 import com.renyxin.localalbum.data.db.dao.BackupStagingDao
 import com.renyxin.localalbum.data.db.dao.AnalysisTaskDao
@@ -23,6 +24,8 @@ import com.renyxin.localalbum.data.db.dao.ScanStagingDao
 import com.renyxin.localalbum.data.db.dao.SemanticDao
 import com.renyxin.localalbum.data.db.dao.ThumbnailCacheDao
 import com.renyxin.localalbum.data.db.dao.ThumbnailTaskDao
+import com.renyxin.localalbum.data.db.entity.AlbumSnapshotDirectoryEntity
+import com.renyxin.localalbum.data.db.entity.AlbumSnapshotMetaEntity
 import com.renyxin.localalbum.data.db.entity.AnalysisStateEntity
 import com.renyxin.localalbum.data.db.entity.AnalysisTaskEntity
 import com.renyxin.localalbum.data.db.entity.DeletionTombstoneEntity
@@ -83,8 +86,10 @@ import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
         SemanticClusterMemberEntity::class,
         DeletionTombstoneEntity::class,
         com.renyxin.localalbum.data.db.entity.BackupImportStagingEntity::class,
+        AlbumSnapshotDirectoryEntity::class,
+        AlbumSnapshotMetaEntity::class,
     ],
-    version = 27,
+    version = 28,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -99,6 +104,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun analysisTaskDao(): AnalysisTaskDao
     abstract fun scanRunDao(): ScanRunDao
     abstract fun scanStagingDao(): ScanStagingDao
+    abstract fun albumSnapshotDao(): AlbumSnapshotDao
     abstract fun importStagingDao(): ImportStagingDao
     abstract fun backupStagingDao(): BackupStagingDao
     abstract fun duplicateMaintenanceDao(): DuplicateMaintenanceDao
@@ -697,6 +703,45 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** Migration 27 → 28：增加原子发布的目录级相册快照，供冷启动直接恢复。 */
+        val MIGRATION_27_28 = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS album_snapshot_directories (
+                        directoryPath TEXT NOT NULL PRIMARY KEY,
+                        mediaCount INTEGER NOT NULL,
+                        latestCapturedAtMs INTEGER NOT NULL,
+                        coverThumbnailPath TEXT,
+                        coverFilePath TEXT,
+                        snapshotVersion INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_album_snapshot_directories_snapshotVersion ON album_snapshot_directories(snapshotVersion)")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS album_snapshot_meta (
+                        id INTEGER NOT NULL PRIMARY KEY,
+                        activeVersion INTEGER NOT NULL,
+                        updatedAtMs INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                val now = System.currentTimeMillis()
+                db.execSQL("""
+                    INSERT INTO album_snapshot_directories
+                        (directoryPath, mediaCount, latestCapturedAtMs, coverThumbnailPath, coverFilePath, snapshotVersion)
+                    SELECT parentPath, COUNT(*), MAX(capturedAtMs),
+                           (SELECT m2.thumbnailPath FROM media_items m2
+                            WHERE m2.parentPath = m1.parentPath AND m2.isTrashed = 0
+                            ORDER BY m2.capturedAtMs DESC, m2.filePath ASC LIMIT 1),
+                           (SELECT m2.filePath FROM media_items m2
+                            WHERE m2.parentPath = m1.parentPath AND m2.isTrashed = 0
+                            ORDER BY m2.capturedAtMs DESC, m2.filePath ASC LIMIT 1),
+                           $now
+                    FROM media_items m1 WHERE isTrashed = 0 GROUP BY parentPath
+                """.trimIndent())
+                db.execSQL("INSERT OR REPLACE INTO album_snapshot_meta (id, activeVersion, updatedAtMs) VALUES (1, $now, $now)")
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -724,6 +769,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_24_25,
                         MIGRATION_25_26,
                         MIGRATION_26_27,
+                        MIGRATION_27_28,
                     )
                     // 1.2: 仅在降级时销毁数据；升级缺失迁移时抛异常而非静默清库
                     .fallbackToDestructiveMigrationOnDowngrade()

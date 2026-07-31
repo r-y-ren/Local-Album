@@ -16,11 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevent built-in face analysis from clearing and clustering the complete face table; both face-provider paths now use bounded representative matching and pending clusters.
 - Make thumbnail generation convergent with persistent tasks, transactional leases, unique WorkManager scheduling, exponential retry backoff, and terminal failure states.
 - Batch trash cleanup and remove all associated face, embedding, analysis, plugin-feature, FTS, and thumbnail-task records only after physical deletion succeeds.
+- Restore albums from the last atomically committed directory snapshot before foreground media reconciliation, eliminating repeated blocking album-tree construction on cold start while preserving stale data after interrupted or failed scans.
 
 ### Added
 
 - Room schema v16 with the `thumbnail_tasks` queue and migration of existing missing thumbnails.
 - Room schema v17 with media scan generations and a persistent `analysis_tasks` queue.
+- Room schema v28 with versioned album directory snapshots and an album-page synchronization status banner.
 
 ### Changed
 
