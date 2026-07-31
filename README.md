@@ -14,6 +14,15 @@
 
 [English](#english) · [中文](#中文) · [开发贡献](CONTRIBUTING.md) · [变更记录](CHANGELOG.md) · [安全策略](SECURITY.md)
 
+## 效果预览 / Screenshots
+
+
+|                                    照片主页                                    |                                     精选推荐                                     |                                       重复照片检测                                       |                                 人脸聚类                                 |
+| :-----------------------------------------------------------------------------: | :-------------------------------------------------------------------------------: | :---------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------: |
+|      <img src="Renderings/Photo%20Page.jpg" alt="照片主页" width="220" />      | <img src="Renderings/Curated%20Recommendations.jpg" alt="精选推荐" width="220" /> | <img src="Renderings/Duplicate%20photo%20detection.jpg" alt="重复照片检测" width="220" /> | <img src="Renderings/Face%20clustering.jpg" alt="人脸聚类" width="220" /> |
+|                              **语义搜索（结果）**                              |                               **语义搜索（输入）**                               |                                    **换脸（实验性）**                                    |                               **设置页面**                               |
+| <img src="Renderings/Semantic%20search_1.jpg" alt="语义搜索结果" width="220" /> |  <img src="Renderings/Semantic%20search_2.jpg" alt="语义搜索输入" width="220" />  |           <img src="Renderings/Face-swapping.jpg" alt="换脸功能" width="220" />           |  <img src="Renderings/Settings%20Page.jpg" alt="设置页面" width="220" />  |
+
 ---
 
 ## 中文
@@ -31,11 +40,12 @@
 
 应用底部为 4 个主 Tab（平板为侧边导航栏）：
 
-| Tab | 内容 |
-| --- | --- |
-| 照片 | 分页时间线 + 快捷入口（收藏、精选推荐、重复照片、人物、搜索） |
-| 搜索 | 关键词搜索与语义搜索模式切换 |
-| 相册 | 目录相册网格，进入相册详情（Room Paging 分页加载） |
+
+| Tab  | 内容                                                                                               |
+| ---- | -------------------------------------------------------------------------------------------------- |
+| 照片 | 分页时间线 + 快捷入口（收藏、精选推荐、重复照片、人物、搜索）                                      |
+| 搜索 | 关键词搜索与语义搜索模式切换                                                                       |
+| 相册 | 目录相册网格，进入相册详情（Room Paging 分页加载）                                                 |
 | 设置 | 扫描目录、忽略规则、主题、AI 偏好等；含“更多功能”入口（插件管理、分析性能、AI 识别偏好、回收站） |
 
 二级页面还包括：媒体查看器、人物详情、换脸（实验性）、模型导入向导等。
@@ -52,13 +62,14 @@
 
 ### 系统要求与权限
 
-| 项目     | 要求                                                                          |
-| -------- | ----------------------------------------------------------------------------- |
-| Android  | Android 10（API 29）及以上（compileSdk/targetSdk 35）                          |
-| ABI      | `arm64-v8a` 真机；`x86_64` 模拟器                                              |
+
+| 项目     | 要求                                                                                                                              |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Android  | Android 10（API 29）及以上（compileSdk/targetSdk 35）                                                                             |
+| ABI      | `arm64-v8a` 真机；`x86_64` 模拟器                                                                                                 |
 | 媒体权限 | Android 13+ 需要“照片和视频”权限（READ_MEDIA_IMAGES/VIDEO）；Android 10–12 使用“所有文件访问权限”（MANAGE_EXTERNAL_STORAGE） |
-| 通知权限 | 可选；用于显示长时间扫描/分析的前台服务通知                                     |
-| 网络     | 仅模型下载和远程模型目录使用；本地扫描与 AI 推理不需要网络                      |
+| 通知权限 | 可选；用于显示长时间扫描/分析的前台服务通知                                                                                       |
+| 网络     | 仅模型下载和远程模型目录使用；本地扫描与 AI 推理不需要网络                                                                        |
 
 ### 快速开始
 
@@ -89,12 +100,13 @@ chmod +x scripts/download_models.sh
 
 脚本从项目 Release（v0.1.0）下载以下模型，已存在的非空文件会被跳过：
 
-| 模型 | 文件 | 用途 |
-| --- | --- | --- |
-| EVA02-CLIP（int8） | `eva02_clip/eva02_text_int8.onnx`、`eva02_visual_336_int8.onnx` | 语义搜索文本/图片编码 |
-| InsightFace buffalo_l | `buffalo_l.zip`（内含 SCRFD `det_10g` + ArcFace `w600k_r50`） | 默认人脸检测与特征 |
-| inswapper_128 | `inswapper_128.onnx` + `emap_512.bin` | 换脸（实验性） |
-| PaddleOCR | `PP-OCRv5_mobile_rec_infer/inference.onnx`、`PP-OCRv6_small_det_infer/inference.onnx` | 文字识别/检测 |
+
+| 模型                  | 文件                                                                                  | 用途                  |
+| --------------------- | ------------------------------------------------------------------------------------- | --------------------- |
+| EVA02-CLIP（int8）    | `eva02_clip/eva02_text_int8.onnx`、`eva02_visual_336_int8.onnx`                       | 语义搜索文本/图片编码 |
+| InsightFace buffalo_l | `buffalo_l.zip`（内含 SCRFD `det_10g` + ArcFace `w600k_r50`）                         | 默认人脸检测与特征    |
+| inswapper_128         | `inswapper_128.onnx` + `emap_512.bin`                                                 | 换脸（实验性）        |
+| PaddleOCR             | `PP-OCRv5_mobile_rec_infer/inference.onnx`、`PP-OCRv6_small_det_infer/inference.onnx` | 文字识别/检测         |
 
 模型下载失败时可重新执行脚本；emap 矩阵也可通过 `python scripts/extract_emap.py` 从 `inswapper_128.onnx` 重新提取。请不要将大型二进制模型提交到 Git。
 
@@ -120,28 +132,30 @@ HybridIndexer ─── PluginAnalysisPipeline ─── CapabilityRegistryV2
 Room / DataStore       Provider + ModelManager
 ```
 
-| 模块                                                                                          | 责任                                                     |
-| --------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+
+| 模块                                                                                          | 责任                                                                   |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | [`core/index/`](app/src/main/java/com/renyxin/localalbum/core/index/)                         | MediaStore + 文件系统混合索引、扫描世代标记、增量检测、ContentObserver |
-| [`core/pipeline/`](app/src/main/java/com/renyxin/localalbum/core/pipeline/)                   | 分阶段 AI 管道、DAG 调度、断点续跑和进度                 |
-| [`core/plugin/capability/`](app/src/main/java/com/renyxin/localalbum/core/plugin/capability/) | 人脸、场景、语义、质量、OCR Provider 能力槽位            |
-| [`core/plugin/model/`](app/src/main/java/com/renyxin/localalbum/core/plugin/model/)           | 模型下载、加载、对象池与后端策略                         |
-| [`core/search/`](app/src/main/java/com/renyxin/localalbum/core/search/)                       | 关键词、语义和混合检索                                   |
-| [`core/analysis/`](app/src/main/java/com/renyxin/localalbum/core/analysis/)                   | 人脸聚类、完全重复检测（SHA-256）、AI 偏好               |
-| [`data/db/`](app/src/main/java/com/renyxin/localalbum/data/db/)                               | Room 实体、DAO 与数据库迁移（当前 v28，迁移链 8→28）     |
-| [`data/worker/`](app/src/main/java/com/renyxin/localalbum/data/worker/)                       | 扫描、分析、缩略图、重复检测、删除重试等 WorkManager 任务 |
-| [`data/backup/`](app/src/main/java/com/renyxin/localalbum/data/backup/)                       | JSON 索引导入与导出（staging + 单事务提交）              |
-| [`ui/`](app/src/main/java/com/renyxin/localalbum/ui/)                                         | Compose 页面、组件、主题与自管理返回栈导航               |
+| [`core/pipeline/`](app/src/main/java/com/renyxin/localalbum/core/pipeline/)                   | 分阶段 AI 管道、DAG 调度、断点续跑和进度                               |
+| [`core/plugin/capability/`](app/src/main/java/com/renyxin/localalbum/core/plugin/capability/) | 人脸、场景、语义、质量、OCR Provider 能力槽位                          |
+| [`core/plugin/model/`](app/src/main/java/com/renyxin/localalbum/core/plugin/model/)           | 模型下载、加载、对象池与后端策略                                       |
+| [`core/search/`](app/src/main/java/com/renyxin/localalbum/core/search/)                       | 关键词、语义和混合检索                                                 |
+| [`core/analysis/`](app/src/main/java/com/renyxin/localalbum/core/analysis/)                   | 人脸聚类、完全重复检测（SHA-256）、AI 偏好                             |
+| [`data/db/`](app/src/main/java/com/renyxin/localalbum/data/db/)                               | Room 实体、DAO 与数据库迁移（当前 v28，迁移链 8→28）                  |
+| [`data/worker/`](app/src/main/java/com/renyxin/localalbum/data/worker/)                       | 扫描、分析、缩略图、重复检测、删除重试等 WorkManager 任务              |
+| [`data/backup/`](app/src/main/java/com/renyxin/localalbum/data/backup/)                       | JSON 索引导入与导出（staging + 单事务提交）                            |
+| [`ui/`](app/src/main/java/com/renyxin/localalbum/ui/)                                         | Compose 页面、组件、主题与自管理返回栈导航                             |
 
 ### AI 能力与默认实现
 
-| 能力 | 默认实现                                        | 结果                            |
-| ---- | ----------------------------------------------- | ------------------------------- |
+
+| 能力 | 默认实现                                                          | 结果                            |
+| ---- | ----------------------------------------------------------------- | ------------------------------- |
 | 人脸 | InsightFace buffalo_l（SCRFD 检测 + ArcFace 特征，ML Kit 为备选） | 人脸框、特征向量与人物聚类      |
-| 场景 | MobileNetV3-Large TFLite                        | 场景标签                        |
-| 质量 | 启发式质量分析                                  | 质量分数                        |
-| OCR  | PaddleOCR（PP-OCRv5 识别 + PP-OCRv6 检测，ML Kit 中英文为备选） | 图片文字与全文索引              |
-| 语义 | EVA02-CLIP int8 ONNX（MobileCLIP/概念向量为备选） | 图片/文本语义向量与自然语言搜索 |
+| 场景 | MobileNetV3-Large TFLite                                          | 场景标签                        |
+| 质量 | 启发式质量分析                                                    | 质量分数                        |
+| OCR  | PaddleOCR（PP-OCRv5 识别 + PP-OCRv6 检测，ML Kit 中英文为备选）   | 图片文字与全文索引              |
+| 语义 | EVA02-CLIP int8 ONNX（MobileCLIP/概念向量为备选）                 | 图片/文本语义向量与自然语言搜索 |
 
 可在插件管理页面查看模型状态并切换已注册的 Provider。模型不可用时，相应能力会跳过或根据 Provider 实现回退；不会阻止基础媒体浏览。
 
