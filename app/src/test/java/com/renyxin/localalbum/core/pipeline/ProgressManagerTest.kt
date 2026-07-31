@@ -1,5 +1,6 @@
 package com.renyxin.localalbum.core.pipeline
 
+import com.renyxin.localalbum.ui.components.buildProgressSummary
 import com.renyxin.localalbum.ui.components.formatEta
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -56,6 +57,45 @@ class ProgressManagerTest {
     @Test
     fun `formatEta returns long duration`() {
         assertEquals("约 120m 0s", formatEta(7_200_000L))
+    }
+
+    @Test
+    fun `progress summary emphasizes remaining work and active file`() {
+        val progress = AnalysisProgress(
+            totalStages = 5,
+            completedStages = 2,
+            totalFiles = 120,
+            processedFiles = 45,
+            percent = 0.375f,
+            etaMs = 90_000L,
+            perStageFiles = mapOf(
+                "ocr" to StageFileProgress(
+                    stageId = "ocr",
+                    displayName = "文字识别",
+                    completedCount = 10,
+                    totalCount = 30,
+                    files = listOf(FileProgress("/DCIM/current.jpg", FileProcessingStatus.PROCESSING)),
+                )
+            ),
+        )
+
+        val summary = buildProgressSummary(progress)
+
+        assertEquals(37, summary.percent)
+        assertEquals(75, summary.remainingFiles)
+        assertEquals("约 1m 30s", summary.etaText)
+        assertEquals("current.jpg", summary.currentFileName)
+        assertEquals("剩余 75 个文件 · 2/5 项完成 · 约 1m 30s", summary.compactText)
+    }
+
+    @Test
+    fun `progress summary clamps inconsistent remaining count`() {
+        val summary = buildProgressSummary(
+            AnalysisProgress(totalFiles = 10, processedFiles = 12, percent = 1.2f)
+        )
+
+        assertEquals(100, summary.percent)
+        assertEquals(0, summary.remainingFiles)
     }
 
     // ---- ProgressManager State ----

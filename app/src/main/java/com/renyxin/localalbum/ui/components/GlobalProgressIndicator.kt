@@ -8,19 +8,25 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.DragIndicator
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -37,6 +43,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -44,9 +52,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import com.renyxin.localalbum.core.pipeline.AnalysisProgress
 import com.renyxin.localalbum.core.pipeline.ProgressManager
 
@@ -80,196 +93,192 @@ fun GlobalProgressIndicator(
     modifier: Modifier = Modifier,
 ) {
     val progress by progressManager.progress.collectAsState()
+    val isVisible = !progress.isCompleted && (progress.totalFiles > 0 || progress.hasError)
 
-    // 可见性判断：有进度且未完成，或有错误
-    val isVisible = !progress.isCompleted && (progress.processedFiles > 0 || progress.hasError)
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        val density = LocalDensity.current
+        val containerWidthPx = with(density) { maxWidth.toPx() }
+        val containerHeightPx = with(density) { maxHeight.toPx() }
+        var cardWidthPx by remember { mutableIntStateOf(0) }
+        var cardHeightPx by remember { mutableIntStateOf(0) }
+        var dragX by remember { mutableFloatStateOf(0f) }
+        var dragY by remember { mutableFloatStateOf(0f) }
 
-    AnimatedVisibility(
-        visible = isVisible,
-        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-        modifier = modifier.fillMaxWidth(),
-    ) {
-        ExpandableProgressCard(progress = progress, onCancel = onCancel)
+        fun clampPosition() {
+            val maxX = ((containerWidthPx - cardWidthPx) / 2f).coerceAtLeast(0f)
+            val maxUp = (containerHeightPx - cardHeightPx).coerceAtLeast(0f)
+            dragX = dragX.coerceIn(-maxX, maxX)
+            dragY = dragY.coerceIn(-maxUp, 0f)
+        }
+
+        AnimatedVisibility(
+            visible = isVisible,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .widthIn(max = 460.dp)
+                .onSizeChanged {
+                    cardWidthPx = it.width
+                    cardHeightPx = it.height
+                    clampPosition()
+                }
+                .offset { IntOffset(dragX.roundToInt(), dragY.roundToInt()) }
+                .pointerInput(containerWidthPx, containerHeightPx, cardWidthPx, cardHeightPx) {
+                    detectDragGestures { change, amount ->
+                        change.consume()
+                        dragX += amount.x
+                        dragY += amount.y
+                        clampPosition()
+                    }
+                },
+        ) {
+            ExpandableProgressCard(progress = progress, onCancel = onCancel)
+        }
     }
 }
 
-// ---- Internal Components ----
-
-/**
- * 可展开的进度卡片。
- */
 @Composable
 private fun ExpandableProgressCard(
     progress: AnalysisProgress,
     onCancel: (() -> Unit)?,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val summary = remember(progress) { buildProgressSummary(progress) }
 
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth().padding(12.dp),
+        shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.97f),
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            // 折叠状态：总体进度条
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { expanded = !expanded }
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // 状态图标
-                StatusIcon(progress = progress)
-
-                Spacer(Modifier.width(12.dp))
-
-                // 进度信息
+                StatusIcon(progress)
+                Spacer(Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (progress.hasError) "智能整理遇到问题" else "正在整理媒体库",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                text = progress.currentStageName.ifBlank { "正在准备分析任务" },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                         Text(
-                            text = progress.currentStageName.ifEmpty { "分析中..." },
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = "${(progress.percent * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelMedium,
+                            text = "${summary.percent}%",
+                            style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = if (progress.hasError) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.primary,
                         )
                     }
-
-                    Spacer(Modifier.height(4.dp))
-
+                    Spacer(Modifier.height(7.dp))
                     LinearProgressIndicator(
                         progress = { progress.percent.coerceIn(0f, 1f) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp)),
-                        color = if (progress.hasError) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                        color = if (progress.hasError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                         trackColor = MaterialTheme.colorScheme.surfaceVariant,
                         strokeCap = StrokeCap.Round,
                     )
-
-                    Spacer(Modifier.height(2.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text(
-                            text = buildMetaText(progress),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        text = summary.compactText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
-
-                Spacer(Modifier.width(4.dp))
-
-                Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
-                    contentDescription = if (expanded) "收起" else "展开详情",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
-                )
+                Spacer(Modifier.width(6.dp))
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.DragIndicator, "拖动进度浮窗", Modifier.size(20.dp))
+                    Icon(
+                        if (expanded) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
+                        if (expanded) "收起" else "展开详情",
+                        Modifier.size(20.dp),
+                    )
+                }
             }
 
-            // 展开后的详情区域（显示任务类型、插件信息、处理速率、错误信息、取消按钮）
             AnimatedVisibility(
                 visible = expanded,
                 enter = expandVertically() + fadeIn(),
                 exit = shrinkVertically() + fadeOut(),
             ) {
-                ExpandedDetail(progress = progress, onCancel = onCancel)
+                ExpandedDetail(progress, summary, onCancel)
             }
         }
     }
 }
 
-/**
- * 展开区域的详情信息（Phase 5.3 增强版）。
- * 显示：阶段统计、文件统计、状态、处理速率、ETA、错误信息、取消按钮。
- */
 @Composable
 private fun ExpandedDetail(
     progress: AnalysisProgress,
+    summary: ProgressSummary,
     onCancel: (() -> Unit)?,
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .padding(bottom = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // 阶段统计
-        DetailRow(
-            label = "阶段",
-            value = "${progress.completedStages} / ${progress.totalStages} 完成",
-        )
-        DetailRow(
-            label = "文件",
-            value = "${progress.processedFiles} / ${progress.totalFiles} 已处理",
-        )
+        DetailRow("总体进度", "${progress.processedFiles} / ${progress.totalFiles}（剩余 ${summary.remainingFiles}）")
+        DetailRow("分析项目", "${progress.completedStages} / ${progress.totalStages} 已完成")
+        DetailRow("预计完成", summary.etaText)
 
-        // ETA 尚未采集到足够样本时也保留该行，避免 UI 出现空白字段。
-        DetailRow(
-            label = "预估剩余",
-            value = when {
-                progress.isCompleted || progress.etaMs == 0L -> "即将完成"
-                progress.etaMs > 0L -> formatEta(progress.etaMs)
-                else -> "计算中…"
-            },
-        )
-
-        DetailRow(
-            label = "状态",
-            value = when {
-                progress.hasError -> "出错"
-                progress.isCompleted -> "已完成"
-                else -> "进行中"
-            },
-        )
-
-        // 错误信息
-        if (progress.hasError && progress.extra.isNotEmpty()) {
-            val errorMsg = progress.extra["error"]
-            val failedStage = progress.extra["failedStage"]
-            if (errorMsg != null || failedStage != null) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = buildString {
-                        if (failedStage != null) append("阶段 $failedStage 失败")
-                        if (errorMsg != null && failedStage != null) append(": ")
-                        if (errorMsg != null) append(errorMsg)
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
+        progress.perStageFiles.values
+            .filter { it.totalCount > 0 && it.completedCount < it.totalCount }
+            .take(3)
+            .forEach { stage ->
+                DetailRow(stage.displayName, "${stage.completedCount} / ${stage.totalCount}")
             }
+
+        summary.currentFileName?.let { fileName ->
+            Text(
+                text = "当前：$fileName",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
 
-        // 取消按钮（仅在进行中且未出错时显示）
-        if (onCancel != null && !progress.isCompleted && !progress.hasError) {
-            Spacer(Modifier.height(8.dp))
+        if (progress.hasError) {
+            Text(
+                text = progress.extra["error"] ?: "部分分析任务执行失败",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        Text(
+            text = "按住卡片可拖到屏幕其他位置，点击标题可收起",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.outline,
+        )
+
+        if (onCancel != null && !progress.hasError) {
             Button(
                 onClick = onCancel,
                 modifier = Modifier.fillMaxWidth(),
@@ -277,45 +286,24 @@ private fun ExpandedDetail(
                     containerColor = MaterialTheme.colorScheme.errorContainer,
                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
                 ),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(10.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Default.Cancel,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                )
+                Icon(Icons.Default.Cancel, null, Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("取消分析", style = MaterialTheme.typography.labelMedium)
+                Text("停止本次分析")
             }
         }
     }
 }
 
-/**
- * 详情行：标签-值对。
- */
 @Composable
 private fun DetailRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
-/**
- * 状态图标组件。
- */
 @Composable
 private fun StatusIcon(progress: AnalysisProgress) {
     val (icon, tint) = when {
@@ -323,28 +311,35 @@ private fun StatusIcon(progress: AnalysisProgress) {
         progress.isCompleted -> Icons.Default.CheckCircle to MaterialTheme.colorScheme.primary
         else -> Icons.Default.PlayArrow to MaterialTheme.colorScheme.primary
     }
-
-    Icon(
-        imageVector = icon,
-        contentDescription = when {
-            progress.hasError -> "出错"
-            progress.isCompleted -> "完成"
-            else -> "进行中"
-        },
-        tint = tint,
-        modifier = Modifier.size(24.dp),
-    )
+    Icon(icon, if (progress.hasError) "出错" else "进行中", tint = tint, modifier = Modifier.size(24.dp))
 }
 
-/**
- * 构建底部元信息文本。
- */
-private fun buildMetaText(progress: AnalysisProgress): String {
-    val parts = mutableListOf<String>()
-    parts.add("${progress.processedFiles} / ${progress.totalFiles} 文件")
-    parts.add("${progress.completedStages} / ${progress.totalStages} 阶段")
-    parts.add(if (progress.etaMs > 0) formatEta(progress.etaMs) else "预计时间计算中…")
-    return parts.joinToString(" · ")
+internal data class ProgressSummary(
+    val percent: Int,
+    val remainingFiles: Int,
+    val etaText: String,
+    val compactText: String,
+    val currentFileName: String?,
+)
+
+internal fun buildProgressSummary(progress: AnalysisProgress): ProgressSummary {
+    val remaining = (progress.totalFiles - progress.processedFiles).coerceAtLeast(0)
+    val eta = when {
+        progress.etaMs > 0 -> formatEta(progress.etaMs)
+        progress.percent <= 0f -> "正在统计任务…"
+        else -> "正在估算…"
+    }
+    val currentFile = progress.perStageFiles.values.asSequence()
+        .flatMap { it.files.asSequence() }
+        .firstOrNull { it.status == com.renyxin.localalbum.core.pipeline.FileProcessingStatus.PROCESSING }
+        ?.filePath?.substringAfterLast('/')
+    return ProgressSummary(
+        percent = (progress.percent.coerceIn(0f, 1f) * 100).toInt(),
+        remainingFiles = remaining,
+        etaText = eta,
+        compactText = "剩余 $remaining 个文件 · ${progress.completedStages}/${progress.totalStages} 项完成 · $eta",
+        currentFileName = currentFile,
+    )
 }
 
 /**
