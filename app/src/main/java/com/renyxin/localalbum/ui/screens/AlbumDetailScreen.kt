@@ -109,13 +109,16 @@ fun AlbumDetailScreen(
     mediaPaging: (DirectoryMediaQuery) -> Flow<PagingData<MediaItem>>,
     onBack: () -> Unit,
     onMediaClick: (MediaItem, DirectoryMediaQuery) -> Unit,
+    sortMode: SortMode = SortMode.DATE_NEWEST,
+    onSortModeChange: (SortMode) -> Unit = {},
+    filter: MediaFilter = MediaFilter.ALL,
+    onFilterChange: (MediaFilter) -> Unit = {},
+    viewMode: ViewMode = ViewMode.GRID,
+    onViewModeChange: (ViewMode) -> Unit = {},
     onDeleteMediaItems: (List<String>) -> Unit = {},
     onBatchSetFavorite: (List<String>, Boolean) -> Unit = { _, _ -> },
     onSetCover: (String) -> Unit = {},
 ) {
-    var sortMode by remember { mutableStateOf(SortMode.DATE_NEWEST) }
-    var filter by remember { mutableStateOf(MediaFilter.ALL) }
-    var viewMode by remember { mutableStateOf(ViewMode.GRID) }
     var showSortMenu by remember { mutableStateOf(false) }
     var showFilterMenu by remember { mutableStateOf(false) }
 
@@ -297,7 +300,7 @@ fun AlbumDetailScreen(
                                             )
                                         },
                                         onClick = {
-                                            sortMode = mode
+                                            onSortModeChange(mode)
                                             showSortMenu = false
                                         },
                                     )
@@ -321,7 +324,7 @@ fun AlbumDetailScreen(
                                             )
                                         },
                                         onClick = {
-                                            filter = f
+                                            onFilterChange(f)
                                             showFilterMenu = false
                                         },
                                     )
@@ -329,7 +332,9 @@ fun AlbumDetailScreen(
                             }
                         }
                         IconButton(onClick = {
-                            viewMode = if (viewMode == ViewMode.GRID) ViewMode.DATE_GROUP else ViewMode.GRID
+                            onViewModeChange(
+                                if (viewMode == ViewMode.GRID) ViewMode.DATE_GROUP else ViewMode.GRID,
+                            )
                         }) {
                             Icon(
                                 imageVector = if (viewMode == ViewMode.GRID) Icons.Default.CalendarMonth else Icons.Default.GridView,

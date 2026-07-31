@@ -131,6 +131,9 @@ import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.ui.components.AlbumSyncStatusBanner
 import com.renyxin.localalbum.ui.components.DirectoryPickerDialog
 import com.renyxin.localalbum.ui.screens.AlbumDetailScreen
+import com.renyxin.localalbum.ui.screens.MediaFilter
+import com.renyxin.localalbum.ui.screens.SortMode
+import com.renyxin.localalbum.ui.screens.ViewMode
 import com.renyxin.localalbum.ui.screens.AiAnalysisPreferencesScreen
 import com.renyxin.localalbum.ui.screens.AnalysisPerformanceScreen
 import com.renyxin.localalbum.ui.screens.MediaViewerScreen
@@ -228,6 +231,10 @@ fun LocalAlbumApp(
     }
 
     var currentTab by remember { mutableIntStateOf(0) }
+    // 相册详情页会在进入查看器时离开组合树；将显示偏好提升到导航宿主，返回时才能恢复。
+    val albumSortModes = remember { mutableStateMapOf<String, SortMode>() }
+    val albumFilters = remember { mutableStateMapOf<String, MediaFilter>() }
+    val albumViewModes = remember { mutableStateMapOf<String, ViewMode>() }
     // 使用 back stack 管理导航历史，支持正确的返回行为
     var backStack by remember { mutableStateOf(listOf<Screen>(Screen.Main)) }
     val screen by remember { derivedStateOf { backStack.lastOrNull() ?: Screen.Main } }
@@ -303,10 +310,17 @@ fun LocalAlbumApp(
     ) { s ->
         when (s) {
         is Screen.AlbumDetail -> {
+            val albumStateKey = s.album.directoryPath
             AlbumDetailScreen(
                 album = s.album,
                 mediaPaging = albumViewModel::pagedMediaForDirectory,
                 onBack = { goBack() },
+                sortMode = albumSortModes[albumStateKey] ?: SortMode.DATE_NEWEST,
+                onSortModeChange = { albumSortModes[albumStateKey] = it },
+                filter = albumFilters[albumStateKey] ?: MediaFilter.ALL,
+                onFilterChange = { albumFilters[albumStateKey] = it },
+                viewMode = albumViewModes[albumStateKey] ?: ViewMode.GRID,
+                onViewModeChange = { albumViewModes[albumStateKey] = it },
                 onMediaClick = { item, directoryQuery ->
                     // 传递相册当前的目录、筛选及排序条件，使查看器能够重建完整媒体序列；
                     // initialPath 仍是定位点击项的唯一权威，Repository 会据此计算 initialKey。
