@@ -42,15 +42,8 @@ class FaceStage(
     override val dependencies = emptyList<String>()
     override val fileConcurrency = 2
 
+    private val faceClusterDao = faceClusterDao
     private val faceClusterer = FaceClusterer()
-    private val clusterAssigner = IncrementalFaceClusterAssigner(
-        mediaDao = mediaDao,
-        faceDao = faceDao,
-        faceClusterDao = faceClusterDao,
-        providerScope = faceProvider.providerId,
-        modelScope = "dim:${faceProvider.embeddingDim}",
-        faceClusterer = faceClusterer,
-    )
 
     companion object {
         /** SQL IN 参数安全上限。 */
@@ -163,8 +156,18 @@ class FaceStage(
                 }
             }
 
-            // 4. 与内置回退路径复用同一个有界增量归类服务。常规扫描不运行 DBSCAN；
-            // 未命中代表向量的人脸进入 pending 临时簇，等待显式人物维护任务处理。
+            // 4. 每个窗口按保存的用户偏好构造归类器，确保首次聚类与增量匹配成组变化。
+            val facePreferences = com.renyxin.localalbum.core.analysis.AiAnalysisPreferencesRuntime.current
+            val grouping = facePreferences.faceGroupingStrictness
+            val clusterAssigner = IncrementalFaceClusterAssigner(
+                mediaDao = mediaDao,
+                faceDao = faceDao,
+                faceClusterDao = faceClusterDao,
+                providerScope = faceProvider.providerId,
+                modelScope = "dim:${faceProvider.embeddingDim}",
+                faceClusterer = FaceClusterer(grouping.clusterEps, facePreferences.faceMinimumGroupSize),
+                matchEps = grouping.matchEps,
+            )
             val assignment = if (allFaceEntities.isNotEmpty()) {
                 clusterAssigner.assign(filePaths)
             } else {

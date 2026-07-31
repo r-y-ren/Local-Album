@@ -43,6 +43,30 @@ class SettingsStore(private val context: Context) {
         prefs[KEY_ANALYSIS_SCHEDULING_MODE] ?: 0
     }
 
+    val faceGroupingStrictness: Flow<Int> = store.data.map { prefs ->
+        prefs[KEY_FACE_GROUPING_STRICTNESS] ?: 1
+    }
+
+    val faceMinimumGroupSize: Flow<Int> = store.data.map { prefs ->
+        prefs[KEY_FACE_MINIMUM_GROUP_SIZE] ?: 2
+    }
+
+    val ocrAnalysisScope: Flow<Int> = store.data.map { prefs ->
+        prefs[KEY_OCR_ANALYSIS_SCOPE] ?: 0
+    }
+
+    val semanticSearchStrictness: Flow<Int> = store.data.map { prefs ->
+        prefs[KEY_SEMANTIC_SEARCH_STRICTNESS] ?: 1
+    }
+
+    val semanticSearchResultCount: Flow<Int> = store.data.map { prefs ->
+        prefs[KEY_SEMANTIC_SEARCH_RESULT_COUNT] ?: 50
+    }
+
+    val recommendationPreference: Flow<Int> = store.data.map { prefs ->
+        prefs[KEY_RECOMMENDATION_PREFERENCE] ?: 0
+    }
+
     val onboardingCompleted: Flow<Boolean> = store.data.map { prefs ->
         prefs[KEY_ONBOARDING_COMPLETED] ?: false
     }
@@ -82,6 +106,24 @@ class SettingsStore(private val context: Context) {
     suspend fun setAnalysisSchedulingMode(mode: Int) {
         store.edit { prefs ->
             prefs[KEY_ANALYSIS_SCHEDULING_MODE] = mode.coerceIn(0, 3)
+        }
+    }
+
+    suspend fun setAiAnalysisPreferences(
+        faceGroupingStrictness: Int,
+        faceMinimumGroupSize: Int,
+        ocrAnalysisScope: Int,
+        semanticSearchStrictness: Int,
+        semanticSearchResultCount: Int,
+        recommendationPreference: Int,
+    ) {
+        store.edit { prefs ->
+            prefs[KEY_FACE_GROUPING_STRICTNESS] = faceGroupingStrictness.coerceIn(0, 2)
+            prefs[KEY_FACE_MINIMUM_GROUP_SIZE] = faceMinimumGroupSize.coerceIn(1, 5)
+            prefs[KEY_OCR_ANALYSIS_SCOPE] = ocrAnalysisScope.coerceIn(0, 2)
+            prefs[KEY_SEMANTIC_SEARCH_STRICTNESS] = semanticSearchStrictness.coerceIn(0, 2)
+            prefs[KEY_SEMANTIC_SEARCH_RESULT_COUNT] = semanticSearchResultCount.coerceIn(20, 100)
+            prefs[KEY_RECOMMENDATION_PREFERENCE] = recommendationPreference.coerceIn(0, 4)
         }
     }
 
@@ -130,6 +172,12 @@ class SettingsStore(private val context: Context) {
         val KEY_IGNORE_DIRS = stringSetPreferencesKey("ignore_dirs")
         val KEY_THEME_MODE = intPreferencesKey("theme_mode")
         val KEY_ANALYSIS_SCHEDULING_MODE = intPreferencesKey("analysis_scheduling_mode")
+        val KEY_FACE_GROUPING_STRICTNESS = intPreferencesKey("face_grouping_strictness")
+        val KEY_FACE_MINIMUM_GROUP_SIZE = intPreferencesKey("face_minimum_group_size")
+        val KEY_OCR_ANALYSIS_SCOPE = intPreferencesKey("ocr_analysis_scope")
+        val KEY_SEMANTIC_SEARCH_STRICTNESS = intPreferencesKey("semantic_search_strictness")
+        val KEY_SEMANTIC_SEARCH_RESULT_COUNT = intPreferencesKey("semantic_search_result_count")
+        val KEY_RECOMMENDATION_PREFERENCE = intPreferencesKey("recommendation_preference")
         val KEY_ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
         val KEY_SHOW_NOMEDIA = booleanPreferencesKey("show_nomedia")
         val KEY_ALBUM_SORT = intPreferencesKey("album_sort")

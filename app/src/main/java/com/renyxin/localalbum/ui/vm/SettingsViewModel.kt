@@ -2,6 +2,8 @@ package com.renyxin.localalbum.ui.vm
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.renyxin.localalbum.core.analysis.AiAnalysisPreferences
+import com.renyxin.localalbum.core.analysis.AiAnalysisPreferencesRuntime
 import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingMode
 import com.renyxin.localalbum.data.repo.SettingsRepository
 import com.renyxin.localalbum.data.repo.SettingsState
@@ -29,6 +31,11 @@ class SettingsViewModel(
     fun setThemeMode(mode: Int) = viewModelScope.launch { repository.setThemeMode(mode) }
     fun setAnalysisSchedulingMode(mode: AnalysisSchedulingMode) = viewModelScope.launch {
         repository.setAnalysisSchedulingMode(mode)
+    }
+    fun setAiAnalysisPreferences(preferences: AiAnalysisPreferences) = viewModelScope.launch {
+        val normalized = preferences.normalized()
+        repository.setAiAnalysisPreferences(normalized)
+        AiAnalysisPreferencesRuntime.update(normalized)
     }
     fun setOnboardingCompleted(completed: Boolean) = viewModelScope.launch {
         repository.setOnboardingCompleted(completed)

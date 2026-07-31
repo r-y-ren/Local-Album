@@ -89,7 +89,26 @@ class RecommendationEngine(
             result += recommender.generate()
         }
 
-        return result.sortedByDescending { it.score }
+        val preference = com.renyxin.localalbum.core.analysis.AiAnalysisPreferencesRuntime.current
+            .recommendationPreference
+        return result.sortedByDescending { recommendation ->
+            when (preference) {
+                com.renyxin.localalbum.core.analysis.RecommendationPreference.BALANCED -> recommendation.score
+                com.renyxin.localalbum.core.analysis.RecommendationPreference.QUALITY ->
+                    recommendation.score + recommendation.avgQualityScore * 0.35
+                com.renyxin.localalbum.core.analysis.RecommendationPreference.FAVORITES ->
+                    recommendation.score +
+                        recommendation.favoriteCount.toDouble() / recommendation.mediaItems.size.coerceAtLeast(1) * 0.35
+                com.renyxin.localalbum.core.analysis.RecommendationPreference.MEMORIES ->
+                    recommendation.score + (recommendation.mediaItems.minOfOrNull { it.capturedAt.epochSecond }
+                        ?.let { oldest -> ((Instant.now(clock).epochSecond - oldest) / 31_536_000.0).coerceAtMost(1.0) * 0.35 }
+                        ?: 0.0)
+                com.renyxin.localalbum.core.analysis.RecommendationPreference.RECENT ->
+                    recommendation.score + (recommendation.mediaItems.maxOfOrNull { it.capturedAt.epochSecond }
+                        ?.let { newest -> (1.0 - ((Instant.now(clock).epochSecond - newest) / 2_592_000.0).coerceIn(0.0, 1.0)) * 0.35 }
+                        ?: 0.0)
+            }
+        }
     }
 
     // ---- 单相册推荐 ----

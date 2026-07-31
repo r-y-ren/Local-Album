@@ -7,6 +7,12 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.renyxin.localalbum.LocalAlbumApplication
+import com.renyxin.localalbum.core.analysis.AiAnalysisPreferences
+import com.renyxin.localalbum.core.analysis.AiAnalysisPreferencesRuntime
+import com.renyxin.localalbum.core.analysis.FaceGroupingStrictness
+import com.renyxin.localalbum.core.analysis.OcrAnalysisScope
+import com.renyxin.localalbum.core.analysis.RecommendationPreference
+import com.renyxin.localalbum.core.analysis.SemanticSearchStrictness
 import com.renyxin.localalbum.core.concurrent.AnalysisDeviceCapabilityDetector
 import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingMode
 import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingResolver
@@ -38,6 +44,23 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
             AnalysisDeviceCapabilityDetector.detect(applicationContext),
         )
         AnalysisSchedulingRuntime.update(schedulingProfile)
+        val settings = SettingsStore(applicationContext)
+        AiAnalysisPreferencesRuntime.update(
+            AiAnalysisPreferences(
+                faceGroupingStrictness = FaceGroupingStrictness.fromPersistedValue(
+                    settings.faceGroupingStrictness.first(),
+                ),
+                faceMinimumGroupSize = settings.faceMinimumGroupSize.first(),
+                ocrAnalysisScope = OcrAnalysisScope.fromPersistedValue(settings.ocrAnalysisScope.first()),
+                semanticSearchStrictness = SemanticSearchStrictness.fromPersistedValue(
+                    settings.semanticSearchStrictness.first(),
+                ),
+                semanticSearchResultCount = settings.semanticSearchResultCount.first(),
+                recommendationPreference = RecommendationPreference.fromPersistedValue(
+                    settings.recommendationPreference.first(),
+                ),
+            ),
+        )
         // 一次 Worker 先领取一个有界窗口，再让每个模型阶段连续处理整个窗口。
         // 相比每 250 条完整切换五个阶段，该方式不增加模型峰值驻留，却将模型加载/卸载轮次
         // 最多降低到原来的 1/MAX_BATCHES_PER_RUN。每个租约仍独立提交，保持恢复语义不变。

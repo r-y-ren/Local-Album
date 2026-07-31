@@ -48,6 +48,25 @@ class OcrStage(
         filePaths: List<String>,
         enhancedCallback: EnhancedProgressCallback,
     ): StageResult {
+        val scope = com.renyxin.localalbum.core.analysis.AiAnalysisPreferencesRuntime.current.ocrAnalysisScope
+        val targetPaths = when (scope) {
+            com.renyxin.localalbum.core.analysis.OcrAnalysisScope.ALL_MEDIA -> filePaths
+            com.renyxin.localalbum.core.analysis.OcrAnalysisScope.DISABLED -> emptyList()
+            com.renyxin.localalbum.core.analysis.OcrAnalysisScope.DOCUMENTS_AND_SCREENSHOTS ->
+                filePaths.filter { path ->
+                    val scene = mediaDao.getByFilePathLight(path)?.sceneType.orEmpty().lowercase()
+                    scene.contains("document") || scene.contains("screenshot") ||
+                        scene.contains("text") || scene.contains("文档") || scene.contains("截图")
+                }
+        }
+        if (targetPaths.isEmpty()) {
+            enhancedCallback(filePaths.size, filePaths.size, null, null)
+            return StageResult(
+                successCount = filePaths.size,
+                failedCount = 0,
+                extra = mapOf("textFound" to "0", "scope" to scope.name),
+            )
+        }
         // 文件级并行 OCR 识别
         // 修复：使用 setOcrText 仅写入 ocrText 字段，避免覆盖同层并行执行的
         // SceneStage/QualityStage 已写入的 sceneType/qualityScore（DAG Layer 0 竞态）。
@@ -57,8 +76,10 @@ class OcrStage(
         // 触发 libonnxruntime.so 内部 SIGSEGV（ARM MTE use-after-free）。
         // 串行化 OCR 推理避免此问题，OCR 阶段耗时原本就由模型推理主导。
         val results = ParallelFileProcessor.mapParallel(
-            filePaths,
-            enhancedCallback,
+            targetPaths,
+            { processed, _, path, status ->
+                enhancedCallback(processed, targetPaths.size, path, status)
+            },
             concurrency = com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime
                 .effectiveStageConcurrency(stageId, fileConcurrency),
         ) { path ->
@@ -80,6 +101,7 @@ class OcrStage(
             extra = mapOf(
                 "textFound" to textCount.toString(),
                 "providerId" to ocrProvider.providerId,
+                "scope" to scope.name,
             ),
         )
     }

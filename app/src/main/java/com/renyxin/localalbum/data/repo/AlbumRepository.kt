@@ -693,7 +693,12 @@ class AlbumRepository(
         }
 
         _semanticSearchState.value = SemanticSearchState.SEARCHING
-        val diagnostics = searcher.searchDetailed(query.trim())
+        val searchPreferences = com.renyxin.localalbum.core.analysis.AiAnalysisPreferencesRuntime.current
+        val diagnostics = searcher.searchDetailed(
+            query = query.trim(),
+            topK = searchPreferences.semanticSearchResultCount,
+            minSimilarity = searchPreferences.semanticSearchStrictness.minSimilarity,
+        )
 
         if (!diagnostics.queryEncoded) {
             Log.w(TAG, "语义搜索：CLIP 查询文本编码失败（模型可能未加载），索引 ${diagnostics.indexSize} 条")

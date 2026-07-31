@@ -129,6 +129,7 @@ import com.renyxin.localalbum.core.recommendation.Recommendation
 import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.ui.components.DirectoryPickerDialog
 import com.renyxin.localalbum.ui.screens.AlbumDetailScreen
+import com.renyxin.localalbum.ui.screens.AiAnalysisPreferencesScreen
 import com.renyxin.localalbum.ui.screens.AnalysisPerformanceScreen
 import com.renyxin.localalbum.ui.screens.MediaViewerScreen
 import com.renyxin.localalbum.ui.screens.OnboardingScreen
@@ -192,6 +193,7 @@ sealed interface Screen {
     data object Recommendations : Screen
     data object PluginManager : Screen
     data object AnalysisPerformance : Screen
+    data object AiAnalysisPreferences : Screen
     data object FaceSwap : Screen
     data object ModelImportWizard : Screen
     data class ModelJsonEditor(val pluginId: String) : Screen
@@ -215,6 +217,12 @@ fun LocalAlbumApp(
             2 -> ThemeMode.Dark
             else -> ThemeMode.System
         }
+    }
+
+    LaunchedEffect(settingsState.aiAnalysisPreferences) {
+        com.renyxin.localalbum.core.analysis.AiAnalysisPreferencesRuntime.update(
+            settingsState.aiAnalysisPreferences,
+        )
     }
 
     var currentTab by remember { mutableIntStateOf(0) }
@@ -551,6 +559,14 @@ fun LocalAlbumApp(
             )
         }
 
+        is Screen.AiAnalysisPreferences -> {
+            AiAnalysisPreferencesScreen(
+                savedPreferences = settingsState.aiAnalysisPreferences,
+                onSave = settingsViewModel::setAiAnalysisPreferences,
+                onBack = { goBack() },
+            )
+        }
+
         is Screen.FaceSwap -> {
             FaceSwapScreen(
                 viewModel = pluginViewModel,
@@ -790,6 +806,7 @@ private fun currentTabContent(
             onNavigateToRecommendations = { navigateTo(Screen.Recommendations) },
             onNavigateToPluginManager = { navigateTo(Screen.PluginManager) },
             onNavigateToAnalysisPerformance = { navigateTo(Screen.AnalysisPerformance) },
+            onNavigateToAiAnalysisPreferences = { navigateTo(Screen.AiAnalysisPreferences) },
         )
     }
 }
@@ -1794,6 +1811,7 @@ private fun SettingsTab(
     onNavigateToRecommendations: () -> Unit = {},
     onNavigateToPluginManager: () -> Unit = {},
     onNavigateToAnalysisPerformance: () -> Unit = {},
+    onNavigateToAiAnalysisPreferences: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -1896,6 +1914,27 @@ private fun SettingsTab(
                         trailingContent = {
                             Icon(Icons.Default.ChevronRight, contentDescription = null)
                         },
+                        colors = ListItemDefaults.colors(
+                            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        ),
+                    )
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    )
+                    ListItem(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(onClick = onNavigateToAiAnalysisPreferences),
+                        headlineContent = { Text("AI 识别与结果偏好") },
+                        supportingContent = { Text("调整人物归并、OCR、语义搜索和精选推荐") },
+                        leadingContent = {
+                            Icon(
+                                Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
+                        trailingContent = { Icon(Icons.Default.ChevronRight, contentDescription = null) },
                         colors = ListItemDefaults.colors(
                             containerColor = androidx.compose.ui.graphics.Color.Transparent,
                         ),

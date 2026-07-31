@@ -1,5 +1,10 @@
 package com.renyxin.localalbum.data.repo
 
+import com.renyxin.localalbum.core.analysis.AiAnalysisPreferences
+import com.renyxin.localalbum.core.analysis.FaceGroupingStrictness
+import com.renyxin.localalbum.core.analysis.OcrAnalysisScope
+import com.renyxin.localalbum.core.analysis.RecommendationPreference
+import com.renyxin.localalbum.core.analysis.SemanticSearchStrictness
 import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingMode
 import com.renyxin.localalbum.data.prefs.SettingsStore
 import kotlinx.coroutines.flow.Flow
@@ -13,6 +18,7 @@ data class SettingsState(
     val ignoreDirNames: List<String>,
     val themeMode: Int = 0,
     val analysisSchedulingMode: AnalysisSchedulingMode = AnalysisSchedulingMode.AUTO,
+    val aiAnalysisPreferences: AiAnalysisPreferences = AiAnalysisPreferences(),
     val onboardingCompleted: Boolean = false,
     val showNomediaDirectories: Boolean = false,
     /** 相册排序模式: 0=名称, 1=日期, 2=大小, 3=数量 */
@@ -29,6 +35,12 @@ class SettingsRepository(private val store: SettingsStore) {
         store.ignoreDirNames,
         store.themeMode,
         store.analysisSchedulingMode,
+        store.faceGroupingStrictness,
+        store.faceMinimumGroupSize,
+        store.ocrAnalysisScope,
+        store.semanticSearchStrictness,
+        store.semanticSearchResultCount,
+        store.recommendationPreference,
         store.onboardingCompleted,
         store.showNomediaDirectories,
         store.albumSortMode,
@@ -39,14 +51,23 @@ class SettingsRepository(private val store: SettingsStore) {
         val ignores = values[1] as List<String>
         val theme = values[2] as Int
         val schedulingMode = AnalysisSchedulingMode.fromPersistedValue(values[3] as Int)
-        val onboarding = values[4] as Boolean
-        val showNomedia = values[5] as Boolean
-        val albumSort = values[6] as Int
+        val aiPreferences = AiAnalysisPreferences(
+            faceGroupingStrictness = FaceGroupingStrictness.fromPersistedValue(values[4] as Int),
+            faceMinimumGroupSize = values[5] as Int,
+            ocrAnalysisScope = OcrAnalysisScope.fromPersistedValue(values[6] as Int),
+            semanticSearchStrictness = SemanticSearchStrictness.fromPersistedValue(values[7] as Int),
+            semanticSearchResultCount = values[8] as Int,
+            recommendationPreference = RecommendationPreference.fromPersistedValue(values[9] as Int),
+        ).normalized()
+        val onboarding = values[10] as Boolean
+        val showNomedia = values[11] as Boolean
+        val albumSort = values[12] as Int
         SettingsState(
             scanRoots = roots,
             ignoreDirNames = ignores,
             themeMode = theme,
             analysisSchedulingMode = schedulingMode,
+            aiAnalysisPreferences = aiPreferences,
             onboardingCompleted = onboarding,
             showNomediaDirectories = showNomedia,
             albumSortMode = albumSort,
@@ -58,6 +79,17 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun setThemeMode(mode: Int) = store.setThemeMode(mode)
     suspend fun setAnalysisSchedulingMode(mode: AnalysisSchedulingMode) =
         store.setAnalysisSchedulingMode(mode.persistedValue)
+    suspend fun setAiAnalysisPreferences(preferences: AiAnalysisPreferences) {
+        val value = preferences.normalized()
+        store.setAiAnalysisPreferences(
+            value.faceGroupingStrictness.persistedValue,
+            value.faceMinimumGroupSize,
+            value.ocrAnalysisScope.persistedValue,
+            value.semanticSearchStrictness.persistedValue,
+            value.semanticSearchResultCount,
+            value.recommendationPreference.persistedValue,
+        )
+    }
     suspend fun setOnboardingCompleted(completed: Boolean) = store.setOnboardingCompleted(completed)
     suspend fun addScanRoot(path: String) = store.addScanRoot(path)
     suspend fun removeScanRoot(path: String) = store.removeScanRoot(path)
