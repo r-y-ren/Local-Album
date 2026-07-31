@@ -57,7 +57,10 @@ class OcrStage(
         // 触发 libonnxruntime.so 内部 SIGSEGV（ARM MTE use-after-free）。
         // 串行化 OCR 推理避免此问题，OCR 阶段耗时原本就由模型推理主导。
         val results = ParallelFileProcessor.mapParallel(
-            filePaths, enhancedCallback, concurrency = fileConcurrency,
+            filePaths,
+            enhancedCallback,
+            concurrency = com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime
+                .effectiveStageConcurrency(stageId, fileConcurrency),
         ) { path ->
             val result = ocrProvider.recognize(File(path))
             val ocrText = if (result.fullText.isNotBlank()) result.fullText.take(500) else null

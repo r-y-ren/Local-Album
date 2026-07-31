@@ -38,6 +38,11 @@ class SettingsStore(private val context: Context) {
         prefs[KEY_THEME_MODE] ?: 0
     }
 
+    /** 分析调度模式: 0=自动, 1=稳定, 2=均衡, 3=性能 */
+    val analysisSchedulingMode: Flow<Int> = store.data.map { prefs ->
+        prefs[KEY_ANALYSIS_SCHEDULING_MODE] ?: 0
+    }
+
     val onboardingCompleted: Flow<Boolean> = store.data.map { prefs ->
         prefs[KEY_ONBOARDING_COMPLETED] ?: false
     }
@@ -71,6 +76,12 @@ class SettingsStore(private val context: Context) {
     suspend fun setThemeMode(mode: Int) {
         store.edit { prefs ->
             prefs[KEY_THEME_MODE] = mode.coerceIn(0, 2)
+        }
+    }
+
+    suspend fun setAnalysisSchedulingMode(mode: Int) {
+        store.edit { prefs ->
+            prefs[KEY_ANALYSIS_SCHEDULING_MODE] = mode.coerceIn(0, 3)
         }
     }
 
@@ -118,6 +129,7 @@ class SettingsStore(private val context: Context) {
         val KEY_SCAN_ROOTS = stringSetPreferencesKey("scan_roots")
         val KEY_IGNORE_DIRS = stringSetPreferencesKey("ignore_dirs")
         val KEY_THEME_MODE = intPreferencesKey("theme_mode")
+        val KEY_ANALYSIS_SCHEDULING_MODE = intPreferencesKey("analysis_scheduling_mode")
         val KEY_ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
         val KEY_SHOW_NOMEDIA = booleanPreferencesKey("show_nomedia")
         val KEY_ALBUM_SORT = intPreferencesKey("album_sort")

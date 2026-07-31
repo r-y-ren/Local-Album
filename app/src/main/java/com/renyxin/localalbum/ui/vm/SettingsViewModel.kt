@@ -2,6 +2,7 @@ package com.renyxin.localalbum.ui.vm
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingMode
 import com.renyxin.localalbum.data.repo.SettingsRepository
 import com.renyxin.localalbum.data.repo.SettingsState
 import kotlinx.coroutines.flow.SharingStarted
@@ -26,6 +27,9 @@ class SettingsViewModel(
     )
 
     fun setThemeMode(mode: Int) = viewModelScope.launch { repository.setThemeMode(mode) }
+    fun setAnalysisSchedulingMode(mode: AnalysisSchedulingMode) = viewModelScope.launch {
+        repository.setAnalysisSchedulingMode(mode)
+    }
     fun setOnboardingCompleted(completed: Boolean) = viewModelScope.launch {
         repository.setOnboardingCompleted(completed)
     }

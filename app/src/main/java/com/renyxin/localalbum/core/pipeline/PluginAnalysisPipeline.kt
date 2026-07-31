@@ -501,6 +501,7 @@ class PluginAnalysisPipeline(
         val face = indexedStages[AnalysisStage.STAGE_FACE]
         val quality = indexedStages[AnalysisStage.STAGE_QUALITY]
         val safelyPairedIds = if (
+            com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime.profile.allowFaceQualityParallel &&
             face != null && quality != null &&
             face.value.dependencies.isEmpty() && quality.value.dependencies.isEmpty()
         ) {

@@ -90,7 +90,8 @@ class SemanticStage(
                         // 累计进度，避免 UI 在批次切换时回退或停留在首批进度。
                         enhancedCallback(batchOffset + processed, total, path, status)
                     },
-                    concurrency = fileConcurrency,
+                    concurrency = com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime
+                        .effectiveStageConcurrency(stageId, fileConcurrency),
                 ) { path ->
                     val entity = mediaDao.getByFilePathLight(path)
                     val context = SemanticEmbedProvider.ImageContext(

@@ -46,7 +46,8 @@ class QualityStage(
         val results = ParallelFileProcessor.mapParallel(
             filePaths,
             enhancedCallback,
-            concurrency = fileConcurrency,
+            concurrency = com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime
+                .effectiveStageConcurrency(stageId, fileConcurrency),
         ) { path ->
             val result = qualityProvider.assess(File(path))
             mediaDao.setQualityScore(path, result.overall)

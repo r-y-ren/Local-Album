@@ -48,7 +48,8 @@ class SceneStage(
         val results = ParallelFileProcessor.mapParallel(
             filePaths,
             enhancedCallback,
-            concurrency = fileConcurrency,
+            concurrency = com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime
+                .effectiveStageConcurrency(stageId, fileConcurrency),
         ) { path ->
             val result = sceneProvider.classify(File(path))
             mediaDao.setSceneType(path, result.topLabel.lowercase())

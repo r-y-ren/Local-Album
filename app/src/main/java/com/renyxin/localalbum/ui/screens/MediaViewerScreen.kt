@@ -102,15 +102,19 @@ fun MediaViewerScreen(
 ) {
     val mediaItems = mediaPaging.collectAsLazyPagingItems()
     if (mediaItems.itemCount == 0) return
-    val initialIndex = mediaItems.itemSnapshotList.items.indexOfFirst { it.filePath == initialPath }
-        .takeIf { it >= 0 } ?: 0
+    val snapshot = mediaItems.itemSnapshotList
+    val initialIndex = snapshot.items.indexOfFirst { it.filePath == initialPath }
+        .takeIf { it >= 0 }
+        ?.let { snapshot.placeholdersBefore + it }
+        ?: 0
     val pagerState = rememberPagerState(initialPage = initialIndex) { mediaItems.itemCount }
     var initialPathPositioned by remember(initialPath) { mutableStateOf(false) }
-    LaunchedEffect(initialPath, mediaItems.itemSnapshotList.items) {
+    LaunchedEffect(initialPath, snapshot.items, snapshot.placeholdersBefore) {
         if (!initialPathPositioned) {
-            val loadedIndex = mediaItems.itemSnapshotList.items.indexOfFirst { it.filePath == initialPath }
+            val loadedIndex = snapshot.items.indexOfFirst { it.filePath == initialPath }
             if (loadedIndex >= 0) {
-                pagerState.scrollToPage(loadedIndex)
+                // snapshot.items 不包含占位符，Pager 页码则是完整数据集中的绝对索引。
+                pagerState.scrollToPage(snapshot.placeholdersBefore + loadedIndex)
                 initialPathPositioned = true
             }
         }

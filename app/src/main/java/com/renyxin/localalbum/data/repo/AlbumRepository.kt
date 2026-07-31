@@ -265,6 +265,18 @@ class AlbumRepository(
         initialLoadSize = 100,
     )
 
+    /**
+     * 查看器需要占位符来保留数据库中的绝对索引和总数。
+     * 这样从图库中部打开文件时，Pager 既能准确显示“当前位置 / 总数”，
+     * 也能在当前加载窗口边界继续向前、向后加载。
+     */
+    private val viewerPagingConfig = PagingConfig(
+        pageSize = 50,
+        prefetchDistance = 20,
+        enablePlaceholders = true,
+        initialLoadSize = 100,
+    )
+
     val pagedMedia: Flow<PagingData<MediaItem>> = Pager(
         config = mediaPagingConfig,
         pagingSourceFactory = { mediaDao.pagingSource() },
@@ -369,7 +381,7 @@ class AlbumRepository(
                 else -> error("Unsupported paging context: $context")
             }
             emitAll(
-                Pager(mediaPagingConfig, initialKey = initialKey, pagingSourceFactory = source)
+                Pager(viewerPagingConfig, initialKey = initialKey, pagingSourceFactory = source)
                     .flow.map { data -> data.map { it.toMediaItem() } }
             )
         }

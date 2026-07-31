@@ -4,6 +4,7 @@ import androidx.paging.PagingSource
 import androidx.room.Room
 import androidx.sqlite.db.SimpleSQLiteQuery
 import androidx.test.core.app.ApplicationProvider
+import com.renyxin.localalbum.core.model.DirectoryMediaAnchor
 import com.renyxin.localalbum.core.model.DirectoryMediaQuery
 import com.renyxin.localalbum.core.model.DirectoryMediaQueryMapper
 import com.renyxin.localalbum.core.model.DirectoryMediaSort
@@ -72,6 +73,37 @@ class DirectoryMediaPagingTest {
             listOf("/album/b.mp4"),
             load(DirectoryMediaQuery("/album", MediaType.VIDEO, DirectoryMediaSort.NAME_ASC)),
         )
+    }
+
+    @Test
+    fun viewerOffsetMatchesClickedItemInCurrentAlbumOrderAndFilter() = runBlocking {
+        val query = DirectoryMediaQuery(
+            directoryPath = "/album",
+            mediaType = MediaType.IMAGE,
+            sort = DirectoryMediaSort.DATE_ASC,
+        )
+        val clicked = DirectoryMediaAnchor(
+            filePath = "/album/c.jpg",
+            fileName = "c.jpg",
+            capturedAtMs = 30,
+            modifiedAtMs = 10,
+            fileSize = 100,
+        )
+        val spec = DirectoryMediaQueryMapper.offset(query, clicked)
+
+        assertEquals(
+            1,
+            database.mediaDao().directoryOffset(SimpleSQLiteQuery(spec.sql, spec.args.toTypedArray())),
+        )
+        assertEquals(
+            listOf("/album/A.jpg", "/album/c.jpg"),
+            load(query),
+        )
+    }
+
+    @Test
+    fun timelineOffsetMatchesAbsoluteViewerPosition() = runBlocking {
+        assertEquals(2, database.mediaDao().timelineOffset(20, "/album/b.mp4"))
     }
 
     private suspend fun load(query: DirectoryMediaQuery): List<String> {

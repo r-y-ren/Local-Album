@@ -90,7 +90,8 @@ class FaceStage(
             val results = ParallelFileProcessor.mapParallel(
                 filePaths,
                 enhancedCallback,
-                concurrency = fileConcurrency,
+                concurrency = com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime
+                    .effectiveStageConcurrency(stageId, fileConcurrency),
             ) { path ->
                 val faces = faceProvider.detectFaces(File(path))
                 faces.map { face ->

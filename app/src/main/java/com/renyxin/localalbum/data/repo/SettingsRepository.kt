@@ -1,5 +1,6 @@
 package com.renyxin.localalbum.data.repo
 
+import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingMode
 import com.renyxin.localalbum.data.prefs.SettingsStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -11,6 +12,7 @@ data class SettingsState(
     val scanRoots: List<String>,
     val ignoreDirNames: List<String>,
     val themeMode: Int = 0,
+    val analysisSchedulingMode: AnalysisSchedulingMode = AnalysisSchedulingMode.AUTO,
     val onboardingCompleted: Boolean = false,
     val showNomediaDirectories: Boolean = false,
     /** 相册排序模式: 0=名称, 1=日期, 2=大小, 3=数量 */
@@ -26,6 +28,7 @@ class SettingsRepository(private val store: SettingsStore) {
         store.scanRoots,
         store.ignoreDirNames,
         store.themeMode,
+        store.analysisSchedulingMode,
         store.onboardingCompleted,
         store.showNomediaDirectories,
         store.albumSortMode,
@@ -35,13 +38,15 @@ class SettingsRepository(private val store: SettingsStore) {
         @Suppress("UNCHECKED_CAST")
         val ignores = values[1] as List<String>
         val theme = values[2] as Int
-        val onboarding = values[3] as Boolean
-        val showNomedia = values[4] as Boolean
-        val albumSort = values[5] as Int
+        val schedulingMode = AnalysisSchedulingMode.fromPersistedValue(values[3] as Int)
+        val onboarding = values[4] as Boolean
+        val showNomedia = values[5] as Boolean
+        val albumSort = values[6] as Int
         SettingsState(
             scanRoots = roots,
             ignoreDirNames = ignores,
             themeMode = theme,
+            analysisSchedulingMode = schedulingMode,
             onboardingCompleted = onboarding,
             showNomediaDirectories = showNomedia,
             albumSortMode = albumSort,
@@ -51,6 +56,8 @@ class SettingsRepository(private val store: SettingsStore) {
     val gestureGuideShown: Flow<Boolean> = store.gestureGuideShown
 
     suspend fun setThemeMode(mode: Int) = store.setThemeMode(mode)
+    suspend fun setAnalysisSchedulingMode(mode: AnalysisSchedulingMode) =
+        store.setAnalysisSchedulingMode(mode.persistedValue)
     suspend fun setOnboardingCompleted(completed: Boolean) = store.setOnboardingCompleted(completed)
     suspend fun addScanRoot(path: String) = store.addScanRoot(path)
     suspend fun removeScanRoot(path: String) = store.removeScanRoot(path)

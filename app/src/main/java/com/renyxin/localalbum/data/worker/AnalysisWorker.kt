@@ -7,14 +7,20 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.renyxin.localalbum.LocalAlbumApplication
+import com.renyxin.localalbum.core.concurrent.AnalysisDeviceCapabilityDetector
+import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingMode
+import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingResolver
+import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime
 import com.renyxin.localalbum.core.pipeline.StageResult
 import com.renyxin.localalbum.data.db.entity.AnalysisTaskEntity
+import com.renyxin.localalbum.data.prefs.SettingsStore
 import java.util.UUID
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 
 /** 唯一、可恢复的持久分析任务消费者。 */
 class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
@@ -24,11 +30,19 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         val dao = container.database.analysisTaskDao()
         val pipeline = container.pluginAnalysisPipeline
         val scope = pipeline.pipelineScope
+        val requestedMode = AnalysisSchedulingMode.fromPersistedValue(
+            SettingsStore(applicationContext).analysisSchedulingMode.first(),
+        )
+        val schedulingProfile = AnalysisSchedulingResolver.resolve(
+            requestedMode,
+            AnalysisDeviceCapabilityDetector.detect(applicationContext),
+        )
+        AnalysisSchedulingRuntime.update(schedulingProfile)
         // 一次 Worker 先领取一个有界窗口，再让每个模型阶段连续处理整个窗口。
         // 相比每 250 条完整切换五个阶段，该方式不增加模型峰值驻留，却将模型加载/卸载轮次
         // 最多降低到原来的 1/MAX_BATCHES_PER_RUN。每个租约仍独立提交，保持恢复语义不变。
         val leasedGroups = mutableListOf<LeasedTaskGroup>()
-        repeat(MAX_BATCHES_PER_RUN) {
+        repeat(schedulingProfile.workerLeaseGroups.coerceIn(1, MAX_BATCHES_PER_RUN)) {
             if (isStopped) return@repeat
             val now = System.currentTimeMillis()
             val token = UUID.randomUUID().toString()

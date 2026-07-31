@@ -129,6 +129,7 @@ import com.renyxin.localalbum.core.recommendation.Recommendation
 import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.ui.components.DirectoryPickerDialog
 import com.renyxin.localalbum.ui.screens.AlbumDetailScreen
+import com.renyxin.localalbum.ui.screens.AnalysisPerformanceScreen
 import com.renyxin.localalbum.ui.screens.MediaViewerScreen
 import com.renyxin.localalbum.ui.screens.OnboardingScreen
 import com.renyxin.localalbum.ui.screens.SearchScreen
@@ -190,6 +191,7 @@ sealed interface Screen {
     data object Favorites : Screen
     data object Recommendations : Screen
     data object PluginManager : Screen
+    data object AnalysisPerformance : Screen
     data object FaceSwap : Screen
     data object ModelImportWizard : Screen
     data class ModelJsonEditor(val pluginId: String) : Screen
@@ -295,12 +297,12 @@ fun LocalAlbumApp(
                 album = s.album,
                 mediaPaging = albumViewModel::pagedMediaForDirectory,
                 onBack = { goBack() },
-                onMediaClick = { item, _ ->
-                    // 相册详情必须优先准确打开用户点击的媒体。目录 Paging 的 initialKey
-                    // 只决定加载窗口，并不保证目标项对应查看器索引 0，因此这里使用单项上下文。
+                onMediaClick = { item, directoryQuery ->
+                    // 传递相册当前的目录、筛选及排序条件，使查看器能够重建完整媒体序列；
+                    // initialPath 仍是定位点击项的唯一权威，Repository 会据此计算 initialKey。
                     navigateTo(Screen.MediaViewer(
                         initialPath = item.filePath,
-                        queryContext = MediaQueryContext.Single,
+                        queryContext = MediaQueryContext.Directory(directoryQuery),
                         returnTo = s,
                     ))
                 },
@@ -402,11 +404,10 @@ fun LocalAlbumApp(
                     pagedItems = pagedFavorites,
                     onThumbnailWindowChanged = albumViewModel::requestGridThumbnails,
                     onItemClick = { item ->
-                        // 点击路径是查看器的唯一权威，避免数据库绝对偏移与局部 Pager 索引错位。
                         navigateTo(
                             Screen.MediaViewer(
                                 initialPath = item.filePath,
-                                queryContext = MediaQueryContext.Single,
+                                queryContext = MediaQueryContext.Favorites,
                                 returnTo = s,
                             )
                         )
@@ -538,6 +539,14 @@ fun LocalAlbumApp(
             PluginManagerScreen(
                 viewModel = pluginViewModel,
                 onNavigateToFaceSwap = { navigateTo(Screen.FaceSwap) },
+                onBack = { goBack() },
+            )
+        }
+
+        is Screen.AnalysisPerformance -> {
+            AnalysisPerformanceScreen(
+                selectedMode = settingsState.analysisSchedulingMode,
+                onModeSelected = settingsViewModel::setAnalysisSchedulingMode,
                 onBack = { goBack() },
             )
         }
@@ -707,13 +716,12 @@ private fun currentTabContent(
         0 -> PhotosTab(
             viewModel = albumViewModel,
             onMediaClick = { item ->
-                // Timeline Paging 的 initialKey 是数据库绝对偏移，而查看器 Pager 页码是
-                // 当前加载窗口的局部索引，两者混用会使部分点击显示相邻或错误图片。
-                // 首页点击应以路径为唯一权威，直接加载被点击媒体。
+                // 传递时间线查询上下文，让查看器加载相邻媒体并支持左右滑动；
+                // initialPath 用于在分页窗口加载后精确定位用户点击的媒体。
                 navigateTo(
                     Screen.MediaViewer(
                         initialPath = item.filePath,
-                        queryContext = MediaQueryContext.Single,
+                        queryContext = MediaQueryContext.Timeline,
                         returnTo = Screen.Timeline,
                     )
                 )
@@ -781,6 +789,7 @@ private fun currentTabContent(
             onNavigateToTrash = { navigateTo(Screen.Trash) },
             onNavigateToRecommendations = { navigateTo(Screen.Recommendations) },
             onNavigateToPluginManager = { navigateTo(Screen.PluginManager) },
+            onNavigateToAnalysisPerformance = { navigateTo(Screen.AnalysisPerformance) },
         )
     }
 }
@@ -1784,6 +1793,7 @@ private fun SettingsTab(
     onNavigateToTrash: () -> Unit = {},
     onNavigateToRecommendations: () -> Unit = {},
     onNavigateToPluginManager: () -> Unit = {},
+    onNavigateToAnalysisPerformance: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -1856,6 +1866,29 @@ private fun SettingsTab(
                         leadingContent = {
                             Icon(
                                 Icons.Filled.PlayArrow,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
+                        trailingContent = {
+                            Icon(Icons.Default.ChevronRight, contentDescription = null)
+                        },
+                        colors = ListItemDefaults.colors(
+                            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        ),
+                    )
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    )
+                    ListItem(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(onClick = onNavigateToAnalysisPerformance),
+                        headlineContent = { Text("扫描与分析性能") },
+                        supportingContent = { Text("按设备能力选择稳定、均衡或性能调度") },
+                        leadingContent = {
+                            Icon(
+                                Icons.Default.Settings,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                             )
