@@ -180,7 +180,7 @@ class FaceDetector(
         embedding[idx++] = contourStats[0]
         embedding[idx++] = contourStats[1]
         embedding[idx++] = contourStats[2]
-        embedding[idx++] = contourStats[3]
+        embedding[idx] = contourStats[3]
 
         // L2 归一化
         return l2Normalize(embedding)

@@ -1031,9 +1031,6 @@ class PluginViewModel(
                     }
                 }
             }
-            null -> {
-                _message.value = "槽位或 Provider 不存在: $slotId/$providerId"
-            }
             else -> {
                 val success = capabilityRegistry.activateProvider(slotId, providerId)
                 if (success) {

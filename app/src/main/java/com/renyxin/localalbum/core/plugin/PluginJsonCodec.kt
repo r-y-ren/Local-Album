@@ -116,11 +116,11 @@ object PluginJsonCodec {
             outputTensors = outputTensors,
             preprocessing = preprocessing,
             postprocessing = postprocessing,
-            description = obj.optString("description", null),
+            description = obj.optNullableString("description"),
             enabled = obj.optBoolean("enabled", true),
             pipelineStage = obj.optString("pipelineStage", taskType.stageName),
             dependsOn = dependsOn,
-            authorizedCertificateFingerprint = obj.optString("authorizedCertificateFingerprint", null),
+            authorizedCertificateFingerprint = obj.optNullableString("authorizedCertificateFingerprint"),
         )
     }
 
@@ -202,7 +202,7 @@ object PluginJsonCodec {
         return PluginManifest.PostprocessingConfig(
             nmsThreshold = obj.optDouble("nmsThreshold", 0.0).toFloat(),
             confidenceThreshold = obj.optDouble("confidenceThreshold", 0.0).toFloat(),
-            labelMapPath = obj.optString("labelMapPath", null),
+            labelMapPath = obj.optNullableString("labelMapPath"),
             topK = obj.optInt("topK", 0),
         )
     }
@@ -273,7 +273,7 @@ object PluginJsonCodec {
             name = obj.requireString("name"),
             dataType = dataType,
             dims = dims,
-            description = obj.optString("description", null),
+            description = obj.optNullableString("description"),
         )
     }
 
@@ -424,7 +424,7 @@ object PluginJsonCodec {
             "image" -> {
                 PluginOutput.ImageOutput(
                     bitmap = null,
-                    outputPath = obj.optString("outputPath", null),
+                    outputPath = obj.optNullableString("outputPath"),
                     sourcePath = obj.requireString("sourcePath"),
                 )
             }
@@ -479,6 +479,11 @@ object PluginJsonCodec {
             throw PluginConfigException("缺少必填字段: $key")
         }
         return getString(key)
+    }
+
+    /** 安全获取可空 String 字段，字段缺失或 JSON null 时返回 null。 */
+    private fun JSONObject.optNullableString(key: String): String? {
+        return if (has(key) && !isNull(key)) getString(key) else null
     }
 
     /** 安全获取 JSONArray，不存在或类型不符时返回 null。 */

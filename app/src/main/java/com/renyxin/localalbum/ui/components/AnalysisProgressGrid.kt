@@ -164,7 +164,7 @@ fun AnalysisProgressGrid(
                     ProgressThumbnail(
                         filePath = fileProgress.filePath,
                         status = fileProgress.status,
-                        modifier = Modifier.animateItemPlacement(),
+                        modifier = Modifier.animateItem(),
                     )
                 }
 

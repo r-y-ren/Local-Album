@@ -37,6 +37,7 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -518,7 +519,7 @@ private fun StepEditConfig(viewModel: PluginViewModel) {
                 readOnly = true,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .menuAnchor(),
+                    .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true),
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = stagesExpanded) },
             )
             ExposedDropdownMenu(
@@ -805,7 +806,7 @@ private fun TensorSpecEditor(
                 readOnly = true,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .menuAnchor(),
+                    .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true),
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = dtypeExpanded) },
                 label = { Text("数据类型") },
             )

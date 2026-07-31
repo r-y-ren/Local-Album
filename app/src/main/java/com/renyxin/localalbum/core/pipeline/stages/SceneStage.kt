@@ -27,6 +27,7 @@ class SceneStage(
     override val stageType = StageType.BUILTIN
     override val displayName = "场景识别"
     override val dependencies = emptyList<String>()
+    override val fileConcurrency = 2
 
     override suspend fun execute(
         filePaths: List<String>,
@@ -43,8 +44,12 @@ class SceneStage(
     ): StageResult {
         val labelCounts = mutableMapOf<String, Int>()
 
-        // 文件级并行分类
-        val results = ParallelFileProcessor.mapParallel(filePaths, enhancedCallback) { path ->
+        // 与 TFLite Interpreter 池容量匹配，避免无收益的协程和 Bitmap 排队。
+        val results = ParallelFileProcessor.mapParallel(
+            filePaths,
+            enhancedCallback,
+            concurrency = fileConcurrency,
+        ) { path ->
             val result = sceneProvider.classify(File(path))
             mediaDao.setSceneType(path, result.topLabel.lowercase())
             result.topLabel

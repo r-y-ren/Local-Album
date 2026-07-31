@@ -104,9 +104,6 @@ fun TimelineScreen(
     var selectedYear by remember(items) { mutableIntStateOf(availableYears.lastOrNull() ?: 2024) }
     var showYearPicker by remember { mutableStateOf(false) }
 
-    // 检测当前可视年份，用于滑块同步
-    var currentVisibleYear by remember { mutableIntStateOf(availableYears.lastOrNull() ?: 2024) }
-
     Column(modifier = modifier.fillMaxSize()) {
         // Top App Bar
         TopAppBar(
@@ -521,7 +518,7 @@ fun PagedTimelineScreen(
                                 .aspectRatio(1f)
                                 .clip(RoundedCornerShape(2.dp))
                                 .clickable { onItemClick(it) }
-                                .animateItemPlacement(),
+                                .animateItem(),
                         ) {
                             PagedThumbnailCell(it)
                         }

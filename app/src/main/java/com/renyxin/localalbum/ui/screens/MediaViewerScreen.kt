@@ -176,7 +176,7 @@ fun MediaViewerScreen(
                 null
             }
         }
-        val item = currentItem!!
+        val item = currentItem
         AlertDialog(
             onDismissRequest = { showExifDialog = false },
             title = { Text("媒体信息") },
@@ -210,7 +210,7 @@ fun MediaViewerScreen(
                     Text("智能分析", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                     if (item.sceneType != null) {
                         Text(
-                            "场景类型: ${formatSceneType(item.sceneType!!)}",
+                            "场景类型: ${formatSceneType(item.sceneType)}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary,
                         )

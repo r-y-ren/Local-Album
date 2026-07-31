@@ -4,6 +4,7 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.renyxin.localalbum.core.concurrent.AccelerationBackend
 import com.renyxin.localalbum.core.concurrent.AccelerationPolicyRegistry
@@ -309,6 +310,7 @@ class ModelManagerImpl(
             }
 
             updateState(modelId, ModelManager.ModelStatus.LOADING)
+            val loadStartedAt = SystemClock.elapsedRealtime()
             try {
                 when (descriptor.runtime) {
                     ModelManager.ModelRuntime.TFLITE -> {
@@ -339,9 +341,29 @@ class ModelManagerImpl(
                 totalMemoryBytes += descriptor.memoryFootprintBytes
 
                 updateState(modelId, ModelManager.ModelStatus.LOADED, loadedInMemory = true)
-                Log.i(TAG, "模型加载成功: $modelId (${descriptor.runtime}, ${modelFile.length() / 1024}KB)")
+                val loadElapsedMs = SystemClock.elapsedRealtime() - loadStartedAt
+                InferenceMetrics.record(
+                    operation = "model:$modelId:load",
+                    backend = if (descriptor.runtime == ModelManager.ModelRuntime.TFLITE) {
+                        tfliteMetricsBackend(modelId)
+                    } else {
+                        onnxMetricsBackend(modelId)
+                    },
+                    elapsedMs = loadElapsedMs,
+                    success = true,
+                )
+                Log.i(
+                    TAG,
+                    "模型加载成功: $modelId (${descriptor.runtime}, ${modelFile.length() / 1024}KB, ${loadElapsedMs}ms)",
+                )
                 Result.success(modelFile)
             } catch (e: Exception) {
+                InferenceMetrics.record(
+                    operation = "model:$modelId:load",
+                    backend = InferenceMetrics.Backend.CPU_DEFAULT,
+                    elapsedMs = SystemClock.elapsedRealtime() - loadStartedAt,
+                    success = false,
+                )
                 Log.e(TAG, "模型加载失败: $modelId", e)
                 updateState(modelId, ModelManager.ModelStatus.ERROR)
                 Result.failure(e)

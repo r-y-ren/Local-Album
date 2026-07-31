@@ -243,11 +243,12 @@ open class PluginLoader(private val context: Context? = null) {
      * @return 可加载插件代码的 ClassLoader
      */
     private fun createDexClassLoader(apkFile: File): DexClassLoader {
-        val optDexDir = File(context!!.filesDir, OPT_DEX_DIR)
+        val pluginContext = requireNotNull(context) { "PluginLoader 尚未初始化" }
+        val optDexDir = File(pluginContext.filesDir, OPT_DEX_DIR)
         if (!optDexDir.exists()) optDexDir.mkdirs()
 
         // 使用宿主 ClassLoader 作为 parent，使插件可访问宿主公共类（如 AiPlugin 接口）
-        val parentClassLoader = context!!.classLoader
+        val parentClassLoader = pluginContext.classLoader
         val optDexPath = File(optDexDir, "${apkFile.nameWithoutExtension}.odex").absolutePath
 
         return DexClassLoader(

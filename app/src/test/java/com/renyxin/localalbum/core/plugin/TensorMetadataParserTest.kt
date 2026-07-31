@@ -91,9 +91,8 @@ class TensorMetadataParserTest {
 
     @Test
     fun `UnsupportedModelFormatException holds message`() {
-        val ex = UnsupportedModelFormatException("unsupported format: .abc")
+        val ex: IllegalArgumentException = UnsupportedModelFormatException("unsupported format: .abc")
         assertEquals("unsupported format: .abc", ex.message)
-        assertTrue(ex is IllegalArgumentException)
     }
 
     // ---- ParseResult ----
@@ -168,8 +167,7 @@ class TensorMetadataParserTest {
     // ---- parse fails gracefully for non-existent file ----
 
     @Test
-    fun `parse throws for non-existent file`() {
-        val nonExistentFile = File("/tmp/non_existent_model_12345.tflite")
+    fun `detectFormat accepts valid extension without reading file`() {
         try {
             // This will throw because the file doesn't exist
             TensorMetadataParser.detectFormat("dummy.tflite")

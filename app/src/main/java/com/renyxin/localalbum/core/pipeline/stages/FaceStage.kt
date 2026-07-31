@@ -40,6 +40,7 @@ class FaceStage(
     override val stageType = StageType.BUILTIN
     override val displayName = "人脸识别"
     override val dependencies = emptyList<String>()
+    override val fileConcurrency = 2
 
     private val faceClusterer = FaceClusterer()
     private val clusterAssigner = IncrementalFaceClusterAssigner(
@@ -84,9 +85,13 @@ class FaceStage(
                 mediaDao.clearFaceClusterId(chunk)
             }
 
-            // 2. 并发检测人脸（文件级并行，充分利用多核）
+            // 2. 并发检测人脸；并发上限与 ONNX session 池容量一致，避免提前解码后排队。
             val allFaceEntities = mutableListOf<FaceEntity>()
-            val results = ParallelFileProcessor.mapParallel(filePaths, enhancedCallback) { path ->
+            val results = ParallelFileProcessor.mapParallel(
+                filePaths,
+                enhancedCallback,
+                concurrency = fileConcurrency,
+            ) { path ->
                 val faces = faceProvider.detectFaces(File(path))
                 faces.map { face ->
                     FaceEntity(

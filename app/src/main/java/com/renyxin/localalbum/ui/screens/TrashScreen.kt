@@ -82,7 +82,6 @@ fun TrashScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var operationInFlight by remember { mutableStateOf(false) }
-    val context = LocalContext.current
 
     // 退出选择模式时清空选择
     LaunchedEffect(isSelectionMode) {

@@ -315,6 +315,7 @@ flowchart LR
 15. **N5 删除失败治理与关联一致性代码完成（Room v26）。** tombstone/失败持久化、脱敏诊断、指数退避、唯一 Worker + Room 租约、扫描复活保持 trashed、显式 restore 清意图、重复/语义成员失效及统一 chunk 事务 coordinator 已落地。
 16. **N5 真机验收待完成。** 需验证真实文件权限拒绝、重试/租约、v25→v26 迁移、扫描重新发现及完整关联清理；任务控制面 UI 可延后，但隐私路径不得进入日志或错误 UI。
 17. **N6 备份契约收口代码完成（Room v27 / streaming v3）。** 媒体/人脸/向量空间/feature store/插件配置/人物簇/语义 metadata 与簇/删除意图纳入显式契约；FTS、analysis state 为可选，缓存、租约、pending task、扫描/import staging、重复维护结果明确排除并在导入后重建。真机大备份、磁盘不足、最终切换前后杀进程与 connected instrumentation 待验收；不得宣称 N1-F 已完成。
+18. **3 万媒体稳定性后的性能收口代码已完成。** AnalysisWorker 将每次最多 4×250 条租约合并为一个 1000 条有界分析窗口，使同一阶段连续消费窗口并将模型切换轮次最多降至原来的 1/4；任务仍按原租约分别提交。阶段文件并发按模型池收紧为 Face=2、Scene=2、Semantic=1、OCR=1、Quality=4；仅恢复 Face+Quality 安全并行，EVA02、Scene、OCR 继续独占串行。阶段日志新增吞吐与前后 PSS，ModelManager 新增模型加载耗时指标。定向 JVM 测试与 Debug 构建已通过，仍需在相同 3 万夹具上 A/B 验证耗时、峰值 PSS、温度和最终内存回落。
 
 ## 9. 下一阶段执行计划：N1 发布门槛与真机验收
 

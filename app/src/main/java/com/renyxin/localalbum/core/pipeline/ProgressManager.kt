@@ -169,7 +169,7 @@ class ProgressManager(
         stageId: String,
         filePath: String,
         status: FileProcessingStatus,
-        errorMessage: String? = null,
+        @Suppress("UNUSED_PARAMETER") errorMessage: String? = null,
     ) = synchronized(lock) {
         val stageMap = perFileStatus.getOrPut(stageId) { mutableMapOf() }
         stageMap[filePath] = status

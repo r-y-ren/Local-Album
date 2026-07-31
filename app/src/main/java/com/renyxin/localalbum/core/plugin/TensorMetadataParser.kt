@@ -62,7 +62,7 @@ object TensorMetadataParser {
      * @throws UnsupportedModelFormatException 不支持的格式
      */
     fun parse(
-        context: Context,
+        @Suppress("UNUSED_PARAMETER") context: Context,
         modelFile: File,
         format: ModelFormat? = null,
     ): ParseResult {
@@ -311,9 +311,7 @@ object TensorMetadataParser {
      */
     private fun parsePyTorchWithModule(modelFile: File): ParseResult {
         // 仅加载验证，PyTorch 模块不直接暴露图结构
-        val module: org.pytorch.Module? = null
         try {
-            @Suppress("UNUSED_VARIABLE")
             val loadedModule = org.pytorch.Module.load(modelFile.absolutePath)
             // PyTorch 不直接暴露输入/输出张量元数据，返回降级信息
             // 但验证了模型文件是可加载的有效 PyTorch 模型

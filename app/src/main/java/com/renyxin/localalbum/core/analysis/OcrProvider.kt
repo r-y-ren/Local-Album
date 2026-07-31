@@ -91,7 +91,7 @@ class OcrProvider(private val context: Context) {
                     TextBlock(
                         text = block.text,
                         lines = block.lines.map { it.text },
-                        confidence = block.lines.map { it.confidence ?: 0.0f }.average().toFloat(),
+                        confidence = block.lines.map { it.confidence }.average().toFloat(),
                     )
                 }
                 val avgConfidence = if (blocks.isNotEmpty()) {

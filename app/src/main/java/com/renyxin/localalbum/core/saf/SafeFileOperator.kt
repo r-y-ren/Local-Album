@@ -246,6 +246,7 @@ class SafeFileOperator(private val context: Context) {
     /**
      * Android 11+ : 使用 MediaStore.createDeleteRequest 移入回收站
      */
+    @Suppress("UNUSED_VARIABLE")
     private fun deleteViaMediaStore(path: String): String? {
         return try {
             val uri = getMediaUri(path) ?: return null

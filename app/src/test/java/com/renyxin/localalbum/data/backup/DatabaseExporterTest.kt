@@ -27,6 +27,7 @@ import java.util.zip.ZipFile
  *
  * 使用内存模拟 DAO 验证导出 → 导入的完整往返（round-trip）数据一致性。
  */
+@Suppress("DEPRECATION") // 本测试类专门验证历史单 JSON 兼容入口及其 DAO。
 class DatabaseExporterTest {
 
     // ---- Fake DAOs ----
@@ -35,6 +36,7 @@ class DatabaseExporterTest {
         private val store = mutableMapOf<String, MediaEntity>()
         private val ftsStore = mutableMapOf<String, MediaFts>()
 
+        @Suppress("OVERRIDE_DEPRECATION")
         override suspend fun getAllForLegacyExport(): List<MediaEntity> = store.values.toList()
         override suspend fun getPaged(limit: Int, offset: Int): List<MediaEntity> =
             store.values.toList().drop(offset).take(limit)
@@ -177,6 +179,7 @@ class DatabaseExporterTest {
             store.removeAll { it.filePath in filePaths }
         }
         override suspend fun clearAll() { store.clear() }
+        @Suppress("OVERRIDE_DEPRECATION")
         override suspend fun getAllForLegacyExport(): List<FaceEntity> = store.toList()
         override suspend fun getPaged(limit: Int, offset: Int): List<FaceEntity> =
             store.drop(offset).take(limit)
@@ -211,6 +214,7 @@ class DatabaseExporterTest {
         }
         override suspend fun getByFilePath(filePath: String): MediaEmbedding? = store[filePath]
         override suspend fun getByFilePathInSpace(filePath: String, spaceId: String) = store[filePath]?.takeIf { it.spaceId == spaceId }
+        @Suppress("OVERRIDE_DEPRECATION")
         override suspend fun getAllForLegacyExport(): List<MediaEmbedding> = store.values.toList()
         override suspend fun getPaged(limit: Int, offset: Int): List<MediaEmbedding> =
             store.values.toList().drop(offset).take(limit)

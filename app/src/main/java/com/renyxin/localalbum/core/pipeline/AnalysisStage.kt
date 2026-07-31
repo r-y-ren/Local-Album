@@ -74,6 +74,14 @@ interface AnalysisStage {
     val isCacheable: Boolean get() = true
 
     /**
+     * 单阶段文件级并发上限。
+     *
+     * 该值应与底层模型 session/interpreter 池容量匹配，避免协程提前解码图片后长时间
+     * 等待模型许可。默认 1 保守兼容；轻量阶段或具有多实例池的模型阶段可显式提高。
+     */
+    val fileConcurrency: Int get() = 1
+
+    /**
      * 生成该阶段结果所用模型版本（Phase 1 断点续跑）。
      *
      * 当模型升级导致版本变化时，[com.renyxin.localalbum.data.db.dao.AnalysisStateDao]

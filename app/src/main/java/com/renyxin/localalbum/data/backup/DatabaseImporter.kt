@@ -112,7 +112,6 @@ class DatabaseImporter(
         // Fake DAO 路径仅用于 JVM 测试；生产构造始终注入 database 并使用 staging。
         if (database == null) return importFromZipWithoutStaging(inputFile)
         val generation = UUID.randomUUID().toString()
-        val staging = database.importStagingDao()
         try {
             ZipFile(inputFile).use { zip ->
                 val manifest = validateStreamingZip(zip)
@@ -138,7 +137,7 @@ class DatabaseImporter(
         } finally {
             // 成功时删除已切换 generation；失败或取消时删除半成品。生产表仅可能在最终事务内变化。
             cleanupStaging(generation)
-            withContext(NonCancellable) { database?.backupStagingDao()?.clearGeneration(generation) }
+            withContext(NonCancellable) { database.backupStagingDao().clearGeneration(generation) }
         }
     }
 
@@ -156,10 +155,10 @@ class DatabaseImporter(
             var lineNumber = 0L
             val batch = ArrayList<BackupImportStagingEntity>(INSERT_BATCH_SIZE)
             zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).useLines { lines ->
-                lines.forEach { raw ->
+                lines.forEach lineLoop@{ raw ->
                     lineNumber++
                     if (raw.toByteArray(Charsets.UTF_8).size > MAX_LINE_BYTES) throw BackupException(BackupError(table.entry, lineNumber, type = BackupErrorType.LINE_TOO_LONG, messageCode = "line_too_long"))
-                    if (raw.isBlank()) return@forEach
+                    if (raw.isBlank()) return@lineLoop
                     val obj = try { JSONObject(raw) } catch (e: Exception) {
                         throw BackupException(BackupError(table.entry, lineNumber, type = BackupErrorType.JSON_SYNTAX, messageCode = "bad_json"), e)
                     }
@@ -395,9 +394,10 @@ class DatabaseImporter(
     /** 清理进程异常退出留下的所有 staging generation，不触碰生产数据。 */
     suspend fun cleanupStaleStaging() = withContext(Dispatchers.IO) {
         IMPORT_MUTEX.withLock {
-            val dao = database?.importStagingDao() ?: return@withLock
+            val currentDatabase = database ?: return@withLock
+            val dao = currentDatabase.importStagingDao()
             dao.clearAllMedia(); dao.clearAllFaces(); dao.clearAllEmbeddings(); dao.clearAllFts()
-            database?.backupStagingDao()?.clearAll()
+            currentDatabase.backupStagingDao().clearAll()
         }
     }
 

@@ -31,6 +31,7 @@ class OcrStage(
     // 触发原生内存冲突（emutls/线程安全），导致段错误闪退。
     // 串行化 ONNX 阶段后：Layer 0 = Face+Scene[TFLite]+Quality+Geo，Layer 1 = Ocr。
     override val dependencies = listOf(AnalysisStage.STAGE_FACE)
+    override val fileConcurrency = 1
     // 字典从 ppocr_keys_v1.txt (6623) 升级到 ppocrv5_dict.txt (18383)，bump 版本号强制重跑
     override val modelVersion: Int = 2
 
@@ -56,7 +57,7 @@ class OcrStage(
         // 触发 libonnxruntime.so 内部 SIGSEGV（ARM MTE use-after-free）。
         // 串行化 OCR 推理避免此问题，OCR 阶段耗时原本就由模型推理主导。
         val results = ParallelFileProcessor.mapParallel(
-            filePaths, enhancedCallback, concurrency = 1,
+            filePaths, enhancedCallback, concurrency = fileConcurrency,
         ) { path ->
             val result = ocrProvider.recognize(File(path))
             val ocrText = if (result.fullText.isNotBlank()) result.fullText.take(500) else null

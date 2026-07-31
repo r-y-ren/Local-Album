@@ -157,6 +157,7 @@ class MainActivity : ComponentActivity() {
         // Android 10 及以下不需要运行时权限 (minSdk = 29)
     }
 
+    @Deprecated("使用 Activity Result API；保留此回调用于兼容当前权限请求流程")
     @Suppress("DEPRECATION")
     override fun onRequestPermissionsResult(
         requestCode: Int,

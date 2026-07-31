@@ -211,9 +211,8 @@ dependencies {
     // ML Kit Face Detection (人脸聚类)
     add("implementation", "com.google.mlkit:face-detection:16.1.7")
 
-    // TensorFlow Lite — 设备端 ML 推理（Phase 4.1 语义搜索，Phase 2.3 插件模型运行时）
+    // TensorFlow Lite — 设备端 ML 推理（项目仅使用核心 Interpreter API）
     add("implementation", "org.tensorflow:tensorflow-lite:2.14.0")
-    add("implementation", "org.tensorflow:tensorflow-lite-support:0.4.4")
 
     // ONNX Runtime — 升级到 1.19.2 以支持 EVA02-CLIP 模型所需的 ArgMax(13) 等算子
     add("implementation", "com.microsoft.onnxruntime:onnxruntime-android:1.19.2")

@@ -174,9 +174,6 @@ class HybridIndexer(
         MediaStore.Images.Media.MIME_TYPE,
         MediaStore.Images.Media.WIDTH,
         MediaStore.Images.Media.HEIGHT,
-        // P0-B: EXIF/位置数据列，修复 GPS 坐标和相机信息丢失
-        MediaStore.Images.Media.LATITUDE,
-        MediaStore.Images.Media.LONGITUDE,
         MediaStore.Images.Media.ORIENTATION,
     )
 
@@ -191,9 +188,6 @@ class HybridIndexer(
         MediaStore.Video.Media.WIDTH,
         MediaStore.Video.Media.HEIGHT,
         MediaStore.Video.Media.DURATION,
-        // P0-B: 视频同样需要位置数据
-        MediaStore.Video.Media.LATITUDE,
-        MediaStore.Video.Media.LONGITUDE,
     )
 
     /**
@@ -500,8 +494,6 @@ class HybridIndexer(
                 val mimeCol = it.getColumnIndexSafe(MediaStore.MediaColumns.MIME_TYPE)
                 val widthCol = it.getColumnIndexSafe(MediaStore.MediaColumns.WIDTH)
                 val heightCol = it.getColumnIndexSafe(MediaStore.MediaColumns.HEIGHT)
-                val latitudeCol = it.getColumnIndexSafe(MediaStore.Images.Media.LATITUDE)
-                val longitudeCol = it.getColumnIndexSafe(MediaStore.Images.Media.LONGITUDE)
                 val orientationCol = if (type == MediaType.IMAGE) it.getColumnIndexSafe(MediaStore.Images.Media.ORIENTATION) else -1
                 val durationCol = if (type == MediaType.VIDEO) it.getColumnIndexSafe(MediaStore.Video.Media.DURATION) else -1
                 while (it.moveToNext()) {
@@ -520,8 +512,9 @@ class HybridIndexer(
                         width = it.getInt(widthCol),
                         height = it.getInt(heightCol),
                         durationMs = if (durationCol >= 0) it.getLong(durationCol) else 0L,
-                        latitude = if (latitudeCol >= 0) it.getDouble(latitudeCol).takeIf { value -> value != 0.0 } else null,
-                        longitude = if (longitudeCol >= 0) it.getDouble(longitudeCol).takeIf { value -> value != 0.0 } else null,
+                        // MediaStore 经纬度列已弃用且在新系统中不可靠；后续 File/EXIF 扫描负责补齐位置。
+                        latitude = null,
+                        longitude = null,
                         orientation = if (orientationCol >= 0) it.getInt(orientationCol) else 0,
                     ))
                 }

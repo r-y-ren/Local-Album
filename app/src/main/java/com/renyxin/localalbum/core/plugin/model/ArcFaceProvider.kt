@@ -82,9 +82,9 @@ class ArcFaceProvider(
                 val value = result.iterator().next().value.value
                 result.close()
 
-                // 输出 [1, 512]
-                val arr = value as? Array<FloatArray>
-                val emb = arr?.getOrNull(0)
+                // 输出 [1, 512]；逐层校验运行时类型，避免对泛型数组做未检查转换。
+                val arr = value as? Array<*>
+                val emb = arr?.getOrNull(0) as? FloatArray
                 if (emb != null && emb.size == EMBEDDING_DIM) l2Normalize(emb) else null
             }
         } catch (e: Exception) {

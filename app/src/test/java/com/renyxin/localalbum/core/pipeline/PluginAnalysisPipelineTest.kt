@@ -116,11 +116,11 @@ class PluginAnalysisPipelineTest {
     }
 
     @Test
-    fun `independent model stages execute serially and release resources after batch`() = runBlocking {
+    fun `heavy model stages execute serially and release resources after batch`() = runBlocking {
         var activeStages = 0
         var maxActiveStages = 0
         val releasedStages = mutableListOf<String>()
-        val stages = listOf("face", "semantic", "ocr").map { id ->
+        val stages = listOf("core:face", "core:semantic", "core:ocr").map { id ->
             LambdaStage(stageId = id, displayName = id) { _, _ ->
                 activeStages++
                 maxActiveStages = maxOf(maxActiveStages, activeStages)
@@ -137,7 +137,39 @@ class PluginAnalysisPipelineTest {
         pipeline.runFullScan(listOf("/x.jpg"))
 
         assertEquals(1, maxActiveStages)
-        assertEquals(listOf("face", "semantic", "ocr"), releasedStages)
+        assertEquals(listOf("core:face", "core:semantic", "core:ocr"), releasedStages)
+    }
+
+    @Test
+    fun `face and quality execute in parallel while semantic remains exclusive`() = runBlocking {
+        var activeStages = 0
+        var maxActiveStages = 0
+        var semanticObservedActive = -1
+        val stages = listOf(
+            LambdaStage(AnalysisStage.STAGE_FACE, "Face") { _, _ ->
+                activeStages++
+                maxActiveStages = maxOf(maxActiveStages, activeStages)
+                delay(30)
+                activeStages--
+                StageResult(1, 0)
+            },
+            LambdaStage(AnalysisStage.STAGE_QUALITY, "Quality") { _, _ ->
+                activeStages++
+                maxActiveStages = maxOf(maxActiveStages, activeStages)
+                delay(30)
+                activeStages--
+                StageResult(1, 0)
+            },
+            LambdaStage(AnalysisStage.STAGE_SEMANTIC, "Semantic") { _, _ ->
+                semanticObservedActive = activeStages
+                StageResult(1, 0)
+            },
+        )
+
+        PluginAnalysisPipeline(stages = stages).runFullScan(listOf("/x.jpg"))
+
+        assertEquals(2, maxActiveStages)
+        assertEquals(0, semanticObservedActive)
     }
 
     @Test

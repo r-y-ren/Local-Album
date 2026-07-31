@@ -66,11 +66,7 @@ class BatchedModelLoader(
             fileSize <= largeThresholdBytes -> {
                 // 中等模型：分页加载
                 Log.d(TAG, "中等模型，分页加载")
-                var progress = 0f
-                val buffer = loadPaged(file) { pageProgress ->
-                    progress = pageProgress
-                    progressCallback(pageProgress)
-                }
+                val buffer = loadPaged(file, progressCallback)
                 createInterpreter(buffer, fileSize)
             }
             else -> {
@@ -107,7 +103,6 @@ class BatchedModelLoader(
 
         for (page in 0 until totalPages) {
             val offset = page * PAGE_SIZE
-            val len = minOf(PAGE_SIZE, fileSize - offset).toInt()
             // 触摸该页的一个字节以触发物理页分配
             buffer.get(offset.toInt())
             progressCallback((page + 1).toFloat() / totalPages)
@@ -117,7 +112,7 @@ class BatchedModelLoader(
         return buffer
     }
 
-    private fun createInterpreter(buffer: MappedByteBuffer, fileSize: Long): Interpreter {
+    private fun createInterpreter(buffer: MappedByteBuffer, @Suppress("UNUSED_PARAMETER") fileSize: Long): Interpreter {
         // 单线程 + XNNPACK，配合文件级并行（多文件并发各跑单线程推理）
         val options = Interpreter.Options().apply {
             setNumThreads(1)

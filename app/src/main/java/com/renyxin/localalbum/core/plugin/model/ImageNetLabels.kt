@@ -215,7 +215,7 @@ object ImageNetLabels {
      * ImageNet 有 1000 个类别，但很多对相册场景不友好（如 "abacus", "nail"）。
      * 此方法将细粒度类别归并到更广泛的语义概念。
      */
-    fun toSceneLabel(index: Int, confidence: Float): String {
+    fun toSceneLabel(index: Int, @Suppress("UNUSED_PARAMETER") confidence: Float): String {
         if (index < 0 || index >= LABELS.size) return "unknown"
         val label = LABELS[index]
 

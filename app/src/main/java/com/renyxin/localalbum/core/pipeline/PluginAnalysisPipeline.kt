@@ -1,5 +1,6 @@
 package com.renyxin.localalbum.core.pipeline
 
+import android.os.Debug
 import android.util.Log
 import com.renyxin.localalbum.core.concurrent.InferenceMetrics
 import com.renyxin.localalbum.core.plugin.capability.CapabilityRegistryV2
@@ -9,6 +10,9 @@ import com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider
 import com.renyxin.localalbum.core.plugin.capability.QualityProvider
 import com.renyxin.localalbum.core.plugin.capability.OcrProvider
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -238,6 +242,7 @@ class PluginAnalysisPipeline(
         results: MutableMap<String, StageResult>,
     ) {
         val stageStart = System.currentTimeMillis()
+        val startPssKb = currentPssKb()
         Log.i("CrashDebug", "=== 阶段开始 [${stage.stageId}] ${stage.displayName} (依赖=${stage.dependencies}) ===")
         logStageStart(stage)
 
@@ -338,10 +343,17 @@ class PluginAnalysisPipeline(
             results[stage.stageId] = stageResult
 
             val elapsed = System.currentTimeMillis() - stageStart
+            val endPssKb = currentPssKb()
+            val filesPerMinute = if (elapsed > 0L) {
+                stageResult.successCount * 60_000.0 / elapsed
+            } else {
+                0.0
+            }
             Log.i(
                 TAG,
                 "[${stage.stageId}] 完成: 成功=${stageResult.successCount} 失败=${stageResult.failedCount} " +
-                    "耗时=${elapsed}ms extra=${stageResult.extra}",
+                    "耗时=${elapsed}ms 吞吐=${"%.2f".format(filesPerMinute)}文件/分钟 " +
+                    "PSS=${startPssKb}KB→${endPssKb}KB extra=${stageResult.extra}",
             )
             _stageProgress.emit(
                 StageProgress(
@@ -414,11 +426,7 @@ class PluginAnalysisPipeline(
 
         Log.i(TAG, "全量扫描开始：${filePaths.size} 个文件，${stages.size} 个阶段（排序后 ${sortedStages.size}）")
 
-        // 不并发执行不同模型阶段。文件级并发仍保留，但 face/semantic/OCR 等大型
-        // ONNX 模型不会同时创建 session 与峰值工作区，避免原生内存峰值相加。
-        sortedStages.forEachIndexed { stageIdx, stage ->
-            runStage(stage, stageIdx, sortedStages.size, filePaths, results)
-        }
+        runStagesWithSafeParallelism(filePaths, filePaths, results)
 
         // 通知 ProgressManager 管道完成
         progressManager.onPipelineComplete()
@@ -467,11 +475,7 @@ class PluginAnalysisPipeline(
             "增量扫描开始：增量=${incrementalPaths.size}，全量=${allPaths.size}，阶段=${sortedStages.size}",
         )
 
-        // 增量任务同样串行化模型阶段，保证恢复批次与全量批次具有相同的内存上界。
-        sortedStages.forEachIndexed { stageIdx, stage ->
-            val targetPaths = if (stage.isCacheable) incrementalPaths else allPaths
-            runStage(stage, stageIdx, sortedStages.size, targetPaths, results)
-        }
+        runStagesWithSafeParallelism(incrementalPaths, allPaths, results)
 
         // 通知 ProgressManager 管道完成
         progressManager.onPipelineComplete()
@@ -483,6 +487,48 @@ class PluginAnalysisPipeline(
     }
 
     // ---- Helpers ----
+
+    /**
+     * 仅恢复经过内存审计的安全组合并行：Face（受 2-session 池约束）与无模型的
+     * Quality 同时运行。Semantic/EVA02、Scene 和 OCR 仍串行，避免大型模型峰值相加。
+     */
+    private suspend fun runStagesWithSafeParallelism(
+        incrementalPaths: List<String>,
+        allPaths: List<String>,
+        results: MutableMap<String, StageResult>,
+    ) = coroutineScope {
+        val indexedStages = sortedStages.withIndex().associateBy { it.value.stageId }
+        val face = indexedStages[AnalysisStage.STAGE_FACE]
+        val quality = indexedStages[AnalysisStage.STAGE_QUALITY]
+        val safelyPairedIds = if (
+            face != null && quality != null &&
+            face.value.dependencies.isEmpty() && quality.value.dependencies.isEmpty()
+        ) {
+            setOf(AnalysisStage.STAGE_FACE, AnalysisStage.STAGE_QUALITY)
+        } else {
+            emptySet()
+        }
+
+        var safePairExecuted = false
+        sortedStages.forEachIndexed { stageIdx, stage ->
+            if (stage.stageId in safelyPairedIds) {
+                if (!safePairExecuted) {
+                    safePairExecuted = true
+                    listOf(requireNotNull(face), requireNotNull(quality)).map { indexed ->
+                        async {
+                            val targetPaths = if (indexed.value.isCacheable) incrementalPaths else allPaths
+                            runStage(indexed.value, indexed.index, sortedStages.size, targetPaths, results)
+                        }
+                    }.awaitAll()
+                }
+            } else {
+                val targetPaths = if (stage.isCacheable) incrementalPaths else allPaths
+                runStage(stage, stageIdx, sortedStages.size, targetPaths, results)
+            }
+        }
+    }
+
+    private fun currentPssKb(): Long = runCatching { Debug.getPss() }.getOrDefault(-1L)
 
     private fun logStageStart(stage: AnalysisStage) {
         val depStr = if (stage.dependencies.isNotEmpty())

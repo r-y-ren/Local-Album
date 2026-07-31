@@ -116,8 +116,7 @@ class MobileSAMPlugin(
                 )
                 val result = mm.ensureModelReady(MODEL_ID)
                 if (result.isSuccess) {
-                    interpreter = mm.getInterpreter(MODEL_ID)
-                    ready = interpreter != null
+                    ready = true
                     Log.i(TAG, "MobileSAM 模型通过 ModelManager 加载成功")
                 } else {
                     Log.w(TAG, "MobileSAM 模型未就绪: ${result.exceptionOrNull()?.message}")
@@ -158,7 +157,12 @@ class MobileSAMPlugin(
             if (resized != bitmap) resized.recycle()
 
             val outputMask = Array(1) { Array(1) { FloatArray(MASK_SIZE * MASK_SIZE) } }
-            interpreter?.run(inputBuffer, outputMask)
+            val mm = modelManager
+            if (mm != null) {
+                mm.withInterpreter(MODEL_ID) { it.run(inputBuffer, outputMask) }
+            } else {
+                requireNotNull(interpreter) { "MobileSAM Interpreter 未就绪" }.run(inputBuffer, outputMask)
+            }
 
             val result = applyMask(bitmap, outputMask[0][0])
             PluginOutput.ImageOutput(bitmap = result, sourcePath = sourcePath)
@@ -171,7 +175,8 @@ class MobileSAMPlugin(
     }
 
     override suspend fun release() {
-        interpreter?.close()
+        // ModelManager 所有的池化 Interpreter 由其统一管理；仅关闭静态回退实例。
+        if (modelManager == null) interpreter?.close()
         interpreter = null
         ready = false
     }

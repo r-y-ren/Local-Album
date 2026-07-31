@@ -30,6 +30,7 @@ class SemanticClusterRecommenderTest {
         override suspend fun insertEmbeddings(embeddings: List<MediaEmbedding>) {}
         override suspend fun getByFilePath(filePath: String): MediaEmbedding? = embeddings.find { it.filePath == filePath }
         override suspend fun getByFilePathInSpace(filePath: String, spaceId: String) = embeddings.find { it.filePath == filePath && it.spaceId == spaceId }
+        @Suppress("OVERRIDE_DEPRECATION")
         override suspend fun getAllForLegacyExport(): List<MediaEmbedding> {
             getAllCalls++
             error("推荐路径不得调用 getAll()")

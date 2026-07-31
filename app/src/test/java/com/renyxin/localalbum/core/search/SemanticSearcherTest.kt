@@ -35,6 +35,7 @@ class SemanticSearcherTest {
         override suspend fun getByFilePath(filePath: String): MediaEmbedding? = store[filePath]
         override suspend fun getByFilePathInSpace(filePath: String, spaceId: String): MediaEmbedding? = store[filePath]?.takeIf { it.spaceId == spaceId }
 
+        @Suppress("OVERRIDE_DEPRECATION")
         override suspend fun getAllForLegacyExport(): List<MediaEmbedding> = store.values.toList()
 
         override suspend fun getPaged(limit: Int, offset: Int): List<MediaEmbedding> =

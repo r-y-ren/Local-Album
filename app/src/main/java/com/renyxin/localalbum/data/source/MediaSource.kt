@@ -371,13 +371,10 @@ class MediaSource(
      * 原实现 [readExifData] 每次新建 ExifInterface，与 [readImageCapturedAt] 重复打开同一文件。
      */
     private fun readAllExifData(exif: ExifInterface, file: File): Map<String, String> {
-        // GPS 坐标：ExifInterface.TAG_GPS_LATITUDE/LONGITUDE 返回度分秒(DMS)有理数字符串
-        // (如 "39/1,54/1,30/1")，直接 toDoubleOrNull 会失败。
-        // 改用 getLatLong() 获取已转换为十进制的坐标，并过滤无效的 (0,0)。
-        val latLong = FloatArray(2)
-        val hasGeo = exif.getLatLong(latLong)
-        val latitudeStr = if (hasGeo) latLong[0].toString() else ""
-        val longitudeStr = if (hasGeo) latLong[1].toString() else ""
+        // ExifInterface.latLong 已完成 DMS 到十进制度数转换；坐标缺失时返回 null。
+        val latLong = exif.latLong
+        val latitudeStr = latLong?.get(0)?.toString().orEmpty()
+        val longitudeStr = latLong?.get(1)?.toString().orEmpty()
         return mapOf(
             "width" to (exif.getAttributeInt(ExifInterface.TAG_IMAGE_WIDTH, 0).toString()),
             "height" to (exif.getAttributeInt(ExifInterface.TAG_IMAGE_LENGTH, 0).toString()),
@@ -459,7 +456,7 @@ class MediaSource(
      * 仅返回已缓存的缩略图路径，新文件的缩略图交给 [ThumbnailWorker] 异步补齐，
      * 避免阻塞扫描主流程。
      */
-    private fun generateThumbnail(file: File, type: MediaType): String? {
+    private fun generateThumbnail(file: File, @Suppress("UNUSED_PARAMETER") type: MediaType): String? {
         val dir = thumbDir ?: return null
         val webpThumb = File(dir, thumbnailCacheFileName(file, ThumbnailSpec.SIZE_GRID))
         // 兼容历史仅按路径命名的缓存；新缓存的 key 包含修改时间和文件大小，

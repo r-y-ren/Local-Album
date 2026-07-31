@@ -27,6 +27,7 @@ class QualityStage(
     override val stageType = StageType.BUILTIN
     override val displayName = "质量评分"
     override val dependencies = emptyList<String>()
+    override val fileConcurrency = 4
 
     override suspend fun execute(
         filePaths: List<String>,
@@ -41,8 +42,12 @@ class QualityStage(
         filePaths: List<String>,
         enhancedCallback: EnhancedProgressCallback,
     ): StageResult {
-        // 文件级并行质量评估
-        val results = ParallelFileProcessor.mapParallel(filePaths, enhancedCallback) { path ->
+        // 启发式阶段不占模型 session，可使用较高但仍有界的 CPU 并发。
+        val results = ParallelFileProcessor.mapParallel(
+            filePaths,
+            enhancedCallback,
+            concurrency = fileConcurrency,
+        ) { path ->
             val result = qualityProvider.assess(File(path))
             mediaDao.setQualityScore(path, result.overall)
         }

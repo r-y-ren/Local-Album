@@ -267,12 +267,6 @@ class InSwapperPlugin(
             return@withContext PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
         }
 
-        val session = modelManager.getOnnxSession(MODEL_ID)
-        if (session == null) {
-            Log.w(TAG, "换脸失败: InSwapper 会话未加载")
-            return@withContext PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
-        }
-
         try {
             // ===== Reactor 流水线（对齐 InsightFace/ReActor 原生实现）=====
 
@@ -307,7 +301,8 @@ class InSwapperPlugin(
             Log.i(TAG, "源人脸嵌入: normed ${normedEmbed.size}d, emap latent ${sourceLatent.size}d, emapLoaded=${emap != null}, latentNorm=${sqrt(lnorm)}, latent[0..4]=${sourceLatent.take(5).joinToString(",")}")
 
             val targetFace = detectLargestFace(faceProvider, targetInput.filePath)
-            if (targetFace == null || targetFace.landmarks == null) {
+            val targetLandmarks = targetFace?.landmarks
+            if (targetFace == null || targetLandmarks == null) {
                 Log.w(TAG, "换脸失败: 底图未检测到人脸或无关键点 $targetPath")
                 return@withContext PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
             }
@@ -315,7 +310,7 @@ class InSwapperPlugin(
 
             // 2. 相似变换对齐底图人脸到 128×128（inswapper 输入），保存仿射矩阵 M
             val targetLandmarksPx = FaceAligner.denormalizeLandmarks(
-                targetFace.landmarks!!, targetBmp.width, targetBmp.height
+                targetLandmarks, targetBmp.width, targetBmp.height
             )
             Log.i(TAG, "step: denormalize landmarks done, pts=${targetLandmarksPx.size}")
             val affineM = FaceAligner.computeAffineMatrix(targetLandmarksPx, INPUT_SIZE)
@@ -331,9 +326,11 @@ class InSwapperPlugin(
             val alignedTargetBmp = FaceAligner.matBGRToBitmap(alignedTargetMat)
             Log.i(TAG, "底图仿射对齐完成: ${alignedTargetMat.cols()}x${alignedTargetMat.rows()}, 均值RGB=${bitmapMeanRgb(alignedTargetBmp)}")
 
-            // 3. 换脸推理：128×128 对齐底图 + 512 维 emap latent → inswapper → 128×128 换脸脸
+            // 3. 换脸推理：从池中独占一个 session，避免并发调用同一 OrtSession。
             Log.i(TAG, "step: runSwap begin")
-            val swappedCrop = runSwap(session, alignedTargetBmp, sourceLatent)
+            val swappedCrop = modelManager.withOnnxSession(MODEL_ID) { session ->
+                runSwap(session, alignedTargetBmp, sourceLatent)
+            }
             if (swappedCrop == null) {
                 alignedTargetBmp.recycle()
                 Log.w(TAG, "换脸失败: runSwap 返回 null（ONNX 输出解析失败）")
@@ -436,13 +433,15 @@ class InSwapperPlugin(
                 return null
             }
             val frame = Array(3) { c ->
-                val row = channels[c] as? Array<FloatArray>  // [128][128]
-                if (row == null || row.size != INPUT_SIZE) {
-                    Log.w(TAG, "runSwap 通道 $c 解析失败: row=${row?.size}")
+                val rows = channels[c] as? Array<*>  // [128][128]
+                if (rows == null || rows.size != INPUT_SIZE || rows.any { it !is FloatArray }) {
+                    Log.w(TAG, "runSwap 通道 $c 解析失败: rows=${rows?.size}")
                     return null
                 }
-                // 扁平化 [128][128] → FloatArray(16384)
-                FloatArray(INPUT_SIZE * INPUT_SIZE) { i -> row[i / INPUT_SIZE][i % INPUT_SIZE] }
+                // 扁平化 [128][128] → FloatArray(16384)，逐行验证后再读取。
+                FloatArray(INPUT_SIZE * INPUT_SIZE) { i ->
+                    (rows[i / INPUT_SIZE] as FloatArray)[i % INPUT_SIZE]
+                }
             }
             Log.i(TAG, "runSwap frame: channels=${frame.size}, hw=${frame.firstOrNull()?.size}")
             postprocessImage(frame)

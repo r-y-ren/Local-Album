@@ -24,8 +24,12 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         val dao = container.database.analysisTaskDao()
         val pipeline = container.pluginAnalysisPipeline
         val scope = pipeline.pipelineScope
-        var batches = 0
-        while (batches < MAX_BATCHES_PER_RUN && !isStopped) {
+        // 一次 Worker 先领取一个有界窗口，再让每个模型阶段连续处理整个窗口。
+        // 相比每 250 条完整切换五个阶段，该方式不增加模型峰值驻留，却将模型加载/卸载轮次
+        // 最多降低到原来的 1/MAX_BATCHES_PER_RUN。每个租约仍独立提交，保持恢复语义不变。
+        val leasedGroups = mutableListOf<LeasedTaskGroup>()
+        repeat(MAX_BATCHES_PER_RUN) {
+            if (isStopped) return@repeat
             val now = System.currentTimeMillis()
             val token = UUID.randomUUID().toString()
             val currentTasks = dao.claimBatch(now, BATCH_SIZE, token, LEASE_MS, scope)
@@ -35,24 +39,32 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
             } else {
                 dao.claimBatch(now, BATCH_SIZE, token, LEASE_MS, AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE)
             }
-            if (tasks.isEmpty()) break
-            val taskIds = tasks.map { it.taskId }
+            if (tasks.isEmpty()) return@repeat
+            leasedGroups += LeasedTaskGroup(token, tasks)
+        }
+
+        if (leasedGroups.isNotEmpty()) {
             try {
                 coroutineScope {
                     val heartbeat = launch(start = CoroutineStart.UNDISPATCHED) {
                         while (isActive) {
                             val renewedAt = System.currentTimeMillis()
-                            dao.renewLease(token, renewedAt + LEASE_MS, renewedAt)
+                            leasedGroups.forEach { group ->
+                                dao.renewLease(group.token, renewedAt + LEASE_MS, renewedAt)
+                            }
                             delay(LEASE_RENEW_INTERVAL_MS)
                         }
                     }
                     try {
+                        val tasks = leasedGroups.flatMap { it.tasks }
                         val results = pipeline.runIncremental(tasks.map { it.filePath }, emptyList())
                         val failure = failureSummary(results, pipeline.requiredStageIds)
-                        if (failure == null) {
-                            dao.markDone(taskIds, token, System.currentTimeMillis())
-                        } else {
-                            markFailed(dao, tasks, token, failure)
+                        leasedGroups.forEach { group ->
+                            if (failure == null) {
+                                dao.markDone(group.tasks.map { it.taskId }, group.token, System.currentTimeMillis())
+                            } else {
+                                markFailed(dao, group.tasks, group.token, failure)
+                            }
                         }
                     } finally {
                         heartbeat.cancel()
@@ -61,9 +73,10 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                markFailed(dao, tasks, token, error.javaClass.simpleName)
+                leasedGroups.forEach { group ->
+                    markFailed(dao, group.tasks, group.token, error.javaClass.simpleName)
+                }
             }
-            batches++
         }
         val active = dao.countActive(scope) + if (scope == AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE) {
             0
@@ -90,6 +103,11 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
             now,
         )
     }
+
+    private data class LeasedTaskGroup(
+        val token: String,
+        val tasks: List<AnalysisTaskEntity>,
+    )
 
     companion object {
         private const val WORK_NAME = "analysis_task_queue"

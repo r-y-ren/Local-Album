@@ -31,8 +31,9 @@ class SemanticClusterMaintenanceWorker(context: Context, params: WorkerParameter
             val page = embeddingDao.getPagedAfterInSpace(index.spaceId, cursor, PAGE_SIZE)
             page.forEach { row ->
                 val sample = Sample(stablePriority(row.filePath), row)
+                val largestSample = reservoir.peek()
                 if (reservoir.size < SAMPLE_LIMIT) reservoir += sample
-                else if (compareValuesBy(sample, reservoir.peek(), Sample::priority, { it.row.filePath }) < 0) {
+                else if (largestSample != null && compareValuesBy(sample, largestSample, Sample::priority, { it.row.filePath }) < 0) {
                     reservoir.poll(); reservoir += sample
                 }
             }

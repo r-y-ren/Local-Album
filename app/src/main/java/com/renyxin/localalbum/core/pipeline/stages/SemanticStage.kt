@@ -52,6 +52,9 @@ class SemanticStage(
         private const val INDEX_WRITE_BATCH_SIZE = 32
     }
 
+    // EVA02 视觉模型固定单 session，外层并发大于 1 只会增加解码和等待开销。
+    override val fileConcurrency = 1
+
     override suspend fun execute(
         filePaths: List<String>,
         progressCallback: suspend (Int, Int) -> Unit,
@@ -80,11 +83,15 @@ class SemanticStage(
             var completedBeforeBatch = 0
             for (pathsInBatch in filePaths.chunked(INDEX_WRITE_BATCH_SIZE)) {
                 val batchOffset = completedBeforeBatch
-                val results = ParallelFileProcessor.mapParallel(pathsInBatch, { processed, _, path, status ->
-                    // ParallelFileProcessor 的计数在每个批次内从零开始；转换为整个语义阶段的
-                    // 累计进度，避免 UI 在批次切换时回退或停留在首批进度。
-                    enhancedCallback(batchOffset + processed, total, path, status)
-                }) { path ->
+                val results = ParallelFileProcessor.mapParallel(
+                    pathsInBatch,
+                    { processed, _, path, status ->
+                        // ParallelFileProcessor 的计数在每个批次内从零开始；转换为整个语义阶段的
+                        // 累计进度，避免 UI 在批次切换时回退或停留在首批进度。
+                        enhancedCallback(batchOffset + processed, total, path, status)
+                    },
+                    concurrency = fileConcurrency,
+                ) { path ->
                     val entity = mediaDao.getByFilePathLight(path)
                     val context = SemanticEmbedProvider.ImageContext(
                         sceneType = entity?.sceneType,

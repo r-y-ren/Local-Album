@@ -206,8 +206,6 @@ class DemoStyleTransferPlugin : GenerativePlugin {
 
         // 暗角效果: 四角绘制半透明黑色
         val vignettePaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        val cx = w / 2f
-        val cy = h / 2f
         for (i in 0..3) {
             val alpha = (60 + i * 30).coerceAtMost(200)
             vignettePaint.color = android.graphics.Color.argb(alpha, 0, 0, 0)

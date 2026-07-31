@@ -49,7 +49,7 @@ object ExtensionPluginHost {
         plugin: GenerativePlugin,
         targetImage: File,
         sourceEmbedding: FloatArray,
-        sourceFaceBox: android.graphics.RectF? = null,
+        @Suppress("UNUSED_PARAMETER") sourceFaceBox: android.graphics.RectF? = null,
     ): PluginOutput.ImageOutput? {
         val targetInput = PluginInput.ImageInput(
             file = targetImage,
@@ -61,7 +61,6 @@ object ExtensionPluginHost {
         )
         // 构建多模态输入：目标图像 + 源人脸嵌入
         // sourceFaceBox 保留用于未来实现人脸区域裁剪
-        @Suppress("UNUSED_PARAMETER", "UNUSED_EXPRESSION")
         val inputs = PluginInput.MultiModalInput(listOf(targetInput, embeddingInput))
 
         return if (plugin.isReady()) {

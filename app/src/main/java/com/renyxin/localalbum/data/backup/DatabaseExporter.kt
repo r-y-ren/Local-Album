@@ -186,6 +186,7 @@ class DatabaseExporter(
         }
     }
 
+    @Suppress("DEPRECATION")
     private suspend fun exportLegacyJson(outputFile: File, deviceModel: String): ExportResult {
         val json = exportToJson(deviceModel)
         outputFile.parentFile?.mkdirs()
@@ -308,6 +309,7 @@ class DatabaseExporter(
      * @return JSON 字符串
      */
     @Deprecated("Legacy single-JSON compatibility only; use paged file export")
+    @Suppress("DEPRECATION")
     suspend fun exportToJson(deviceModel: String = ""): String = withContext(Dispatchers.IO) {
         val mediaItems = mediaDao.getAllForLegacyExport()
         val faces = faceDao?.getAllForLegacyExport() ?: emptyList()
