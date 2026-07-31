@@ -484,7 +484,7 @@ class MediaSource(
                 MediaType.IMAGE -> decodeImageForTarget(file, targetPx)
                 MediaType.VIDEO -> decodeVideoFrameForTarget(file, targetPx)
             } ?: error("decode_failed")
-            encodeThumbnail(bitmap, temporary, targetPx)
+            encodeThumbnail(bitmap, temporary, sizeClass)
             check(temporary.renameTo(thumbFile) || (thumbFile.exists() && temporary.delete())) {
                 "cache_publish_failed"
             }
@@ -533,20 +533,33 @@ class MediaSource(
             }.getOrNull()
     }
 
-    internal fun encodeThumbnail(bitmap: Bitmap, targetFile: File, targetPx: Int): String {
-        val scaled = ThumbnailUtils.extractThumbnail(bitmap, targetPx, targetPx)
+    internal fun encodeThumbnail(bitmap: Bitmap, targetFile: File, sizeClass: String): String {
+        val (encodedWidth, encodedHeight) = ThumbnailSpec.encodedSize(
+            bitmap.width,
+            bitmap.height,
+            sizeClass,
+        )
+        val encoded = if (sizeClass == ThumbnailSpec.SIZE_GRID) {
+            // 网格单元需要统一方形尺寸，允许居中裁剪。
+            ThumbnailUtils.extractThumbnail(bitmap, encodedWidth, encodedHeight)
+        } else if (bitmap.width != encodedWidth || bitmap.height != encodedHeight) {
+            // 查看器预览必须完整保留原图宽高比，不能复用方形裁剪逻辑。
+            Bitmap.createScaledBitmap(bitmap, encodedWidth, encodedHeight, true)
+        } else {
+            bitmap
+        }
         FileOutputStream(targetFile).use { out ->
-            check(scaled.compress(Bitmap.CompressFormat.WEBP_LOSSY, 80, out))
+            check(encoded.compress(Bitmap.CompressFormat.WEBP_LOSSY, 80, out))
             out.fd.sync()
         }
-        if (bitmap !== scaled) bitmap.recycle()
-        scaled.recycle()
+        if (bitmap !== encoded) bitmap.recycle()
+        encoded.recycle()
         return targetFile.absolutePath
     }
 
     /** 以源身份、尺寸档和格式版本构成缓存文件名。 */
     private fun thumbnailCacheFileName(file: File, sizeClass: String): String =
-        "${file.absolutePath.hashCode()}_${file.lastModified()}_${file.length()}_${sizeClass}_v$THUMBNAIL_CACHE_VERSION.webp"
+        "${file.absolutePath.hashCode()}_${file.lastModified()}_${file.length()}_${sizeClass}_v${ThumbnailSpec.CACHE_FORMAT_VERSION}.webp"
 
     private fun calculateInSampleSize(width: Int, height: Int, targetSize: Int): Int {
         if (width <= 0 || height <= 0) return 1
@@ -602,7 +615,6 @@ class MediaSource(
 
     internal companion object {
         const val TAG = "MediaSource"
-        private const val THUMBNAIL_CACHE_VERSION = 3
 
         val IMAGE_EXTS = setOf(
             "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "dng", "raw",

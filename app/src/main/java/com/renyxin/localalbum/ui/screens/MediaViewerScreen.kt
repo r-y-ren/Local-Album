@@ -145,6 +145,8 @@ fun MediaViewerScreen(
     val currentItem = mediaItems[pagerState.currentPage]
     var resolvedPreviewPath by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(currentItem?.filePath, currentItem?.modifiedAt, currentItem?.fileSize) {
+        // 切页后先清除上一页预览，避免异步解析期间短暂显示错误照片。
+        resolvedPreviewPath = null
         resolvedPreviewPath = currentItem?.let { resolvePreview(it) }
     }
 
@@ -291,7 +293,10 @@ fun MediaViewerScreen(
             val item = mediaItems[page] ?: return@HorizontalPager
             when (item.type) {
                 MediaType.IMAGE -> ZoomableImageContent(
-                    filePath = if (page == pagerState.currentPage) resolvedPreviewPath ?: item.filePath else item.filePath,
+                    sources = viewerImageSources(
+                        originalPath = item.filePath,
+                        previewPath = resolvedPreviewPath.takeIf { page == pagerState.currentPage },
+                    ),
                     dismissOffset = dismissOffset.value,
                     onTap = { showOverlay = !showOverlay },
                     onVerticalDrag = { delta ->
@@ -492,9 +497,21 @@ private enum class DragDirection { None, Horizontal, Vertical }
  * - 关键修复：使用方向锁定（direction lock），1x 时水平滑动不消费，
  *   让 HorizontalPager 处理左右切图；竖直滑动才触发 dismiss
  */
+internal data class ViewerImageSources(
+    val previewPlaceholderPath: String?,
+    val originalPath: String,
+)
+
+/** 预览图只作为原图解码期间的底层占位；最终显示源始终是原图。 */
+internal fun viewerImageSources(originalPath: String, previewPath: String?): ViewerImageSources =
+    ViewerImageSources(
+        previewPlaceholderPath = previewPath?.takeUnless { it == originalPath },
+        originalPath = originalPath,
+    )
+
 @Composable
 private fun ZoomableImageContent(
-    filePath: String,
+    sources: ViewerImageSources,
     dismissOffset: Float,
     onTap: () -> Unit,
     onVerticalDrag: (Float) -> Unit,
@@ -511,8 +528,8 @@ private fun ZoomableImageContent(
     // 记录竖直拖拽累计量（用于判断是否触发 dismiss）
     var verticalDragAccum by remember { mutableFloatStateOf(0f) }
 
-    // 切页时重置所有状态
-    LaunchedEffect(filePath) {
+    // 仅切换原始媒体时重置状态；预览占位异步到达不能打断用户的缩放手势。
+    LaunchedEffect(sources.originalPath) {
         scale = 1f
         offsetX = 0f
         offsetY = 0f
@@ -650,9 +667,7 @@ private fun ZoomableImageContent(
                 }
             },
     ) {
-        AsyncImage(
-            model = filePath,
-            contentDescription = null,
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
@@ -662,8 +677,24 @@ private fun ZoomableImageContent(
                     // 1x 时应用 dismiss 偏移，使图片跟随手指上下移动（Google Photos 风格）
                     translationY = offsetY + (if (scale <= 1f) dismissOffset else 0f)
                 },
-            contentScale = ContentScale.Fit,
-        )
+        ) {
+            // 已有预览缓存时先显示为底层占位。原图解码成功后，上层图片自然覆盖它；
+            // 原图加载失败时占位仍保留，避免黑屏。
+            sources.previewPlaceholderPath?.let { previewPath ->
+                AsyncImage(
+                    model = previewPath,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit,
+                )
+            }
+            AsyncImage(
+                model = sources.originalPath,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+        }
     }
 }
 

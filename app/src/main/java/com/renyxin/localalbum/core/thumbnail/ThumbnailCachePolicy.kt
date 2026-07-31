@@ -7,6 +7,7 @@ object ThumbnailSpec {
 
     const val GRID_PX = 256
     const val PREVIEW_PX = 1280
+    const val CACHE_FORMAT_VERSION = 4
 
     const val PRIORITY_BACKGROUND = 0
     const val PRIORITY_PREFETCH = 50
@@ -21,6 +22,23 @@ object ThumbnailSpec {
         SIZE_PREVIEW -> PREVIEW_PX
         else -> error("未知缩略图尺寸档: $sizeClass")
     }
+
+    /**
+     * 返回缩略图的编码尺寸。网格缩略图保持方形裁剪；查看器预览必须保持原始宽高比，
+     * 否则查看器命中 preview 缓存后会把完整原图替换成方形裁剪图。
+     */
+    fun encodedSize(sourceWidth: Int, sourceHeight: Int, sizeClass: String): Pair<Int, Int> {
+        require(sourceWidth > 0 && sourceHeight > 0)
+        val target = targetPx(sizeClass)
+        if (sizeClass == SIZE_GRID) return target to target
+
+        val scale = minOf(1f, target.toFloat() / maxOf(sourceWidth, sourceHeight))
+        return maxOf(1, (sourceWidth * scale).toInt()) to
+            maxOf(1, (sourceHeight * scale).toInt())
+    }
+
+    fun isCurrentCachePath(sizeClass: String, path: String): Boolean =
+        sizeClass != SIZE_PREVIEW || path.endsWith("_${SIZE_PREVIEW}_v$CACHE_FORMAT_VERSION.webp")
 
     fun sourceVersion(modifiedAtMs: Long, fileSize: Long): String = "$modifiedAtMs:$fileSize"
 }

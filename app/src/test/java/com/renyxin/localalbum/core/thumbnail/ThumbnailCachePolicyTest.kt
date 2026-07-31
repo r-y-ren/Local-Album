@@ -49,4 +49,27 @@ class ThumbnailCachePolicyTest {
         assertTrue(ThumbnailSpec.PRIORITY_VISIBLE > ThumbnailSpec.PRIORITY_PREFETCH)
         assertTrue(ThumbnailSpec.PRIORITY_PREFETCH > ThumbnailSpec.PRIORITY_BACKGROUND)
     }
+
+    @Test
+    fun `grid encoding remains square cropped`() {
+        assertEquals(256 to 256, ThumbnailSpec.encodedSize(4000, 3000, ThumbnailSpec.SIZE_GRID))
+    }
+
+    @Test
+    fun `preview encoding preserves landscape and portrait aspect ratios`() {
+        assertEquals(1280 to 960, ThumbnailSpec.encodedSize(4000, 3000, ThumbnailSpec.SIZE_PREVIEW))
+        assertEquals(960 to 1280, ThumbnailSpec.encodedSize(3000, 4000, ThumbnailSpec.SIZE_PREVIEW))
+    }
+
+    @Test
+    fun `preview encoding does not upscale small images`() {
+        assertEquals(640 to 480, ThumbnailSpec.encodedSize(640, 480, ThumbnailSpec.SIZE_PREVIEW))
+    }
+
+    @Test
+    fun `legacy cropped preview cache is rejected while grid remains compatible`() {
+        assertFalse(ThumbnailSpec.isCurrentCachePath(ThumbnailSpec.SIZE_PREVIEW, "/cache/photo_preview_v3.webp"))
+        assertTrue(ThumbnailSpec.isCurrentCachePath(ThumbnailSpec.SIZE_PREVIEW, "/cache/photo_preview_v4.webp"))
+        assertTrue(ThumbnailSpec.isCurrentCachePath(ThumbnailSpec.SIZE_GRID, "/cache/legacy-grid.webp"))
+    }
 }

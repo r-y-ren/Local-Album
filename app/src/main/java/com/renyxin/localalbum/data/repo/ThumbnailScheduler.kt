@@ -24,7 +24,10 @@ class ThumbnailScheduler(
         val key = "${item.filePath}|$sizeClass|$sourceVersion"
         val timestamp = now()
         val ready = cacheDao.getReady(item.filePath, sizeClass, sourceVersion)
-        if (ready != null && File(ready.path).isFile) {
+        if (ready != null &&
+            File(ready.path).isFile &&
+            ThumbnailSpec.isCurrentCachePath(sizeClass, ready.path)
+        ) {
             cacheDao.touchThrottled(
                 item.filePath,
                 sizeClass,

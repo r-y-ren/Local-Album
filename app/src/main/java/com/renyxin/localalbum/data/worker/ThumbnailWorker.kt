@@ -155,7 +155,10 @@ class ThumbnailWorker(
         if (currentVersion != task.sourceVersion || media.isTrashed) return null
         val cacheDao = database.thumbnailCacheDao()
         val existing = cacheDao.getReady(task.filePath, task.sizeClass, task.sourceVersion)
-        if (existing != null && File(existing.path).isFile) {
+        if (existing != null &&
+            File(existing.path).isFile &&
+            ThumbnailSpec.isCurrentCachePath(task.sizeClass, existing.path)
+        ) {
             cacheDao.touchThrottled(
                 task.filePath,
                 task.sizeClass,
