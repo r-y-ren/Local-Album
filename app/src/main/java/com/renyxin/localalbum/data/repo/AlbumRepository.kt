@@ -18,6 +18,7 @@ import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.core.recommendation.Recommendation
 import com.renyxin.localalbum.core.recommendation.RecommendationDiversifier
 import com.renyxin.localalbum.core.recommendation.RecommendationEngine
+import com.renyxin.localalbum.core.recommendation.RecommendationFileRotator
 import com.renyxin.localalbum.core.search.SemanticSearcher
 import com.renyxin.localalbum.data.backup.DatabaseExporter
 import com.renyxin.localalbum.data.backup.DatabaseImporter
@@ -180,6 +181,7 @@ class AlbumRepository(
         },
     ),
     private val recommendationDiversifier: RecommendationDiversifier = RecommendationDiversifier(),
+    private val recommendationFileRotator: RecommendationFileRotator = RecommendationFileRotator(),
     private val hybridIndexer: HybridIndexer? = null,
     private val thumbnailScheduler: ThumbnailScheduler? = null,
     private val deletionService: PersistentDeletionService? = null,
@@ -192,8 +194,8 @@ class AlbumRepository(
         private const val DATABASE_DELETE_BATCH_SIZE = 500
         private const val TRASH_PURGE_BATCH_SIZE = 200
 
-        /** 精选推荐最多读取的最近媒体数，避免大图库全量实体加载。 */
-        private const val RECOMMENDATION_CANDIDATE_LIMIT = 2_000
+        /** 全量推荐池按 keyset 分页构建，避免单次 Room 查询返回整个大图库。 */
+        private const val RECOMMENDATION_PAGE_SIZE = 1_000
     }
     /** 与 Repository 生命周期绑定的协程作用域，替代 GlobalScope */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -1162,14 +1164,14 @@ class AlbumRepository(
         val leafs = albumBuilder.buildFromDirectoryTree(rootTree, sortMode)
         _albumTree.value = albums
         _leafAlbums.value = leafs
-        // 初始加载时使用刷新机制打乱推荐
+        // 初始加载时生成首批推荐；后续用户刷新会沿用推荐池游标继续取下一批。
         refreshRecommendations(leafs)
     }
 
     /**
      * 刷新推荐列表。
-     * 从全量推荐池中取下一批未展示的推荐，保证每次刷新内容不同。
-     * 当所有推荐都展示完毕后自动重新打乱循环。
+     * 从全量推荐池中取下一批未展示的推荐，保证相邻批次不重复。
+     * 扫描期间仍会重新读取已提交候选，但不会重置现有推荐池的游标。
      */
     suspend fun refreshRecommendations() = withContext(Dispatchers.IO) {
         // 扫描期间媒体分析字段会持续更新；即使目录树尚未发布，也从已提交候选即时构建精选。
@@ -1177,13 +1179,19 @@ class AlbumRepository(
     }
 
     /**
-     * 将轻量目录摘要与数据库中的有限媒体候选合并为推荐输入。
-     * 上限保证大图库不会因精选功能发生全库实体加载，同时最新媒体可在扫描期间逐步呈现。
+     * 将轻量目录摘要与数据库中的全部媒体合并为推荐输入。
+     * 数据库使用稳定 keyset 分页读取；构建出的轮换池覆盖全部未回收媒体。
      */
     private suspend fun rebuildRecommendationPool(leafs: List<Album>) {
-        val candidatesByDirectory = mediaDao.getRecommendationCandidates(RECOMMENDATION_CANDIDATE_LIMIT)
-            .map { it.toMediaItem() }
-            .groupBy { it.filePath.substringBeforeLast('/', "") }
+        val allMedia = mutableListOf<MediaItem>()
+        var afterPath: String? = null
+        do {
+            val page = mediaDao.getRecommendationPageAfter(afterPath, RECOMMENDATION_PAGE_SIZE)
+            allMedia += page.map { it.toMediaItem() }
+            afterPath = page.lastOrNull()?.filePath
+        } while (page.size == RECOMMENDATION_PAGE_SIZE)
+
+        val candidatesByDirectory = allMedia.groupBy { it.filePath.substringBeforeLast('/', "") }
         val albumsByPath = leafs.associateBy { it.directoryPath }
         val hydrated = candidatesByDirectory.map { (directoryPath, items) ->
             albumsByPath[directoryPath]?.copy(
@@ -1197,8 +1205,8 @@ class AlbumRepository(
                 directMediaCount = items.size,
             )
         }
-        diversifiedRecommendationPool = emptyList()
-        recommendationCursor = 0
+        // 不要在每次刷新时清空推荐池和游标。旧实现会令下面的内部刷新每次都从
+        // 同一个确定性排序的首批开始，导致刷新按钮看起来完全失效。
         refreshRecommendations(hydrated)
     }
 
@@ -1208,10 +1216,12 @@ class AlbumRepository(
     private suspend fun refreshRecommendations(leafs: List<Album>) {
         // P3-1: 加锁保护共享的推荐池/游标，避免并发刷新导致状态错乱
         recommendationMutex.withLock {
-            // Phase 5: 若池为空或已循环完毕，重新生成全量推荐并用多样性有序选择替换随机打乱
+            // 仅在首次加载或全部文件完成一轮后重建。每个文件在一轮中只属于一个推荐。
             if (diversifiedRecommendationPool.isEmpty() || recommendationCursor >= diversifiedRecommendationPool.size) {
+                val allMedia = leafs.flatMap { it.mediaItems }
                 val allRecs = recommendationEngine.generateAll(leafs)
-                diversifiedRecommendationPool = recommendationDiversifier.selectAll(allRecs)
+                val diversified = recommendationDiversifier.selectAll(allRecs)
+                diversifiedRecommendationPool = recommendationFileRotator.build(diversified, allMedia)
                 recommendationCursor = 0
             }
 

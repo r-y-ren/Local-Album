@@ -42,13 +42,10 @@ class DatabaseExporterTest {
             store.values.toList().drop(offset).take(limit)
         override suspend fun getExportPageAfter(afterPath: String?, limit: Int): List<MediaEntity> =
             store.toSortedMap().values.filter { afterPath == null || it.filePath > afterPath }.take(limit)
-        override suspend fun getRecommendationCandidates(limit: Int): List<MediaEntity> =
-            store.values
-                .asSequence()
-                .filterNot { it.isTrashed }
-                .sortedWith(compareByDescending<MediaEntity> { it.capturedAtMs }.thenBy { it.filePath })
+        override suspend fun getRecommendationPageAfter(afterPath: String?, limit: Int): List<MediaEntity> =
+            store.toSortedMap().values
+                .filter { !it.isTrashed && (afterPath == null || it.filePath > afterPath) }
                 .take(limit)
-                .toList()
         override fun pagingSource(): androidx.paging.PagingSource<Int, MediaEntity> =
             throw NotImplementedError("Not needed for test")
         override fun directoryPagingSource(query: androidx.sqlite.db.SupportSQLiteQuery): androidx.paging.PagingSource<Int, MediaEntity> =

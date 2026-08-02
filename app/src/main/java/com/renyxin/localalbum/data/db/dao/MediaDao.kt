@@ -139,11 +139,11 @@ interface MediaDao {
     suspend fun getDirectorySummaries(): List<DirectorySummary>
 
     /**
-     * 精选推荐的有界候选集。目录树只保存摘要，推荐引擎仍需要真实媒体属性；
-     * 因此按时间读取固定上限，而不是重新把整个媒体库加载到内存。
+     * 精选推荐池的稳定 keyset 分页输入。
+     * 推荐轮换要求覆盖全部文件，因此按路径分批读取，避免 OFFSET 在大图库上的扫描放大。
      */
-    @Query("SELECT * FROM media_items WHERE isTrashed = 0 ORDER BY capturedAtMs DESC, filePath ASC LIMIT :limit")
-    suspend fun getRecommendationCandidates(limit: Int): List<MediaEntity>
+    @Query("SELECT * FROM media_items WHERE isTrashed = 0 AND (:afterPath IS NULL OR filePath > :afterPath) ORDER BY filePath ASC LIMIT :limit")
+    suspend fun getRecommendationPageAfter(afterPath: String?, limit: Int): List<MediaEntity>
 
     @Query("SELECT COUNT(*) FROM media_items WHERE isTrashed = 0")
     suspend fun getCount(): Int

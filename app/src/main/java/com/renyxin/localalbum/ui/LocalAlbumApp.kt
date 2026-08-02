@@ -924,16 +924,10 @@ private fun RecommendationTab(
     val recommendations by viewModel.recommendations.collectAsStateWithLifecycle()
     val scanState by viewModel.scanState.collectAsStateWithLifecycle()
 
-    // 进入精选页立即读取当前数据库候选；扫描期间定时刷新，使已写入的媒体逐步呈现。
+    // 进入精选页只加载一次。推荐刷新会消费下一批内容，因此不能在扫描期间轮询调用；
+    // 否则页面会每 1.5 秒自动切换推荐，且扫描结束时还会额外跳过一批。
     LaunchedEffect(Unit) {
         viewModel.refreshRecommendations()
-    }
-    LaunchedEffect(scanState) {
-        while (scanState is ScanState.Scanning) {
-            delay(1_500L)
-            viewModel.refreshRecommendations()
-        }
-        if (scanState is ScanState.Done) viewModel.refreshRecommendations()
     }
 
     Scaffold(
