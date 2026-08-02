@@ -174,6 +174,33 @@ class ProgressManagerTest {
     }
 
     @Test
+    fun `stage numeric progress follows authoritative processed callback`() {
+        val mgr = ProgressManager()
+        mgr.beginPipeline(totalFiles = 100, stageIds = listOf("face", "scene", "ocr"))
+        mgr.onStageStart("face", "人脸识别", 100)
+
+        // PROCESSING 会改变当前文件，但不是终态；随后数字回调必须独立推进阶段数字。
+        mgr.onFileStatusChange("face", "a.jpg", FileProcessingStatus.PROCESSING)
+        mgr.onFileProgress("face", 17, 100)
+
+        val stage = mgr.progress.value.perStageFiles.getValue("face")
+        assertEquals(17, stage.completedCount)
+        assertEquals(100, stage.totalCount)
+        assertEquals(FileProcessingStatus.PROCESSING, stage.files.single().status)
+    }
+
+    @Test
+    fun `failed files count as processed in stage progress`() {
+        val mgr = ProgressManager()
+        mgr.beginPipeline(totalFiles = 2, stageIds = listOf("ocr"))
+        mgr.onStageStart("ocr", "文字识别", 2)
+        mgr.onFileStatusChange("ocr", "a.jpg", FileProcessingStatus.COMPLETED)
+        mgr.onFileStatusChange("ocr", "b.jpg", FileProcessingStatus.FAILED)
+
+        assertEquals(2, mgr.progress.value.perStageFiles.getValue("ocr").completedCount)
+    }
+
+    @Test
     fun `onStageError sets hasError and preserves extra info`() {
         val mgr = ProgressManager()
         mgr.beginPipeline(totalFiles = 30, stageIds = listOf("a", "b"))

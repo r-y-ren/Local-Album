@@ -279,10 +279,17 @@ class ProgressManager(
      */
     private fun buildStageFileProgress(stageId: String): StageFileProgress = synchronized(lock) {
         val fileMap = perFileStatus[stageId] ?: return StageFileProgress.EMPTY
-        val completedCount = fileMap.count {
-            it.value == FileProcessingStatus.COMPLETED
-        }
         val totalCount = ownedStageFilesTotal[stageId] ?: fileMap.size.coerceAtLeast(1)
+        // 数字进度必须与 onFileProgress 的权威计数一致。部分阶段只上报 (processed,total)
+        // 或在断点续跑时没有逐文件状态；旧逻辑仅统计 COMPLETED 状态，导致当前文件变化
+        // 但阶段数字长期停在 0。FAILED 同样属于“已处理”，不能令进度永远达不到总数。
+        val terminalStatusCount = fileMap.count {
+            it.value == FileProcessingStatus.COMPLETED || it.value == FileProcessingStatus.FAILED
+        }
+        val completedCount = maxOf(
+            ownedStageFilesCompleted[stageId] ?: 0,
+            terminalStatusCount,
+        ).coerceIn(0, totalCount)
         val displayName = stageDisplayNames[stageId] ?: stageId
 
         val fileProgressList = fileMap.map { (path, status) ->
