@@ -398,12 +398,18 @@ fun LocalAlbumApp(
 
         is Screen.Trash -> {
             val trashedItems = albumViewModel.pagedTrash.collectAsLazyPagingItems()
+            val trashedCount by albumViewModel.trashedCount.collectAsStateWithLifecycle()
+            val operationState by albumViewModel.trashOperationState.collectAsStateWithLifecycle()
             TrashScreen(
                 trashedItems = trashedItems,
+                totalCount = trashedCount,
+                operationState = operationState,
+                onOperationMessageConsumed = albumViewModel::consumeTrashOperationResult,
                 onBack = { goBack() },
                 onRestore = { paths -> albumViewModel.restoreFromTrash(paths) },
                 onPermanentlyDelete = { paths -> albumViewModel.permanentlyDelete(paths) },
                 onClearTrash = { albumViewModel.clearTrash() },
+                loadAllTrashedPaths = { albumViewModel.getAllTrashedPaths() },
             )
         }
 

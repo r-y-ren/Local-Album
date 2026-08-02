@@ -22,6 +22,7 @@ import com.renyxin.localalbum.data.repo.FaceStats
 import com.renyxin.localalbum.data.repo.DuplicateGroup
 import com.renyxin.localalbum.data.db.entity.MaintenanceRunEntity
 import com.renyxin.localalbum.data.repo.ScanState
+import com.renyxin.localalbum.data.repo.AlbumRepository.TrashOperationResult
 import com.renyxin.localalbum.data.repo.SemanticSearchResult
 import com.renyxin.localalbum.data.repo.SemanticSearchState
 import com.renyxin.localalbum.data.repo.SemanticStats
@@ -189,16 +190,66 @@ class AlbumViewModel(
         viewModelScope.launch { repository.deleteMediaItems(paths) }
     }
 
+    suspend fun getAllTrashedPaths(): List<String> = repository.getAllTrashedPaths()
+
+    sealed interface TrashOperationState {
+        data object Idle : TrashOperationState
+        data class Running(val operation: String) : TrashOperationState
+        data class Completed(val message: String) : TrashOperationState
+        data class Failed(val message: String) : TrashOperationState
+    }
+
+    private val _trashOperationState = MutableStateFlow<TrashOperationState>(TrashOperationState.Idle)
+    val trashOperationState: StateFlow<TrashOperationState> = _trashOperationState.asStateFlow()
+
     fun permanentlyDelete(paths: List<String>) {
-        viewModelScope.launch { repository.permanentlyDelete(paths) }
+        if (_trashOperationState.value is TrashOperationState.Running) return
+        viewModelScope.launch {
+            _trashOperationState.value = TrashOperationState.Running("正在永久删除")
+            _trashOperationState.value = runCatching { repository.permanentlyDelete(paths) }
+                .fold(::deletionResultState) { error ->
+                    TrashOperationState.Failed(error.message ?: "永久删除失败")
+                }
+        }
     }
 
     fun restoreFromTrash(paths: List<String>) {
-        viewModelScope.launch { repository.restoreFromTrash(paths) }
+        if (_trashOperationState.value is TrashOperationState.Running) return
+        viewModelScope.launch {
+            _trashOperationState.value = TrashOperationState.Running("正在恢复")
+            _trashOperationState.value = runCatching {
+                repository.restoreFromTrash(paths)
+                TrashOperationState.Completed("已恢复 ${paths.distinct().size} 项")
+            }.getOrElse { error -> TrashOperationState.Failed(error.message ?: "恢复失败") }
+        }
     }
 
     fun clearTrash() {
-        viewModelScope.launch { repository.clearTrash() }
+        if (_trashOperationState.value is TrashOperationState.Running) return
+        viewModelScope.launch {
+            _trashOperationState.value = TrashOperationState.Running("正在清空回收站")
+            _trashOperationState.value = runCatching { repository.clearTrash() }
+                .fold(::deletionResultState) { error ->
+                    TrashOperationState.Failed(error.message ?: "清空回收站失败")
+                }
+        }
+    }
+
+    fun consumeTrashOperationResult() {
+        if (_trashOperationState.value !is TrashOperationState.Running) {
+            _trashOperationState.value = TrashOperationState.Idle
+        }
+    }
+
+    private fun deletionResultState(result: TrashOperationResult): TrashOperationState = when {
+        result.requested == 0 -> TrashOperationState.Completed("没有需要删除的项目")
+        result.failed == 0 -> TrashOperationState.Completed("已永久删除 ${result.completed} 项")
+        result.completed == 0 -> TrashOperationState.Failed(
+            "未能删除文件，请授予文件管理权限后重试（${result.failed} 项）",
+        )
+        else -> TrashOperationState.Completed(
+            "已删除 ${result.completed} 项，${result.failed} 项因权限不足保留在回收站",
+        )
     }
 
     // ---- 语义搜索 (Phase 4.1) ----

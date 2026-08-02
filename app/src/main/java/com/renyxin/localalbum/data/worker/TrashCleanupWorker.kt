@@ -18,13 +18,16 @@ class TrashCleanupWorker(
             ?.container?.albumRepository ?: return Result.failure()
         val threshold = System.currentTimeMillis() - CLEANUP_DAYS_MS
 
-        // 每次只处理有限批次；repository 统一保证关联表清理语义。
-        // 删除失败的物理文件仍留在回收站，后续周期任务可再次尝试。
+        // 使用 keyset 游标继续扫描，即使某批全部因权限失败，也不会阻塞后续过期项。
+        // 删除失败文件仍留在回收站，并由持久 tombstone 重试机制继续处理。
         var batches = 0
+        var afterPath = ""
         while (batches < MAX_BATCHES_PER_RUN) {
-            val deleted = repository.purgeExpiredTrashBatch(threshold, BATCH_SIZE)
-            if (deleted == 0) break
+            val result = repository.purgeExpiredTrashBatch(threshold, afterPath, BATCH_SIZE)
+            if (result.scanned == 0) break
+            afterPath = result.lastPath ?: break
             batches++
+            if (result.scanned < BATCH_SIZE) break
         }
         return Result.success()
     }

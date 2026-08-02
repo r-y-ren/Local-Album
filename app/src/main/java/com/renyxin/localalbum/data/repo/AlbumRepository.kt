@@ -621,16 +621,24 @@ class AlbumRepository(
         refreshStats()
     }
 
+    data class TrashOperationResult(
+        val requested: Int,
+        val completed: Int,
+    ) {
+        val failed: Int get() = (requested - completed).coerceAtLeast(0)
+    }
+
     /**
      * 彻底删除物理文件，并且只清理删除成功或原本已不存在路径的数据库记录。
      *
      * 删除失败项保留原数据库/回收站状态，避免无权限删除时记录先消失、随后又被扫描复活。
      */
-    suspend fun permanentlyDelete(paths: List<String>) = withContext(Dispatchers.IO) {
-        if (paths.isEmpty()) return@withContext
+    suspend fun permanentlyDelete(paths: List<String>): TrashOperationResult = withContext(Dispatchers.IO) {
+        val distinct = paths.distinct()
+        if (distinct.isEmpty()) return@withContext TrashOperationResult(0, 0)
         val service = requireNotNull(deletionService) { "PersistentDeletionService 未注入" }
         val physicallyDeleted = service.delete(
-            paths,
+            distinct,
             com.renyxin.localalbum.data.db.entity.DeletionTombstoneEntity.OP_USER_PERMANENT,
         )
         if (physicallyDeleted.isNotEmpty()) {
@@ -638,6 +646,7 @@ class AlbumRepository(
             refreshStats()
         }
         appContext?.let { com.renyxin.localalbum.data.worker.DeletionRetryWorker.enqueue(it) }
+        TrashOperationResult(distinct.size, physicallyDeleted.size)
     }
 
     suspend fun restoreFromTrash(paths: List<String>) = withContext(Dispatchers.IO) {
@@ -655,30 +664,48 @@ class AlbumRepository(
         loadFromDb()
     }
 
+    /** 为 Android 11+ 系统删除授权按稳定路径分页收集回收站路径。 */
+    suspend fun getAllTrashedPaths(): List<String> = withContext(Dispatchers.IO) {
+        val result = mutableListOf<String>()
+        var afterPath = ""
+        while (true) {
+            val page = mediaDao.getTrashedPathsAfter(afterPath, TRASH_PURGE_BATCH_SIZE)
+            if (page.isEmpty()) break
+            result += page
+            afterPath = page.last()
+            if (page.size < TRASH_PURGE_BATCH_SIZE) break
+        }
+        result
+    }
+
     /**
      * 清空回收站：按路径 keyset 有界读取，只清理物理删除成功或原文件已不存在的路径。
      *
      * 游标始终推进到本次读取批次的末尾，因此删除失败项不会反复占据首批形成死循环；
      * 它们保留在回收站中，用户下次操作时可重试。
      */
-    suspend fun clearTrash() = withContext(Dispatchers.IO) {
+    suspend fun clearTrash(): TrashOperationResult = withContext(Dispatchers.IO) {
         var afterPath = ""
-        var purgedAny = false
+        var requested = 0
+        var completed = 0
         while (true) {
             val paths = mediaDao.getTrashedPathsAfter(afterPath, TRASH_PURGE_BATCH_SIZE)
             if (paths.isEmpty()) break
             afterPath = paths.last()
+            requested += paths.size
             val physicallyDeleted = requireNotNull(deletionService) { "PersistentDeletionService 未注入" }.delete(
                 paths,
                 com.renyxin.localalbum.data.db.entity.DeletionTombstoneEntity.OP_CLEAR_TRASH,
             )
-            if (physicallyDeleted.isNotEmpty()) purgedAny = true
+            completed += physicallyDeleted.size
             if (paths.size < TRASH_PURGE_BATCH_SIZE) break
         }
-        if (purgedAny) {
+        if (completed > 0) {
             rebuildTreeFromDirectorySummaries()
             refreshStats()
         }
+        appContext?.let { com.renyxin.localalbum.data.worker.DeletionRetryWorker.enqueue(it) }
+        TrashOperationResult(requested, completed)
     }
 
     /**
@@ -693,19 +720,26 @@ class AlbumRepository(
         result.deletedOrMissing
     }
 
+    /** 过期回收站批次结果；[lastPath] 用于 Worker 继续扫描，避免失败项阻塞后续记录。 */
+    data class ExpiredTrashBatchResult(val scanned: Int, val deleted: Int, val lastPath: String?)
+
     /**
-     * 供用户永久删除和后台回收站清理复用的一致删除入口。
-     * 仅在物理文件已删除或原文件已不存在时清理数据库，删除失败的路径保留在回收站以便重试。
+     * 供后台回收站清理复用的一致删除入口。
+     * 仅在物理文件已删除或原文件已不存在时清理数据库，删除失败路径保留供后续重试。
      */
-    suspend fun purgeExpiredTrashBatch(before: Long, limit: Int = 200): Int = withContext(Dispatchers.IO) {
-        val paths = mediaDao.getExpiredTrashPaths(before, limit)
-        if (paths.isEmpty()) return@withContext 0
+    suspend fun purgeExpiredTrashBatch(
+        before: Long,
+        afterPath: String = "",
+        limit: Int = 200,
+    ): ExpiredTrashBatchResult = withContext(Dispatchers.IO) {
+        val paths = mediaDao.getExpiredTrashPathsAfter(before, afterPath, limit)
+        if (paths.isEmpty()) return@withContext ExpiredTrashBatchResult(0, 0, null)
         val physicallyDeleted = requireNotNull(deletionService) { "PersistentDeletionService 未注入" }.delete(
             paths,
             com.renyxin.localalbum.data.db.entity.DeletionTombstoneEntity.OP_EXPIRED_TRASH,
         )
         removeFromMemoryTree(physicallyDeleted.toSet())
-        physicallyDeleted.size
+        ExpiredTrashBatchResult(paths.size, physicallyDeleted.size, paths.last())
     }
 
     /**

@@ -1,5 +1,10 @@
 package com.renyxin.localalbum.ui.screens
 
+import android.app.Activity
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -56,6 +61,8 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
+import com.renyxin.localalbum.core.saf.MediaStoreDeleteRequest
+import com.renyxin.localalbum.ui.vm.AlbumViewModel
 import kotlinx.coroutines.launch
 import java.time.Duration
 import java.time.Instant
@@ -68,12 +75,14 @@ private const val TRASH_RETENTION_DAYS = 30L
 @Composable
 fun TrashScreen(
     trashedItems: LazyPagingItems<MediaItem>,
+    totalCount: Int,
+    operationState: AlbumViewModel.TrashOperationState,
+    onOperationMessageConsumed: () -> Unit,
     onBack: () -> Unit,
     onRestore: (List<String>) -> Unit = {},
     onPermanentlyDelete: (List<String>) -> Unit = {},
     onClearTrash: () -> Unit = {},
-    batchMessage: String? = null,
-    onBatchMessageConsumed: () -> Unit = {},
+    loadAllTrashedPaths: suspend () -> List<String> = { emptyList() },
 ) {
     var isSelectionMode by remember { mutableStateOf(false) }
     val selectedPaths = remember { mutableStateMapOf<String, Boolean>() }
@@ -81,21 +90,57 @@ fun TrashScreen(
     var showClearConfirm by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-    var operationInFlight by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val operationInFlight = operationState is AlbumViewModel.TrashOperationState.Running
+    var pendingSystemDeletePaths by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pendingClearTrash by remember { mutableStateOf(false) }
+
+    val systemDeleteLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        val paths = pendingSystemDeletePaths
+        val clear = pendingClearTrash
+        pendingSystemDeletePaths = emptyList()
+        pendingClearTrash = false
+        if (result.resultCode == Activity.RESULT_OK) {
+            // 系统已删除文件；Repository 将其识别为 MISSING 并原子清理关联数据。
+            if (clear) onClearTrash() else onPermanentlyDelete(paths)
+        } else {
+            scope.launch { snackbarHostState.showSnackbar("已取消系统删除授权") }
+        }
+    }
+
+    fun requestPermanentDelete(paths: List<String>, clearTrash: Boolean = false) {
+        val distinct = paths.distinct()
+        val request = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            MediaStoreDeleteRequest.create(context, distinct)
+        } else null
+        if (request != null) {
+            pendingSystemDeletePaths = distinct
+            pendingClearTrash = clearTrash
+            systemDeleteLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+        } else if (clearTrash) {
+            onClearTrash()
+        } else {
+            onPermanentlyDelete(distinct)
+        }
+    }
 
     // 退出选择模式时清空选择
     LaunchedEffect(isSelectionMode) {
         if (!isSelectionMode) selectedPaths.clear()
     }
 
-    // 批量消息 → Snackbar
-    LaunchedEffect(batchMessage) {
-        if (!batchMessage.isNullOrBlank()) {
-            snackbarHostState.showSnackbar(
-                message = batchMessage,
-                duration = SnackbarDuration.Short,
-            )
-            onBatchMessageConsumed()
+    // 仅在 Repository 的异步操作真正结束后反馈结果，不再提前宣称成功。
+    LaunchedEffect(operationState) {
+        val message = when (operationState) {
+            is AlbumViewModel.TrashOperationState.Completed -> operationState.message
+            is AlbumViewModel.TrashOperationState.Failed -> operationState.message
+            else -> null
+        }
+        if (message != null) {
+            snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Long)
+            onOperationMessageConsumed()
         }
     }
 
@@ -116,19 +161,11 @@ fun TrashScreen(
                 Text("确定要永久删除选中的 $count 个文件吗？此操作不可撤销，文件将无法恢复！")
             },
             confirmButton = {
-                TextButton(onClick = {
-                    operationInFlight = true
-                    onPermanentlyDelete(selectedPaths.keys.toList())
+                TextButton(enabled = !operationInFlight, onClick = {
+                    requestPermanentDelete(selectedPaths.keys.toList())
                     selectedPaths.clear()
                     isSelectionMode = false
                     showDeleteConfirm = false
-                    operationInFlight = false
-                    scope.launch {
-                        snackbarHostState.showSnackbar(
-                            message = "已永久删除 $count 项",
-                            duration = SnackbarDuration.Short,
-                        )
-                    }
                 }) {
                     Text("永久删除", color = MaterialTheme.colorScheme.error)
                 }
@@ -143,7 +180,6 @@ fun TrashScreen(
 
     // 清空回收站确认
     if (showClearConfirm) {
-        val totalCount = trashedItems.itemCount
         AlertDialog(
             onDismissRequest = { showClearConfirm = false },
             icon = {
@@ -158,18 +194,12 @@ fun TrashScreen(
                 Text("确定要清空回收站中的所有 $totalCount 个文件吗？此操作不可撤销！")
             },
             confirmButton = {
-                TextButton(onClick = {
-                    operationInFlight = true
-                    onClearTrash()
+                TextButton(enabled = !operationInFlight, onClick = {
+                    scope.launch {
+                        requestPermanentDelete(loadAllTrashedPaths(), clearTrash = true)
+                    }
                     showClearConfirm = false
                     isSelectionMode = false
-                    operationInFlight = false
-                    scope.launch {
-                        snackbarHostState.showSnackbar(
-                            message = "回收站已清空",
-                            duration = SnackbarDuration.Short,
-                        )
-                    }
                 }) {
                     Text("清空", color = MaterialTheme.colorScheme.error)
                 }
@@ -199,20 +229,11 @@ fun TrashScreen(
                     },
                     actions = {
                         // 恢复按钮
-                        IconButton(onClick = {
+                        IconButton(enabled = !operationInFlight, onClick = {
                             if (selectedPaths.isNotEmpty()) {
-                                val restoredCount = selectedPaths.size
-                                operationInFlight = true
                                 onRestore(selectedPaths.keys.toList())
                                 selectedPaths.clear()
                                 isSelectionMode = false
-                                operationInFlight = false
-                                scope.launch {
-                                    snackbarHostState.showSnackbar(
-                                        message = "已恢复 $restoredCount 项",
-                                        duration = SnackbarDuration.Short,
-                                    )
-                                }
                             }
                         }) {
                             Icon(
@@ -224,7 +245,7 @@ fun TrashScreen(
                             )
                         }
                         // 永久删除按钮
-                        IconButton(onClick = {
+                        IconButton(enabled = !operationInFlight, onClick = {
                             if (selectedPaths.isNotEmpty()) showDeleteConfirm = true
                         }) {
                             Icon(
@@ -242,15 +263,15 @@ fun TrashScreen(
                 )
             } else {
                 TopAppBar(
-                    title = { Text("回收站 (${trashedItems.itemCount})") },
+                    title = { Text("回收站 ($totalCount)") },
                     navigationIcon = {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
                         }
                     },
                     actions = {
-                        if (trashedItems.itemCount > 0) {
-                            IconButton(onClick = { showClearConfirm = true }) {
+                        if (totalCount > 0) {
+                            IconButton(enabled = !operationInFlight, onClick = { showClearConfirm = true }) {
                                 Icon(
                                     Icons.Default.DeleteForever,
                                     contentDescription = "清空回收站",
@@ -267,17 +288,10 @@ fun TrashScreen(
                 // 快捷恢复按钮
                 ExtendedFloatingActionButton(
                     onClick = {
-                        if (selectedPaths.isNotEmpty()) {
-                            val restoredCount = selectedPaths.size
+                        if (!operationInFlight && selectedPaths.isNotEmpty()) {
                             onRestore(selectedPaths.keys.toList())
                             selectedPaths.clear()
                             isSelectionMode = false
-                            scope.launch {
-                                snackbarHostState.showSnackbar(
-                                    message = "已恢复 $restoredCount 项",
-                                    duration = SnackbarDuration.Short,
-                                )
-                            }
                         }
                     },
                     icon = { Icon(Icons.Default.RestoreFromTrash, "恢复") },
@@ -295,7 +309,7 @@ fun TrashScreen(
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 
-        if (trashedItems.itemCount == 0 && trashedItems.loadState.refresh !is androidx.paging.LoadState.Loading) {
+        if (totalCount == 0 && trashedItems.loadState.refresh !is androidx.paging.LoadState.Loading) {
             // 空回收站 —— 增强空状态
             Box(
                 modifier = Modifier
@@ -415,13 +429,7 @@ fun TrashScreen(
                         selectedPaths[item.filePath] = true
                     },
                     onRestore = {
-                        onRestore(listOf(item.filePath))
-                        scope.launch {
-                            snackbarHostState.showSnackbar(
-                                message = "已恢复「${item.fileName}」",
-                                duration = SnackbarDuration.Short,
-                            )
-                        }
+                        if (!operationInFlight) onRestore(listOf(item.filePath))
                     },
                     now = now,
                 )

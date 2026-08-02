@@ -200,9 +200,12 @@ interface MediaDao {
     @Query("SELECT COUNT(*) FROM media_items WHERE isTrashed = 1")
     fun getTrashedCountFlow(): Flow<Int>
 
-    /** 自动清理仅领取有限路径，避免加载完整回收站实体集合。 */
-    @Query("SELECT filePath FROM media_items WHERE isTrashed = 1 AND deletedAtMs > 0 AND deletedAtMs <= :before ORDER BY deletedAtMs ASC, filePath ASC LIMIT :limit")
-    suspend fun getExpiredTrashPaths(before: Long, limit: Int): List<String>
+    /**
+     * 自动清理按路径 keyset 扫描过期项。游标允许跳过本轮删除失败的记录，
+     * 防止无权限文件长期占据首批并饿死后续可清理项。
+     */
+    @Query("SELECT filePath FROM media_items WHERE isTrashed = 1 AND deletedAtMs > 0 AND deletedAtMs <= :before AND filePath > :afterPath ORDER BY filePath ASC LIMIT :limit")
+    suspend fun getExpiredTrashPathsAfter(before: Long, afterPath: String, limit: Int): List<String>
 
     /**
      * 用户清空回收站时按路径 keyset 读取有限批次。

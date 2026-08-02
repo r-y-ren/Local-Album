@@ -84,8 +84,9 @@ class DatabaseExporterTest {
         override suspend fun batchSetFavorite(paths: List<String>, favorite: Boolean) {}
         override suspend fun getTrashedCount(): Int = store.values.count { it.isTrashed }
         override fun getTrashedCountFlow(): Flow<Int> = flowOf(store.values.count { it.isTrashed })
-        override suspend fun getExpiredTrashPaths(before: Long, limit: Int): List<String> =
-            store.values.filter { it.isTrashed && it.deletedAtMs in 1L..before }.map { it.filePath }.take(limit)
+        override suspend fun getExpiredTrashPathsAfter(before: Long, afterPath: String, limit: Int): List<String> =
+            store.values.filter { it.isTrashed && it.deletedAtMs in 1L..before && it.filePath > afterPath }
+                .map { it.filePath }.sorted().take(limit)
         override suspend fun getTrashedPathsAfter(afterPath: String, limit: Int): List<String> =
             store.values.asSequence()
                 .filter { it.isTrashed && it.filePath > afterPath }
