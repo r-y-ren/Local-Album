@@ -69,6 +69,7 @@ class SceneStage(
             successCount = success,
             failedCount = failed,
             extra = labelCounts.mapValues { it.value.toString() } + ("providerId" to sceneProvider.providerId),
+            failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
         )
     }
 }

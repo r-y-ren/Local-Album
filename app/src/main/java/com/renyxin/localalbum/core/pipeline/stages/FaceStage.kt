@@ -187,10 +187,11 @@ class FaceStage(
                     "noiseCount" to noiseCount.toString(),
                     "providerId" to faceProvider.providerId,
                 ),
+                failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
             )
         } catch (e: Exception) {
             Log.w("FaceStage", "人脸检测阶段失败", e)
-            return StageResult(successCount = 0, failedCount = total)
+            return StageResult(successCount = 0, failedCount = total, failedPaths = filePaths.toSet())
         }
     }
 

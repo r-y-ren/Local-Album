@@ -14,6 +14,7 @@ import android.util.Size
 import androidx.annotation.RequiresApi
 import androidx.exifinterface.media.ExifInterface
 import com.renyxin.localalbum.core.index.IgnorePatternMatcher
+import com.renyxin.localalbum.core.index.ScanRootPolicy
 import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
 import com.renyxin.localalbum.core.model.DirectoryNode
 import com.renyxin.localalbum.core.model.MediaItem
@@ -100,20 +101,24 @@ class MediaSource(
         require(batchSize > 0)
         val compiled = IgnorePatternMatcher.compile(ignorePatterns)
         val pendingDirs = java.util.ArrayDeque<File>()
-        rootPaths.forEach { rootPath ->
+        ScanRootPolicy.normalize(rootPaths).forEach { rootPath ->
             val root = File(rootPath)
             require(root.exists() && root.isDirectory && root.canRead()) {
                 "扫描根目录不可访问: ${root.name}"
             }
             pendingDirs.addLast(root)
         }
+        val visitedDirs = HashSet<String>()
         val batch = ArrayList<MediaItem>(batchSize)
         while (pendingDirs.isNotEmpty()) {
             val dir = pendingDirs.removeLast()
+            val directoryKey = ScanRootPolicy.directoryKey(dir) ?: continue
+            if (!visitedDirs.add(directoryKey)) continue
             val files = dir.listFiles() ?: error("扫描目录遍历失败: ${dir.name}")
             for (file in files) {
                 when {
                     file.isDirectory -> {
+                        if (ScanRootPolicy.isSymbolicLink(file)) continue
                         if (shouldIgnoreDir(file.name, compiled) || hasNoMedia(file, allowNomedia)) continue
                         pendingDirs.addLast(file)
                     }

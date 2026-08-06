@@ -64,6 +64,7 @@ class BuiltinOcrStage(
             successCount = success,
             failedCount = failed,
             extra = mapOf("textFound" to textCount.toString()),
+            failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
         )
     }
 }

@@ -62,6 +62,7 @@ class QualityStage(
             successCount = success,
             failedCount = failed,
             extra = mapOf("providerId" to qualityProvider.providerId),
+            failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
         )
     }
 }

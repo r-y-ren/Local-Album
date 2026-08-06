@@ -69,7 +69,11 @@ class PluginAnalysisStage(
     ): StageResult {
         if (!plugin.isReady()) {
             Log.w("PluginAnalysis", "插件 ${plugin.getId()} 未就绪，跳过")
-            return StageResult(successCount = 0, failedCount = filePaths.size)
+            return StageResult(
+                successCount = 0,
+                failedCount = filePaths.size,
+                failedPaths = filePaths.toSet(),
+            )
         }
 
         val total = filePaths.size
@@ -83,12 +87,14 @@ class PluginAnalysisStage(
 
         // 2. 逐图推理
         val entities = mutableListOf<FeatureStoreEntity>()
+        val failedPaths = linkedSetOf<String>()
 
         for (path in filePaths) {
             try {
                 val file = File(path)
                 if (!file.exists()) {
                     failed++
+                    failedPaths += path
                     enhancedCallback(success + failed, total, path, FileProcessingStatus.FAILED)
                     continue
                 }
@@ -113,6 +119,7 @@ class PluginAnalysisStage(
             } catch (e: Exception) {
                 Log.w("PluginAnalysis", "插件 ${plugin.getId()} 推理失败: $path", e)
                 failed++
+                failedPaths += path
                 enhancedCallback(success + failed, total, path, FileProcessingStatus.FAILED)
             }
         }
@@ -122,6 +129,6 @@ class PluginAnalysisStage(
             featureStoreDao.insertAll(entities)
         }
 
-        return StageResult(successCount = success, failedCount = failed)
+        return StageResult(successCount = success, failedCount = failed, failedPaths = failedPaths)
     }
 }

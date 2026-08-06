@@ -100,7 +100,8 @@ class SemanticStage(
                         qualityScore = entity?.qualityScore ?: 0f,
                     )
                     val vec = embedProvider.embedImage(File(path), context)
-                    if (vec == null || vec.all { it == 0f }) null else MediaEmbedding(
+                    require(vec != null && vec.any { it != 0f }) { "semantic_empty_vector" }
+                    MediaEmbedding(
                         filePath = path,
                         // 保留 CSV 以兼容旧备份与 FeatureStore；搜索读取端优先走 BLOB。
                         embedding = serializeEmbedding(vec),
@@ -122,7 +123,7 @@ class SemanticStage(
                     result.value
                 }
                 success += batchEmbeddings.size
-                failed += results.size - batchEmbeddings.size
+                failed += results.count { !it.success }
                 if (batchEmbeddings.isNotEmpty()) {
                     embeddingDao.insertEmbeddings(batchEmbeddings)
                     embeddings.addAll(batchEmbeddings)
@@ -188,13 +189,17 @@ class SemanticStage(
             }
         } catch (e: Exception) {
             Log.w("SemanticStage", "语义嵌入阶段失败", e)
-            return StageResult(successCount = 0, failedCount = total)
+            return StageResult(successCount = 0, failedCount = total, failedPaths = filePaths.toSet())
         }
 
+        val failedPaths = filePaths.filterTo(linkedSetOf()) { path ->
+            embeddings.none { it.filePath == path }
+        }
         return StageResult(
             successCount = success,
-            failedCount = failed,
+            failedCount = failedPaths.size,
             extra = mapOf("providerId" to embedProvider.providerId),
+            failedPaths = failedPaths,
         )
     }
 

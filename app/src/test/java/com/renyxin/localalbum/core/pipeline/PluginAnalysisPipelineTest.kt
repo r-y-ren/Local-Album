@@ -228,6 +228,36 @@ class PluginAnalysisPipelineTest {
         assertEquals(PluginAnalysisPipeline.Status.COMPLETED, pipeline.pipelineStatusFlow.value)
     }
 
+    @Test
+    fun `per file failure remains attached to failed path only`() = runBlocking {
+        val stage = object : AnalysisStage {
+            override val stageId = "per-file"
+            override val stageType = StageType.BUILTIN
+            override val displayName = "Per file"
+            override val dependencies = emptyList<String>()
+
+            override suspend fun execute(
+                filePaths: List<String>,
+                progressCallback: suspend (Int, Int) -> Unit,
+            ) = StageResult(filePaths.size, 0)
+
+            override suspend fun executeEnhanced(
+                filePaths: List<String>,
+                enhancedCallback: EnhancedProgressCallback,
+            ): StageResult {
+                enhancedCallback(1, 2, "/good.jpg", FileProcessingStatus.COMPLETED)
+                enhancedCallback(2, 2, "/bad.jpg", FileProcessingStatus.FAILED)
+                return StageResult(1, 1, failedPaths = setOf("/bad.jpg"))
+            }
+        }
+
+        val result = PluginAnalysisPipeline(listOf(stage))
+            .runIncremental(listOf("/good.jpg", "/bad.jpg"), emptyList())
+            .getValue("per-file")
+
+        assertEquals(setOf("/bad.jpg"), result.failedPaths)
+    }
+
     // ---- 增量扫描 ----
 
     @Test

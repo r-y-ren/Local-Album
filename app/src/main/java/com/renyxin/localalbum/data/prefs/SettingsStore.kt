@@ -20,11 +20,13 @@ private val Context.settingsDataStore: DataStore<Preferences> by preferencesData
  * 持久化用户设置。
  *  - 扫描根目录列表、忽略目录名规则
  *  - 主题模式 (0=System, 1=Light, 2=Dark)
+ *  - 扫描与 AI 识别进度 UI 是否显示
  *  - 首次引导是否已完成
  */
-class SettingsStore(private val context: Context) {
-
-    private val store = context.settingsDataStore
+class SettingsStore internal constructor(
+    private val store: DataStore<Preferences>,
+) {
+    constructor(context: Context) : this(context.settingsDataStore)
 
     val scanRoots: Flow<List<String>> = store.data.map { prefs ->
         prefs[KEY_SCAN_ROOTS]?.toList()?.sorted() ?: emptyList()
@@ -75,6 +77,11 @@ class SettingsStore(private val context: Context) {
         prefs[KEY_SHOW_NOMEDIA] ?: false
     }
 
+    /** 默认保持现有行为：显示扫描与 AI 识别进度 UI。 */
+    val showAnalysisProgressUi: Flow<Boolean> = store.data.map { prefs ->
+        prefs[KEY_SHOW_ANALYSIS_PROGRESS_UI] ?: true
+    }
+
     /** 相册排序模式: 0=名称, 1=日期, 2=大小, 3=数量 */
     val albumSortMode: Flow<Int> = store.data.map { prefs ->
         prefs[KEY_ALBUM_SORT] ?: 0
@@ -88,6 +95,12 @@ class SettingsStore(private val context: Context) {
     suspend fun setShowNomediaDirectories(show: Boolean) {
         store.edit { prefs ->
             prefs[KEY_SHOW_NOMEDIA] = show
+        }
+    }
+
+    suspend fun setShowAnalysisProgressUi(show: Boolean) {
+        store.edit { prefs ->
+            prefs[KEY_SHOW_ANALYSIS_PROGRESS_UI] = show
         }
     }
 
@@ -180,6 +193,7 @@ class SettingsStore(private val context: Context) {
         val KEY_RECOMMENDATION_PREFERENCE = intPreferencesKey("recommendation_preference")
         val KEY_ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
         val KEY_SHOW_NOMEDIA = booleanPreferencesKey("show_nomedia")
+        val KEY_SHOW_ANALYSIS_PROGRESS_UI = booleanPreferencesKey("show_analysis_progress_ui")
         val KEY_ALBUM_SORT = intPreferencesKey("album_sort")
         val KEY_GESTURE_GUIDE_SHOWN = booleanPreferencesKey("gesture_guide_shown")
     }

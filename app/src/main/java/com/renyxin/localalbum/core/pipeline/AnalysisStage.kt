@@ -130,11 +130,14 @@ interface AnalysisStage {
  * @param successCount 成功处理数
  * @param failedCount 失败处理数
  * @param extra 扩展信息键值对（如聚类数量、标签分布等，供上层决策/日志记录）
+ * @param failedPaths 明确失败的文件路径。管道会校验它与 [failedCount] 是否一致；
+ *   无法精确定位失败文件时采用保守策略，将本阶段整个待处理窗口视为失败，避免误把坏结果标记完成。
  */
 data class StageResult(
     val successCount: Int,
     val failedCount: Int,
     val extra: Map<String, String> = emptyMap(),
+    val failedPaths: Set<String> = emptySet(),
 )
 
 /**

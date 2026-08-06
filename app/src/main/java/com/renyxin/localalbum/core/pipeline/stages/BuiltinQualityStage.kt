@@ -52,6 +52,10 @@ class BuiltinQualityStage(
             Log.w("BuiltinQuality", "质量分析失败: ${it.path}", it.error)
         }
 
-        return StageResult(successCount = success, failedCount = failed)
+        return StageResult(
+            successCount = success,
+            failedCount = failed,
+            failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
+        )
     }
 }

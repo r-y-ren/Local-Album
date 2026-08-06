@@ -201,8 +201,11 @@ class HybridIndexer(
         allowNomedia: Boolean = false,
         ignorePatterns: List<String> = emptyList(),
         progress: ((processed: Int, total: Int) -> Unit)? = null,
-    ): Int = executeScanRun(ScanRunEntity.TYPE_FULL, roots) { scanId, generation ->
-        scanViaStaging(scanId, generation, roots, allowNomedia, ignorePatterns, progress).indexed
+    ): Int {
+        val normalizedRoots = ScanRootPolicy.normalize(roots)
+        return executeScanRun(ScanRunEntity.TYPE_FULL, normalizedRoots) { scanId, generation ->
+            scanViaStaging(scanId, generation, normalizedRoots, allowNomedia, ignorePatterns, progress).indexed
+        }
     }
 
     /**
@@ -215,15 +218,18 @@ class HybridIndexer(
         roots: List<String>,
         allowNomedia: Boolean = false,
         ignorePatterns: List<String> = emptyList(),
-    ): IncrementalResult = executeScanRun(ScanRunEntity.TYPE_INCREMENTAL, roots) { scanId, generation ->
-        val start = System.currentTimeMillis()
-        val result = scanViaStaging(scanId, generation, roots, allowNomedia, ignorePatterns, null)
-        IncrementalResult(
-            inserted = result.inserted,
-            updated = result.updated,
-            deleted = result.deleted,
-            elapsedMs = System.currentTimeMillis() - start,
-        )
+    ): IncrementalResult {
+        val normalizedRoots = ScanRootPolicy.normalize(roots)
+        return executeScanRun(ScanRunEntity.TYPE_INCREMENTAL, normalizedRoots) { scanId, generation ->
+            val start = System.currentTimeMillis()
+            val result = scanViaStaging(scanId, generation, normalizedRoots, allowNomedia, ignorePatterns, null)
+            IncrementalResult(
+                inserted = result.inserted,
+                updated = result.updated,
+                deleted = result.deleted,
+                elapsedMs = System.currentTimeMillis() - start,
+            )
+        }
     }
 
     private suspend fun scanViaStaging(

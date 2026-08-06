@@ -96,11 +96,21 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                         val tasks = leasedGroups.flatMap { it.tasks }
                         val results = pipeline.runIncremental(tasks.map { it.filePath }, emptyList())
                         val failure = failureSummary(results, pipeline.requiredStageIds)
+                        val failedPaths = failedPaths(results, pipeline.requiredStageIds, tasks.map { it.filePath })
                         leasedGroups.forEach { group ->
-                            if (failure == null) {
-                                dao.markDone(group.tasks.map { it.taskId }, group.token, System.currentTimeMillis())
-                            } else {
-                                markFailed(dao, group.tasks, group.token, failure)
+                            val failedTasks = group.tasks.filter { it.filePath in failedPaths }
+                            val succeededTasks = group.tasks.filterNot { it.filePath in failedPaths }
+                            val completedAt = System.currentTimeMillis()
+                            if (succeededTasks.isNotEmpty()) {
+                                dao.markDone(succeededTasks.map { it.taskId }, group.token, completedAt)
+                            }
+                            if (failedTasks.isNotEmpty()) {
+                                markFailed(
+                                    dao,
+                                    failedTasks,
+                                    group.token,
+                                    failure ?: "pipeline_file_failure",
+                                )
                             }
                         }
                     } finally {
@@ -162,6 +172,11 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
             )
         }
 
+        /** 取消 WorkManager 中真正执行 AI 的唯一任务，而不是只取消某个 UI 协程。 */
+        fun cancel(context: Context) {
+            WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
+        }
+
         internal fun failureSummary(
             results: Map<String, StageResult>,
             requiredStageIds: Set<String> = results.keys,
@@ -173,6 +188,21 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
             return failures.takeIf { it.isNotEmpty() }
                 ?.entries
                 ?.joinToString(",") { (stage, result) -> "$stage:${result.failedCount}" }
+        }
+
+        /** 仅返回无法通过全部必需阶段的文件；健康文件不再被同批坏文件拖入重试。 */
+        internal fun failedPaths(
+            results: Map<String, StageResult>,
+            requiredStageIds: Set<String>,
+            attemptedPaths: List<String>,
+        ): Set<String> {
+            val attempted = attemptedPaths.toSet()
+            if (requiredStageIds.isEmpty() || requiredStageIds.any { it !in results }) return attempted
+            return requiredStageIds
+                .asSequence()
+                .flatMap { stageId -> results.getValue(stageId).failedPaths.asSequence() }
+                .filter { it in attempted }
+                .toSet()
         }
 
         internal fun retryDelay(attempt: Int): Long = 60_000L * (1L shl (attempt - 1).coerceIn(0, 8))

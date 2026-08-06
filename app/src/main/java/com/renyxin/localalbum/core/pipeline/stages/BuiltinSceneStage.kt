@@ -64,6 +64,7 @@ class BuiltinSceneStage(
             successCount = success,
             failedCount = failed,
             extra = labelCounts.mapValues { it.value.toString() },
+            failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
         )
     }
 }

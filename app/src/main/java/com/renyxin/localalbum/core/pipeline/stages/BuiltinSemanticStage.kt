@@ -63,25 +63,22 @@ class BuiltinSemanticStage(
             val results = ParallelFileProcessor.mapParallel(filePaths, enhancedCallback) { path ->
                 val entity = mediaDao.getByFilePathLight(path)
                 val vec = embedder.embedImage(File(path), entity)
-                if (vec == null || vec.all { it == 0f }) {
-                    null
-                } else {
-                    MediaEmbedding(
-                        filePath = path,
-                        embedding = embedder.serialize(vec),
-                        embeddingBlob = EmbeddingCodec.encode(vec),
-                        modelVersion = SemanticEmbedder.MODEL_VERSION,
-                        generatedAtMs = System.currentTimeMillis(),
-                        source = "concept",
-                        providerId = space.providerId,
-                        modelId = space.modelId,
-                        dimension = space.dimension,
-                        spaceId = space.spaceId,
-                        generation = 1,
-                        codecId = space.codecId,
-                        formatVersion = space.formatVersion,
-                    )
-                }
+                require(vec != null && vec.any { it != 0f }) { "semantic_empty_vector" }
+                MediaEmbedding(
+                    filePath = path,
+                    embedding = embedder.serialize(vec),
+                    embeddingBlob = EmbeddingCodec.encode(vec),
+                    modelVersion = SemanticEmbedder.MODEL_VERSION,
+                    generatedAtMs = System.currentTimeMillis(),
+                    source = "concept",
+                    providerId = space.providerId,
+                    modelId = space.modelId,
+                    dimension = space.dimension,
+                    spaceId = space.spaceId,
+                    generation = 1,
+                    codecId = space.codecId,
+                    formatVersion = space.formatVersion,
+                )
             }
             for (r in results) {
                 if (r.success && r.value != null) {
@@ -98,9 +95,16 @@ class BuiltinSemanticStage(
             }
         } catch (e: Exception) {
             Log.w("BuiltinSemantic", "语义嵌入阶段失败", e)
-            return StageResult(successCount = 0, failedCount = total)
+            return StageResult(successCount = 0, failedCount = total, failedPaths = filePaths.toSet())
         }
 
-        return StageResult(successCount = success, failedCount = failed)
+        val failedPaths = filePaths.filterTo(linkedSetOf()) { path ->
+            embeddings.none { it.filePath == path }
+        }
+        return StageResult(
+            successCount = success,
+            failedCount = failedPaths.size,
+            failedPaths = failedPaths,
+        )
     }
 }

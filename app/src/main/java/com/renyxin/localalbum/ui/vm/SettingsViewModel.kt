@@ -47,6 +47,9 @@ class SettingsViewModel(
     fun setShowNomediaDirectories(show: Boolean) = viewModelScope.launch {
         repository.setShowNomediaDirectories(show)
     }
+    fun setShowAnalysisProgressUi(show: Boolean) = viewModelScope.launch {
+        repository.setShowAnalysisProgressUi(show)
+    }
     fun setAlbumSortMode(mode: Int) = viewModelScope.launch {
         repository.setAlbumSortMode(mode)
     }

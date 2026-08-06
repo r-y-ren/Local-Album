@@ -55,4 +55,33 @@ class AnalysisWorkerTest {
         assertEquals(120_000L, AnalysisWorker.retryDelay(2))
         assertTrue(AnalysisWorker.retryDelay(100) > 0)
     }
+
+    @Test
+    fun `only paths failing a required stage are retried`() {
+        val results = mapOf(
+            "face" to StageResult(2, 0),
+            "semantic" to StageResult(1, 1, failedPaths = setOf("/bad.jpg")),
+        )
+
+        assertEquals(
+            setOf("/bad.jpg"),
+            AnalysisWorker.failedPaths(
+                results,
+                setOf("face", "semantic"),
+                listOf("/good.jpg", "/bad.jpg"),
+            ),
+        )
+    }
+
+    @Test
+    fun `missing required stage conservatively retries whole attempted window`() {
+        assertEquals(
+            setOf("/a.jpg", "/b.jpg"),
+            AnalysisWorker.failedPaths(
+                mapOf("face" to StageResult(2, 0)),
+                setOf("face", "semantic"),
+                listOf("/a.jpg", "/b.jpg"),
+            ),
+        )
+    }
 }

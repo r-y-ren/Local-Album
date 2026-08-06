@@ -272,12 +272,13 @@ class PluginAnalysisPipeline(
             val pendingPaths = if (donePaths.isEmpty()) targetPaths else targetPaths - donePaths
             val skippedCount = targetPaths.size - pendingPaths.size
             val completedPaths = java.util.Collections.synchronizedSet(HashSet<String>())
+            val observedFailedPaths = java.util.Collections.synchronizedSet(HashSet<String>())
             // ParallelFileProcessor 的多个 worker 会并发回调。AtomicInteger 自增顺序与
             // 回调实际执行顺序不同，直接转发会让 SharedFlow 及通知 UI 收到倒退的数字。
             val progressLock = Any()
             var lastOverallProcessed = skippedCount
 
-            val stageResult: StageResult = if (pendingPaths.isEmpty()) {
+            val rawStageResult: StageResult = if (pendingPaths.isEmpty()) {
                 // 全部已完成（断点续跑命中），无需推理
                 Log.i(TAG, "[${stage.stageId}] 断点续跑：${targetPaths.size} 个文件全部已完成，跳过")
                 StageResult(successCount = 0, failedCount = 0)
@@ -312,8 +313,10 @@ class PluginAnalysisPipeline(
                                 total = targetPaths.size,
                             )
                             if (filePath != null && status != null) {
-                                if (status == FileProcessingStatus.COMPLETED) {
-                                    completedPaths.add(filePath)
+                                when (status) {
+                                    FileProcessingStatus.COMPLETED -> completedPaths.add(filePath)
+                                    FileProcessingStatus.FAILED -> observedFailedPaths.add(filePath)
+                                    else -> Unit
                                 }
                                 progressManager.onFileStatusChange(stage.stageId, filePath, status)
                             }
@@ -321,6 +324,8 @@ class PluginAnalysisPipeline(
                     }
                 }
             }
+            val stageResult = normalizeStageResult(rawStageResult, pendingPaths, observedFailedPaths)
+            completedPaths.removeAll(stageResult.failedPaths)
 
             // 落库本次成功的 done 状态（仅缓存型阶段，批量事务规避 999 变量上限）
             if (stage.isCacheable && analysisStateDao != null && completedPaths.isNotEmpty()) {
@@ -381,6 +386,7 @@ class PluginAnalysisPipeline(
                 successCount = 0,
                 failedCount = targetPaths.size,
                 extra = mapOf("error" to errorMsg),
+                failedPaths = targetPaths.toSet(),
             )
             _stageProgress.emit(
                 StageProgress(
@@ -527,6 +533,30 @@ class PluginAnalysisPipeline(
                 runStage(stage, stageIdx, sortedStages.size, targetPaths, results)
             }
         }
+    }
+
+    /**
+     * 将阶段汇总计数与逐文件回调归一化为可靠的失败路径集合。
+     * 若阶段声明失败但没有给出足够的路径，保守地只重试该阶段实际尝试的窗口，
+     * 绝不把无法证明成功的文件写入 done。
+     */
+    private fun normalizeStageResult(
+        result: StageResult,
+        attemptedPaths: List<String>,
+        observedFailedPaths: Set<String>,
+    ): StageResult {
+        val attempted = attemptedPaths.toSet()
+        val explicit = (result.failedPaths + observedFailedPaths).filterTo(linkedSetOf()) { it in attempted }
+        val reportedFailureCount = maxOf(result.failedCount, explicit.size)
+        val failures = when {
+            reportedFailureCount == 0 -> emptySet()
+            explicit.size >= reportedFailureCount -> explicit
+            else -> attempted
+        }
+        return result.copy(
+            failedCount = reportedFailureCount,
+            failedPaths = failures,
+        )
     }
 
     private fun currentPssKb(): Long = runCatching { Debug.getPss() }.getOrDefault(-1L)

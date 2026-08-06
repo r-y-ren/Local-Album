@@ -252,6 +252,20 @@ class AlbumRepository(
      *  防止 ContentObserver 触发的增量扫描与用户手动扫描并发执行导致数据/FTS/状态竞态。 */
     private val scanMutex = Mutex()
 
+    /** 自动触发采用 tryLock 合并：已有扫描运行或排队时直接丢弃重复请求。 */
+    suspend fun rescanIfIdle(): Boolean = withContext(Dispatchers.IO) {
+        if (!scanMutex.tryLock()) {
+            Log.d(TAG, "rescanIfIdle: 已有扫描或互斥任务，合并本次自动扫描请求")
+            return@withContext false
+        }
+        try {
+            rescanLocked()
+            true
+        } finally {
+            scanMutex.unlock()
+        }
+    }
+
     private val _scanState = MutableStateFlow<ScanState>(ScanState.Idle)
     val scanState: StateFlow<ScanState> = _scanState.asStateFlow()
 
@@ -456,13 +470,16 @@ class AlbumRepository(
 
     // ---- 扫描 ----
     suspend fun rescan() = withContext(Dispatchers.IO) {
+        Log.i(TAG, "rescan: 手动扫描等待 scanMutex…")
+        scanMutex.withLock { rescanLocked() }
+    }
+
+    /** 调用方必须持有 [scanMutex]。 */
+    private suspend fun rescanLocked() {
         restoreFromDbIfNeeded()
         val hadCachedAlbums = _albumTree.value.isNotEmpty()
         _albumSyncState.value = AlbumSyncState.Checking(hadCachedAlbums)
-        Log.i(TAG, "rescan: 开始，等待 scanMutex…")
-        // 修复：串行化扫描，避免并发 rescan 互相覆盖数据与 _scanState
-        scanMutex.withLock {
-            Log.i(TAG, "rescan: 获得 scanMutex，设置 Scanning 状态")
+        Log.i(TAG, "rescan: 获得 scanMutex，设置 Scanning 状态")
             _scanState.value = ScanState.Scanning("准备扫描…")
             // 标记是否已启动前台服务。仅在确有扫描任务（roots 非空）时 acquire，
             // 避免 roots 为空时启动又立即停止服务，导致服务未及时 startForeground
@@ -555,7 +572,6 @@ class AlbumRepository(
                     _scanState.value = ScanState.Done
                 }
             }
-        } // scanMutex.withLock
     }
 
     /**

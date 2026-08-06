@@ -135,10 +135,11 @@ class BuiltinFaceStage(
                     "clusterCount" to clusterCount.toString(),
                     "noiseCount" to noiseCount.toString(),
                 ),
+                failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
             )
         } catch (e: Exception) {
             Log.w("BuiltinFace", "人脸检测阶段失败", e)
-            return StageResult(successCount = 0, failedCount = total)
+            return StageResult(successCount = 0, failedCount = total, failedPaths = filePaths.toSet())
         }
     }
 }

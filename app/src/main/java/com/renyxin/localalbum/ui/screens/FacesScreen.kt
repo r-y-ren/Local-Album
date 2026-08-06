@@ -76,7 +76,7 @@ import kotlinx.coroutines.flow.Flow
  * - 每组显示人脸数量与代表缩略图
  * - 点击进入该人物的照片列表
  * - 支持为人物命名
- * - 管道运行中时显示 per-file 进度网格（Phase 6.1）
+ * - 管道运行中且用户允许显示进度 UI 时展示 per-file 进度网格（Phase 6.1）
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,6 +92,7 @@ fun FacesScreen(
     modifier: Modifier = Modifier,
     stageFileProgress: StageFileProgress = StageFileProgress.EMPTY,
     isPipelineRunning: Boolean = false,
+    showAnalysisProgressUi: Boolean = true,
 ) {
     var namingClusterId by remember { mutableStateOf<String?>(null) }
     var selectedClusterId by remember { mutableStateOf<String?>(null) }
@@ -155,7 +156,11 @@ fun FacesScreen(
                     onMediaClick = onMediaClick,
                     modifier = Modifier.fillMaxSize(),
                 )
-            } else if (isPipelineRunning && stageFileProgress.files.isNotEmpty()) {
+            } else if (shouldShowAnalysisProgressGrid(
+                showAnalysisProgressUi = showAnalysisProgressUi,
+                isPipelineRunning = isPipelineRunning,
+                hasFileProgress = stageFileProgress.files.isNotEmpty(),
+            )) {
                 // 扫描期间同时展示已完成的聚类；进度网格仅作为增量结果的提示，
                 // 不再覆盖已有结果，用户可随扫描推进浏览新加入的人物。
                 Column(modifier = Modifier.fillMaxSize()) {
@@ -238,6 +243,12 @@ fun FacesScreen(
         )
     }
 }
+
+internal fun shouldShowAnalysisProgressGrid(
+    showAnalysisProgressUi: Boolean,
+    isPipelineRunning: Boolean,
+    hasFileProgress: Boolean,
+): Boolean = showAnalysisProgressUi && isPipelineRunning && hasFileProgress
 
 @Composable
 private fun FaceClusterGrid(

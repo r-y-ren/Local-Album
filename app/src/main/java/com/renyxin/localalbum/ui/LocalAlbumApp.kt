@@ -533,6 +533,7 @@ fun LocalAlbumApp(
                 onRefresh = { albumViewModel.forceReanalyzeAll() },
                 stageFileProgress = faceProgress,
                 isPipelineRunning = isPipelineRunning,
+                showAnalysisProgressUi = settingsState.showAnalysisProgressUi,
             )
         }
 
@@ -708,10 +709,14 @@ fun LocalAlbumApp(
                             navigateTo = ::navigateTo,
                             onSwitchTab = { currentTab = it },
                         )
-                        // Phase 5.2: 全局进度指示器浮层
-                        if (progressManager != null) {
+                        // Phase 5.2: 全局进度指示器浮层；设置仅隐藏 UI，不中止后台扫描/识别。
+                        if (shouldShowGlobalProgressIndicator(
+                            showAnalysisProgressUi = settingsState.showAnalysisProgressUi,
+                            hasProgressManager = progressManager != null,
+                        )) {
                             GlobalProgressIndicator(
-                                progressManager = progressManager,
+                                progressManager = requireNotNull(progressManager),
+                                onCancel = albumViewModel::cancelTask,
                                 modifier = Modifier.align(Alignment.BottomCenter),
                             )
                         }
@@ -726,10 +731,14 @@ fun LocalAlbumApp(
                         navigateTo = ::navigateTo,
                         onSwitchTab = { currentTab = it },
                     )
-                    // Phase 5.2: 全局进度指示器浮层
-                    if (progressManager != null) {
+                    // Phase 5.2: 全局进度指示器浮层；设置仅隐藏 UI，不中止后台扫描/识别。
+                    if (shouldShowGlobalProgressIndicator(
+                        showAnalysisProgressUi = settingsState.showAnalysisProgressUi,
+                        hasProgressManager = progressManager != null,
+                    )) {
                         GlobalProgressIndicator(
-                            progressManager = progressManager,
+                            progressManager = requireNotNull(progressManager),
+                            onCancel = albumViewModel::cancelTask,
                             modifier = Modifier.align(Alignment.BottomCenter),
                         )
                     }
@@ -740,6 +749,11 @@ fun LocalAlbumApp(
         }
     }
 }
+
+internal fun shouldShowGlobalProgressIndicator(
+    showAnalysisProgressUi: Boolean,
+    hasProgressManager: Boolean,
+): Boolean = showAnalysisProgressUi && hasProgressManager
 
 @Composable
 private fun currentTabContent(
@@ -2205,7 +2219,42 @@ private fun SettingsTab(
             }
         }
 
-        // Section 2.6: 相册排序模式
+        // Section 2.6: 扫描识别进度 UI
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                ),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "显示扫描识别进度",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            text = "控制全局进度浮层及人物页逐文件进度。关闭后扫描与 AI 识别仍会在后台继续。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = state.showAnalysisProgressUi,
+                        onCheckedChange = viewModel::setShowAnalysisProgressUi,
+                    )
+                }
+            }
+        }
+
+        // Section 2.7: 相册排序模式
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),

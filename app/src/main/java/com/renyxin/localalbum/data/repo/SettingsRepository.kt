@@ -21,6 +21,7 @@ data class SettingsState(
     val aiAnalysisPreferences: AiAnalysisPreferences = AiAnalysisPreferences(),
     val onboardingCompleted: Boolean = false,
     val showNomediaDirectories: Boolean = false,
+    val showAnalysisProgressUi: Boolean = true,
     /** 相册排序模式: 0=名称, 1=日期, 2=大小, 3=数量 */
     val albumSortMode: Int = 0,
 )
@@ -43,6 +44,7 @@ class SettingsRepository(private val store: SettingsStore) {
         store.recommendationPreference,
         store.onboardingCompleted,
         store.showNomediaDirectories,
+        store.showAnalysisProgressUi,
         store.albumSortMode,
     ) { values ->
         @Suppress("UNCHECKED_CAST")
@@ -61,7 +63,8 @@ class SettingsRepository(private val store: SettingsStore) {
         ).normalized()
         val onboarding = values[10] as Boolean
         val showNomedia = values[11] as Boolean
-        val albumSort = values[12] as Int
+        val showAnalysisProgressUi = values[12] as Boolean
+        val albumSort = values[13] as Int
         SettingsState(
             scanRoots = roots,
             ignoreDirNames = ignores,
@@ -70,6 +73,7 @@ class SettingsRepository(private val store: SettingsStore) {
             aiAnalysisPreferences = aiPreferences,
             onboardingCompleted = onboarding,
             showNomediaDirectories = showNomedia,
+            showAnalysisProgressUi = showAnalysisProgressUi,
             albumSortMode = albumSort,
         )
     }
@@ -96,6 +100,7 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun addIgnoreDir(name: String) = store.addIgnoreDir(name)
     suspend fun removeIgnoreDir(name: String) = store.removeIgnoreDir(name)
     suspend fun setShowNomediaDirectories(show: Boolean) = store.setShowNomediaDirectories(show)
+    suspend fun setShowAnalysisProgressUi(show: Boolean) = store.setShowAnalysisProgressUi(show)
     suspend fun setAlbumSortMode(mode: Int) = store.setAlbumSortMode(mode)
     suspend fun setGestureGuideShown(shown: Boolean) = store.setGestureGuideShown(shown)
 }

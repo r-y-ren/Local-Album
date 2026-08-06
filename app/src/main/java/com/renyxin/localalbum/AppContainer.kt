@@ -591,14 +591,9 @@ class AppContainer(context: Context) {
         hybridIndexer.registerContentObserver(onChanged = {
             // 在协程中触发增量扫描，避免阻塞主线程
             appScope.launch {
-                // 修复：扫描进行中时跳过，避免 ContentObserver 高频回调导致
-                // scanState 持续处于 Scanning 状态、UI 永久显示加载中
-                val currentState = albumRepository.scanState.value
-                if (currentState is ScanState.Scanning) {
-                    android.util.Log.d("AppContainer", "扫描进行中，跳过 ContentObserver 触发的重复扫描")
-                    return@launch
-                }
-                albumRepository.rescan()
+                // Repository 内部使用 tryLock 原子合并竞态触发；不能只在锁外读取 scanState，
+                // 否则 Observer 与回前台回调可能同时看到空闲并串行执行两次完整遍历。
+                albumRepository.rescanIfIdle()
             }
         })
     }
@@ -632,9 +627,7 @@ class AppContainer(context: Context) {
                 albumRepository.restoreFromDbIfNeeded()
                 startupRestoreCompleted = true
             }
-            val currentState = albumRepository.scanState.value
-            if (currentState is ScanState.Scanning) return@launch
-            albumRepository.rescan()
+            albumRepository.rescanIfIdle()
         }
     }
 

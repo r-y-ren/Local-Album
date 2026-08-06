@@ -26,6 +26,7 @@ import com.renyxin.localalbum.data.repo.AlbumRepository.TrashOperationResult
 import com.renyxin.localalbum.data.repo.SemanticSearchResult
 import com.renyxin.localalbum.data.repo.SemanticSearchState
 import com.renyxin.localalbum.data.repo.SemanticStats
+import com.renyxin.localalbum.data.worker.AnalysisWorker
 import com.renyxin.localalbum.data.worker.ThumbnailWorker
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -102,7 +103,7 @@ class AlbumViewModel(
      * 响应式 StateFlow：管道完成/出错后自动变为 false，触发 UI 重组以隐藏进度网格。
      */
     val isPipelineRunning: StateFlow<Boolean> = progressManager?.progress
-        ?.map { !it.isCompleted && !it.hasError }
+        ?.map { it.totalFiles > 0 && !it.isCompleted && !it.hasError }
         ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
         ?: MutableStateFlow(false).asStateFlow()
 
@@ -137,6 +138,8 @@ class AlbumViewModel(
     fun cancelTask() {
         scanJob?.cancel()
         scanJob = null
+        AnalysisWorker.cancel(application)
+        progressManager?.reset()
         _taskProgress.value = emptyMap()
     }
 

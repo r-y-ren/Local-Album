@@ -103,6 +103,7 @@ class OcrStage(
                 "providerId" to ocrProvider.providerId,
                 "scope" to scope.name,
             ),
+            failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
         )
     }
 }
