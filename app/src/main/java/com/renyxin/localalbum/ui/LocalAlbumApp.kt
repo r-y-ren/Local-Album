@@ -101,6 +101,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -238,6 +239,7 @@ fun LocalAlbumApp(
     // 使用 back stack 管理导航历史，支持正确的返回行为
     var backStack by remember { mutableStateOf(listOf<Screen>(Screen.Main)) }
     val screen by remember { derivedStateOf { backStack.lastOrNull() ?: Screen.Main } }
+    val navigationStateHolder = rememberSaveableStateHolder()
     val scanState by albumViewModel.scanState.collectAsStateWithLifecycle()
 
     // 手势引导：仅首次安装后展示一次，之后持久化不再弹出
@@ -308,6 +310,7 @@ fun LocalAlbumApp(
         },
         label = "screen_transition",
     ) { s ->
+        navigationStateHolder.SaveableStateProvider(navigationStateKey(s)) {
         when (s) {
         is Screen.AlbumDetail -> {
             val albumStateKey = s.album.directoryPath
@@ -747,7 +750,29 @@ fun LocalAlbumApp(
             }
         }
         }
+        }
     }
+}
+
+internal fun navigationStateKey(screen: Screen): String = when (screen) {
+    Screen.Main -> "main"
+    is Screen.AlbumDetail -> "album:${screen.album.directoryPath}"
+    is Screen.MediaViewer -> "viewer:${screen.initialPath}"
+    Screen.Search -> "search"
+    Screen.Timeline -> "timeline"
+    Screen.Trash -> "trash"
+    Screen.DuplicatePhotos -> "duplicates"
+    Screen.Faces -> "faces"
+    Screen.Favorites -> "favorites"
+    Screen.Recommendations -> "recommendations"
+    Screen.PluginManager -> "plugins"
+    Screen.AnalysisPerformance -> "analysis-performance"
+    Screen.AiAnalysisPreferences -> "ai-preferences"
+    Screen.FaceSwap -> "face-swap"
+    Screen.ModelImportWizard -> "model-import"
+    is Screen.ModelJsonEditor -> "model-editor:${screen.pluginId}"
+    is Screen.RecommendationDetail ->
+        "recommendation:${screen.recommendation.albumId}:${screen.recommendation.windowStart}"
 }
 
 internal fun shouldShowGlobalProgressIndicator(
@@ -944,11 +969,8 @@ private fun RecommendationTab(
     val recommendations by viewModel.recommendations.collectAsStateWithLifecycle()
     val scanState by viewModel.scanState.collectAsStateWithLifecycle()
 
-    // 进入精选页只加载一次。推荐刷新会消费下一批内容，因此不能在扫描期间轮询调用；
-    // 否则页面会每 1.5 秒自动切换推荐，且扫描结束时还会额外跳过一批。
-    LaunchedEffect(Unit) {
-        viewModel.refreshRecommendations()
-    }
+    // 推荐列表由 ViewModel/Repository 持有。返回详情页再回来时只恢复原有批次，
+    // 不把进入页面当成一次用户主动刷新。
 
     Scaffold(
         modifier = modifier,
@@ -1016,7 +1038,9 @@ private fun RecommendationTab(
             return@Scaffold
         }
 
+        val listState = androidx.compose.foundation.lazy.rememberLazyListState()
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize().padding(padding),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
