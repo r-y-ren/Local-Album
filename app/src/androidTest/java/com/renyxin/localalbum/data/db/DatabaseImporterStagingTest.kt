@@ -120,7 +120,8 @@ class DatabaseImporterStagingTest {
             assertEquals(0L, cursor.getLong(1))
             assertEquals(0L, cursor.getLong(2))
         }
-        assertTrue(database.mediaChangeDao().hasOutstandingMediaChanges(LOCAL_PROFILE))
+        assertFalse(database.mediaChangeDao().hasOutstandingMediaChanges(LOCAL_PROFILE))
+        assertTrue(database.mediaChangeDao().hasReconciliationHint(LOCAL_PROFILE))
         assertEquals(1, tableCount("media_change_events"))
         database.openHelper.writableDatabase.query(
             "SELECT profileId, eventType, status FROM media_change_events",

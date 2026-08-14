@@ -1,5 +1,7 @@
 package com.renyxin.localalbum.core.search
 
+import java.util.Locale
+
 /**
  * Keyword-search columns are an edition capability, not a property of imported data.
  *
@@ -15,21 +17,21 @@ enum class KeywordSearchProfile(internal val columns: List<String>) {
 /** Builds a column-qualified FTS4 query from untrusted user text. */
 internal object FtsQueryBuilder {
     fun build(input: String, profile: KeywordSearchProfile): String {
-        val tokens = input
-            .split(Regex("\\s+"))
-            .map(::sanitizeToken)
-            .filter(String::isNotBlank)
+        val tokens = SEARCH_TOKEN.findAll(input)
+            .map { match -> match.value.lowercase(Locale.ROOT) }
+            .toList()
 
-        if (tokens.isEmpty()) return "fileName:\"\"*"
+        if (tokens.isEmpty()) return "fileName:\"\""
 
         return tokens
             .flatMap { token ->
-                profile.columns.map { column -> "$column:\"$token\"*" }
+                // FTS4 only recognizes the prefix marker on an unquoted token. The token extractor
+                // removes query grammar, while lower-casing prevents AND/OR/NOT/NEAR from becoming
+                // operators, so this remains safe for untrusted text and actually performs prefixes.
+                profile.columns.map { column -> "$column:$token*" }
             }
             .joinToString(" OR ")
     }
 
-    private fun sanitizeToken(token: String): String = token
-        .replace("\u0000", "")
-        .replace("\"", "")
+    private val SEARCH_TOKEN = Regex("""[\p{L}\p{N}][\p{L}\p{N}\p{M}_]*""")
 }

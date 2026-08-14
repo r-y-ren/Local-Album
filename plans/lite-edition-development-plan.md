@@ -4,6 +4,7 @@
 > 核查基线：2026-08-13 当前工作区
 > 产品目标修订：2026-08-13，以全量与增量扫描速度为第一优先级
 > 阶段 9 主机与制品复核：2026-08-14
+> 阶段 9 Lite 真机与个人使用交付复核：2026-08-14
 > 适用仓库：LocalAlbum 单仓库
 > 本文是 Lite v1 的独立事实来源；历史决策“零大型运行时、以裁包为首要目标”全部废止，由 ADR-002、ADR-004、ADR-009 与 ADR-015 取代。
 
@@ -11,7 +12,7 @@
 
 | 阶段   | 状态                       | 当前证据                                                                                                                                                                                                                        |
 | ------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 阶段 0 | 工程设施完成；真机基线待补 | 已加入基准配置、分位数计算、Logcat 里程碑和 Windows 夹具；本机无可用 `adb` 设备                                                                                                                                                 |
+| 阶段 0 | 工程设施完成；性能基线待反馈 | 已加入基准配置、分位数计算、Logcat 里程碑和 Windows 夹具；Android 16 arm64 测试设备现已可用并完成冷启动烟测，按个人使用目标不再继续详细扫描性能基线，问题转为线下反馈                                    |
 | 阶段 1 | 工程完成；设备验证待补     | Room v29 双生命周期、核心原子发布、独立 Worker/通知、取消门禁和 UI 状态消费已落地；JVM/编译/APK 通过，instrumentation 待设备执行                                                                                                |
 | 阶段 2 | 工程完成                   | 策略、准入和显式 Stage 工厂已落地；Pipeline 不再遍历 registry，Full 五阶段等价与 Lite 人脸 Provider 隔离测试通过                                                                                                                |
 | 阶段 3 | 工程完成；设备验证待补     | Full/Lite flavor、编译期组合根、恢复 scope、Lite 导航与专用换脸入口已落地；双变体 JVM/编译/APK 通过，真机换脸与恢复待执行                                                                                                       |
@@ -19,8 +20,8 @@
 | 阶段 5 | 工程完成；设备验证待补     | Room v31 durable outbox、Core 后有界 handoff、逐 Stage 任务、双缩略图 lane、推荐/重复/维护资源屏障及 policy-aware restore 已落地；双 flavor JVM、Kotlin/KSP、AndroidTest 编译与 APK 通过，真机并发/TCore 待执行                 |
 | 阶段 6 | 工程完成；设备验证待补     | 冷启动 native/model 零初始化、换脸按需加载、核心/增强/交互仲裁、精确模型驱逐、五点关键点门禁和可恢复错误已落地；双 flavor JVM、AndroidTest 编译、Debug/Release APK 通过，真实模型/真机并发与内存回落待补                        |
 | 阶段 7 | 工程完成；设备验证待补     | Scene/Quality 自动准入均冻结为 AUTO_DISABLED，Lite policy v2、报告 SHA-256 scope、P99、≤250 行事务、旧 v1 task 收敛已落地；双 flavor JVM/AndroidTest 编译/Debug/Release/R8 通过，真机 A/B 与解码复用待补                        |
-| 阶段 8 | 工程完成；设备验证待补     | Lite 路由/UI、FTS `parentPath` 与 edition 列隔离、Room v32 非破坏迁移/schema export、complete backup capability、policy seeder 及 AI inert 数据往返已落地；双 flavor JVM、AndroidTest 编译、Debug/Release/R8 通过，设备执行待补 |
-| 阶段 9 | 进行中                     | 主机 JVM/AndroidTest 编译/Debug Lint/Release APK+AAB/R8、SBOM/NOTICE、资产用途与最终 DEX 守卫已通过；设备矩阵、历史 Full 签名链、Lite 签名决策、人工合规审批、冻结工作区和真实 Linux CI 仍阻断发布                              |
+| 阶段 8 | 工程完成；Lite 设备数据库验证通过 | Lite 路由/UI、FTS edition 列隔离、Room v32 非破坏迁移、complete backup、policy seeder 及 AI inert 数据往返已落地；Lite 真机 instrumentation 73/73 通过，Full 跨版本设备专项仍留作后续反馈                         |
+| 阶段 9 | 个人使用交付完成；正式发布进行中 | 当前源码的 Lite Debug 可安装 APK 已生成；Android 16 arm64 真机完成安装、启动、权限、扫描、导航、文件名前缀搜索与换脸 SAF 双图选取，Lite instrumentation 73/73 通过；正式签名、最新 Release 证据、Full 设备矩阵和商店发布审批未完成 |
 
 状态约定：`未开始`、`进行中`、`工程完成`、`工程完成；设备验证待补`、`工程设施完成；待真机/产品证据`、`阻断`。只有工程实现和可在当前环境执行的验证均通过后，才可写为“工程完成”；缺少设备时必须显式保留补测项。
 
@@ -1286,7 +1287,7 @@ Lite 保留真实换脸，同时扫描前/中不主动加载换脸资源。
 
 ### 阶段 9：全矩阵测试与发布
 
-**实施状态：进行中；主机工程与制品守卫通过，发布阻断待解除**
+**实施状态：个人使用交付完成；正式发布仍进行中**
 
 已完成：
 
@@ -1294,10 +1295,14 @@ Lite 保留真实换脸，同时扫描前/中不主动加载换脸资源。
 - Face/Semantic/OCR 批处理 Stage、人物/语义维护 Worker、人物相册和 AI 识别偏好页面已迁入 Full source set；共享导航改为不透明 edition destination，共享搜索页面改为 edition-neutral 可选模式。Lite contribution 不引用语义状态、语义文案、人物入口或 Full-only Worker/Stage；Full 五阶段语义保持。
 - [`lite-artifact-purpose-policy.json`](../scripts/lite-artifact-purpose-policy.json:1) 升级为 `lite-release-policy-v3`，声明 Lite Release APK 的 14 个禁止类根；名单覆盖人物/AI UI、人物/语义维护 Worker、Face/Semantic/OCR 与 Builtin 批处理 Stage、三个具体 OCR Provider，不误禁共享 `FaceProvider`、通用能力契约、InSwapper、ONNX、OpenCV、shim 或换脸模型。
 - 发布脚本从 `lite/release/output-metadata.json` 定位真实 APK，提取全部 `classes*.dex`，流式调用 Android build-tools `dexdump`，读取 R8 `mapping.txt`，同时匹配原始和 residual descriptor。缺少工具/mapping/DEX、工具非零退出、descriptor 解析失败、任一 DEX 为零 descriptor 或禁止类命中都会加入统一 fail-closed 违规列表，并写入机器可读 `dexDescriptorGuard`。
-- 重构前 Lite APK 作为负对照共解析 31,158 个 descriptor，守卫按 8 个禁止类根报告 100 个命中，证明不是仅检查 R8 文本或源码；当前候选共解析 30,955 个 descriptor（4 个 DEX），14 个禁止类根命中为 0。
-- 当前 Full/Lite Release APK 与 AAB 已重建，R8、resource shrink、签名检查、runtimeClasspath、CycloneDX 1.5 SBOM、NOTICE、模型/native 资产用途审计均已生成。完整 [`release-evidence.json`](../build/reports/lite-release/release-evidence.json) 的资产用途守卫和 DEX descriptor 守卫均为 `passed`、违规数为 0；可提交的紧凑快照见 [`lite-phase9-host-release-evidence.json`](evidence/lite-phase9-host-release-evidence.json:1)，两者均明确 `releaseReadiness=blocked`，不构成发布批准。
+- 重构前 Lite APK 作为负对照共解析 31,158 个 descriptor，守卫按 8 个禁止类根报告 100 个命中，证明不是仅检查 R8 文本或源码；修复前候选共解析 30,955 个 descriptor（4 个 DEX），14 个禁止类根命中为 0。
+- 修复前 Full/Lite Release APK 与 AAB 已重建，R8、resource shrink、签名检查、runtimeClasspath、CycloneDX 1.5 SBOM、NOTICE、模型/native 资产用途审计均已生成。完整 [`release-evidence.json`](../build/reports/lite-release/release-evidence.json) 的资产用途守卫和 DEX descriptor 守卫均为 `passed`、违规数为 0；可提交的紧凑快照见 [`lite-phase9-host-release-evidence.json`](evidence/lite-phase9-host-release-evidence.json:1)，两者均明确 `releaseReadiness=blocked`，不构成发布批准。随后 [`FtsQueryBuilder.build()`](../app/src/main/java/com/renyxin/localalbum/core/search/FtsQueryBuilder.kt:19) 修复了真实 SQLite FTS4 前缀查询，因此下表 Release 哈希仅作历史追溯，不代表最新源码。
+- Android 16、SDK 36、arm64-v8a 测试设备完成 Lite 安装与 Full 共存、权限引导、真实媒体扫描、四栏 Lite 导航和文件名前缀搜索；两次冷启动分别为 904 ms 与 808 ms，未发现致命异常。
+- Lite instrumentation 通过 73/73 项，覆盖 v31→v32 迁移、真实 FTS4、complete backup 自恢复、导入 staging、scan run/outbox、媒体变更日志、快照、缩略图、重复维护和设置持久化。设备测试同时发现并修复了通用 FTS4 语法问题，没有引入设备型号或 Android 16 专属逻辑。
+- 换脸入口已通过 SAF 分别选择两张非私人烟测图，源图与目标图均成功复制、解码和预览，“开始换脸”按钮可用。按用户要求停止更细的模型推理与资源压测，因此不宣称真实 InSwapper 推理成功、模型内存回落或长时稳定性已验证。
+- 当前源码已使用 Android 默认调试签名生成可直接安装的个人使用 APK：[`LocalAlbum-Lite-v0.1.0-usable.apk`](../dist/LocalAlbum-Lite-v0.1.0-usable.apk)。该制品用于线下自用，不冒充正式商店 Release。
 
-当前候选制品：
+修复前正式发布候选制品（已失效，仅作历史追溯）：
 
 | Edition | 制品 |        字节数 | SHA-256                                                            |
 | ------- | ---- | ------------: | ------------------------------------------------------------------ |
@@ -1306,21 +1311,30 @@ Lite 保留真实换脸，同时扫描前/中不主动加载换脸资源。
 | Full    | AAB  | 1,257,528,749 | `b1fa1259c7f5905714f10f0dc912e6594041f91211f7adeb3b4e488c3a022892` |
 | Lite    | AAB  |   942,491,607 | `d85a779084f89a1e3d87c98420342a00227d6216da87566e9c258d57659bffae` |
 
+当前个人使用交付制品：
+
+| Edition | 制品 | 签名/身份 | 字节数 | SHA-256 |
+| ------- | ---- | --------- | -----: | ------- |
+| Lite | [`LocalAlbum-Lite-v0.1.0-usable.apk`](../dist/LocalAlbum-Lite-v0.1.0-usable.apk) | Android 默认调试签名；[`applicationId`](../app/build.gradle.kts:26) 为 `com.renyxin.localalbum.lite.debug` | 1,167,854,919 | `EC7C202DB29BB83034273BC0EC5F7CA3EEB5CE654E3372CC54F4BED39B9C64AA` |
+
 验证证据：
 
-- Full/Lite 全量 JVM 单测与 AndroidTest Kotlin 编译矩阵通过；新增 DEX 守卫架构测试在两个 flavor 通过。AndroidTest 仍仅为编译，未在设备执行。
+- Full/Lite 全量 JVM 单测与 AndroidTest Kotlin 编译矩阵通过；新增 DEX 守卫架构测试在两个 flavor 通过。Lite Android instrumentation 已在设备直接执行并通过 73/73 项；Full instrumentation 尚未在设备执行。
 - Full/Lite Debug Lint 通过；Full/Lite Release APK、AAB、R8 与资源压缩通过。Windows 宿主持有标准 OpenCV `R.jar` 时仅把可再生 `:opencv` build directory 重定向到忽略的 [`build/phase9`](../build/phase9/opencv-builddir.init.gradle:1)，未跳过应用编译、Lint、R8 或打包任务。
 - PowerShell 5.1 AST 与 JSON 策略解析通过；旧候选负对照预期失败，当前候选使用默认 `FailOnGuardViolation=true` 执行并通过。
-- 当前 Lite APK 的 `classes.dex`、`classes2.dex`、`classes3.dex`、`classes4.dex` 分别解析 19,050、1、10,252、1,652 个 descriptor，均为 `passed`，禁止命中为 0。
+- 修复前 Lite Release APK 的 `classes.dex`、`classes2.dex`、`classes3.dex`、`classes4.dex` 分别解析 19,050、1、10,252、1,652 个 descriptor，均为 `passed`，禁止命中为 0；本轮 FTS 修复后的正式 Release 尚未刷新该审计。
 - 正式证据确认 Full applicationId 为 `com.renyxin.localalbum`，Lite applicationId 为 `com.renyxin.localalbum.lite`；但没有历史正式 Full APK/可信证书摘要，因此不能宣称升级签名链已验证。
 
-发布阻断项：
+正式发布阻断项：
 
-1. `adb devices` 无设备；instrumentation、真实 SQLite/migration/backup 往返、扫描/换脸/并发/恢复、TTI/TCore、PSS/CPU/耗电/温升、稳定性、ANR/OOM/SIGSEGV 仍无设备证据。
+1. Lite 真机基础功能、真实 SQLite/migration/backup 和 73 项 instrumentation 已有设备证据；仍缺 Full 真机 instrumentation、真实 InSwapper 推理、扫描/换脸并发、进程强杀恢复、TTI/TCore、PSS/CPU/耗电/温升和长期稳定性矩阵。用户已明确个人使用阶段不继续详细测试，这些项目转为线下反馈或正式发布前补测，不影响本次自用 APK 交付。
 2. 缺少历史正式 Full APK或可信证书 SHA-256，Full 升级签名链状态为 `blocked_missing_historical_release_baseline`。
 3. Lite 当前配置独立 applicationId，但 Lite 发布签名与共存运营决策仍待安全/运营冻结。
 4. SBOM/NOTICE 已生成，第三方依赖与模型条款仍为 `pending_manual_license_and_model_terms_review`，自动清单不替代人工审批。
 5. 当前工作区非冻结、非干净 release candidate；最新 GitHub Actions workflow 尚未在真实 Linux runner 验证。
+6. 本轮 FTS 修复后仅重建了个人使用 Debug APK；Full/Lite Release APK/AAB、R8 mapping、最终 DEX 守卫、SBOM/NOTICE 和正式证据哈希尚未刷新。
+
+个人使用交付结论：当前 Lite APK 已满足安装、启动、授权、扫描、浏览导航、文件名前缀搜索和换脸双图选取的自用基线；未执行项不标记为通过，后续按线下使用反馈修复。
 
 **目标**
 
@@ -1346,8 +1360,9 @@ Lite 保留真实换脸，同时扫描前/中不主动加载换脸资源。
 
 **退出条件**
 
-- 主机工程与制品退出条件已满足：当前候选可追溯到 `lite-release-policy-v3`、Room v32 schema、四制品哈希、runtimeClasspath、SBOM/NOTICE、签名检查、资产清单和最终 DEX descriptor 审计；Lite 禁止类根命中为 0，换脸必需共享 runtime/资产未被误删。
-- 发布退出条件未满足：必须解除上述设备、历史 Full 签名、Lite 签名/共存决策、人工合规审批、冻结工作区和真实 CI runner 阻断，并完成第 10 节与第 16 节要求的设备矩阵。完成前阶段 9 保持“进行中”，不得写为“发布完成”。
+- 个人使用退出条件已满足：当前源码的 Lite Debug APK 可安装，基础功能真机冒烟通过，Lite instrumentation 73/73 通过，已记录未执行边界与可复核 SHA-256。
+- 修复前正式发布候选的主机工程与制品退出条件曾满足：可追溯到 `lite-release-policy-v3`、Room v32 schema、四制品哈希、runtimeClasspath、SBOM/NOTICE、签名检查、资产清单和最终 DEX descriptor 审计；Lite 禁止类根命中为 0，换脸必需共享 runtime/资产未被误删。本轮 FTS 修复后需重新生成正式候选证据。
+- 正式发布退出条件未满足：仍需解除上述 Full 设备矩阵、历史 Full 签名、Lite 签名/共存决策、人工合规审批、冻结工作区和真实 CI runner 阻断。阶段 9 可写为“个人使用交付完成”，不得写为“正式发布完成”。
 
 **回滚点**
 

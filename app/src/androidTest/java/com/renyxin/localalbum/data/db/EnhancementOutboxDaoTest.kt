@@ -85,8 +85,8 @@ class EnhancementOutboxDaoTest {
     fun newerCoreReplayTransfersInterruptedRunningOutboxOwnership() = runBlocking {
         val oldScanId = "scan-old-owner"
         val newScanId = "scan-new-owner"
-        insertCompletedScan(oldScanId)
-        insertCompletedScan(newScanId)
+        insertCompletedScan(oldScanId, generation = 1L)
+        insertCompletedScan(newScanId, generation = 2L)
         val dao = database.enhancementOutboxDao()
         dao.enqueueAll(listOf(entry(oldScanId, analysis = false)))
         val interrupted = dao.claimBatch(10L, 10, "old-process", 10_000L)
@@ -212,11 +212,11 @@ class EnhancementOutboxDaoTest {
         )
     }
 
-    private suspend fun insertCompletedScan(scanId: String) {
+    private suspend fun insertCompletedScan(scanId: String, generation: Long = 2L) {
         database.scanRunDao().insert(
             ScanRunEntity(
                 scanId = scanId,
-                generation = 2L,
+                generation = generation,
                 scanType = ScanRunEntity.TYPE_INCREMENTAL,
                 status = ScanRunEntity.STATUS_COMPLETED,
                 coreScanState = CoreScanState.COMPLETED.name,
