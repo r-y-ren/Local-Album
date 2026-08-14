@@ -93,6 +93,6 @@
     <circle cx="140" cy="55" r="11.5" class="nn-node"/>
   </g>
 
-  <!--右下角：Lite 标识-->
-  <text x="480" y="450" text-anchor="end" class="lite-text">LITE</text>
+  <!--底部居中：Lite 标识，保持图标视觉重心居中-->
+  <text x="256" y="450" text-anchor="middle" class="lite-text">LITE</text>
 </svg>
