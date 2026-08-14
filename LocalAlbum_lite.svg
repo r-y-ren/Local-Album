@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <defs>
+    <style>
+      .bg-app { fill: #9BB8F4; }
+      
+      /* 后方卡片样式 */
+      .card-back {
+        fill: #B3CBFA;
+        stroke: #2A5A9A;
+        stroke-width: 13;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      
+      /* 前方卡片样式 */
+      .card-front-bg { fill: #E2ECFF; }
+      .card-front-stroke {
+        fill: none;
+        stroke: #2A5A9A;
+        stroke-width: 13;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      /* 图案内容 */
+      .mountain-fill { fill: #3468A8; }
+      .sun-fill { fill: #3468A8; }
+
+      /* 神经网络样式 */
+      .nn-line { stroke: #1E4273; stroke-width: 7; stroke-linecap: round; opacity: 0.85; }
+      .nn-node { fill: #1E4273; stroke: #000000; stroke-width: 3.5; }
+
+      /* Lite 标识样式 */
+      .lite-text {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        font-size: 44px;
+        font-weight: 900;
+        fill: #1E4273;
+        letter-spacing: 3px;
+      }
+    </style>
+  </defs>
+
+  <!--安卓 16 圆角背景容器-->
+  <rect x="0" y="0" width="512" height="512" rx="130" class="bg-app"/>
+
+  <!--主体相册结构组-->
+  <g transform="translate(10, 20)">
+    <!--后方卡片（整体旋转 12 度，保持填充与线条同步）-->
+    <g transform="rotate(12, 285, 255)">
+      <rect x="175" y="155" width="220" height="195" rx="36" class="card-back"/>
+    </g>
+    <!--前方主卡片容器-->
+    <g transform="translate(110, 140)">
+      <!--卡片背景与白底-->
+      <rect x="0" y="0" width="230" height="200" rx="36" class="card-front-bg"/>
+      <!--照片内容：太阳与山峰-->
+      <!--太阳-->
+      <circle cx="165" cy="58" r="20" class="sun-fill"/>
+      <!--山峰：优雅的双峰路径-->
+      <path d="M 28 152 L 85 88 C 88 85, 93 85, 96 88 L 128 124 L 152 96 C 155 93, 160 93, 163 96 L 202 152 Z" class="mountain-fill"/>
+      <!--卡片边框（覆盖在内容上方，保持边缘整洁）-->
+      <rect x="0" y="0" width="230" height="200" rx="36" class="card-front-stroke"/>
+    </g>
+  </g>
+
+  <!--右上角：AI 神经网络 (2 -> 3 -> 2)-->
+  <g transform="translate(345, 70)">
+    <!--Layer 1 到 Layer 2 的连接线-->
+    <line x1="30" y1="5" x2="85" y2="-25" class="nn-line"/>
+    <line x1="30" y1="5" x2="85" y2="30" class="nn-line"/>
+    <line x1="30" y1="5" x2="85" y2="85" class="nn-line"/>
+    <line x1="30" y1="55" x2="85" y2="-25" class="nn-line"/>
+    <line x1="30" y1="55" x2="85" y2="30" class="nn-line"/>
+    <line x1="30" y1="55" x2="85" y2="85" class="nn-line"/>
+    <!--Layer 2 到 Layer 3 的连接线-->
+    <line x1="85" y1="-25" x2="140" y2="5" class="nn-line"/>
+    <line x1="85" y1="-25" x2="140" y2="55" class="nn-line"/>
+    <line x1="85" y1="30" x2="140" y2="5" class="nn-line"/>
+    <line x1="85" y1="30" x2="140" y2="55" class="nn-line"/>
+    <line x1="85" y1="85" x2="140" y2="5" class="nn-line"/>
+    <line x1="85" y1="85" x2="140" y2="55" class="nn-line"/>
+    <!--节点（添加了浅色外边缘线，提高点与线的视觉分离度）-->
+    <!--第 1 层 (2 个)-->
+    <circle cx="30" cy="5" r="11.5" class="nn-node"/>
+    <circle cx="30" cy="55" r="11.5" class="nn-node"/>
+    <!--第 2 层 (3 个)-->
+    <circle cx="85" cy="-25" r="11.5" class="nn-node"/>
+    <circle cx="85" cy="30" r="11.5" class="nn-node"/>
+    <circle cx="85" cy="85" r="11.5" class="nn-node"/>
+    <!--第 3 层 (2 个)-->
+    <circle cx="140" cy="5" r="11.5" class="nn-node"/>
+    <circle cx="140" cy="55" r="11.5" class="nn-node"/>
+  </g>
+
+  <!--右下角：Lite 标识-->
+  <text x="480" y="450" text-anchor="end" class="lite-text">LITE</text>
+</svg>
