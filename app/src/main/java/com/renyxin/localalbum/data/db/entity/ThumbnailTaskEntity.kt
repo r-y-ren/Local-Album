@@ -10,6 +10,7 @@ import androidx.room.PrimaryKey
     indices = [
         Index(value = ["filePath", "sizeClass", "sourceVersion"], unique = true),
         Index(value = ["status", "nextRetryAt", "priority"]),
+        Index(value = ["scanId", "status"]),
         Index(value = ["leaseUntil"]),
         Index(value = ["leaseToken"]),
     ],
@@ -29,6 +30,8 @@ data class ThumbnailTaskEntity(
     val lastError: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
+    /** Null denotes an interactive/legacy task that is not owned by an automatic scan. */
+    val scanId: String? = null,
 ) {
     companion object {
         const val SIZE_GRID = "grid"
@@ -38,5 +41,6 @@ data class ThumbnailTaskEntity(
         const val STATUS_RUNNING = "RUNNING"
         const val STATUS_DONE = "DONE"
         const val STATUS_FAILED = "FAILED"
+        const val STATUS_SUPERSEDED = "SUPERSEDED"
     }
 }

@@ -9,6 +9,7 @@ import androidx.room.PrimaryKey
     tableName = "analysis_tasks",
     indices = [
         Index(value = ["filePath", "sourceVersion", "pipelineScope"], unique = true),
+        Index(value = ["scanId", "status"]),
         Index(value = ["status", "nextRetryAt", "priority"]),
         Index(value = ["leaseUntil"]),
         Index(value = ["leaseToken"]),
@@ -28,6 +29,8 @@ data class AnalysisTaskEntity(
     val lastError: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
+    /** Null for legacy/import/user-created tasks that predate scan lifecycle ownership. */
+    val scanId: String? = null,
 ) {
     companion object {
         const val PRIORITY_SCAN = 0

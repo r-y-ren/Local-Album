@@ -46,6 +46,13 @@ class DatabaseExporterTest {
             store.toSortedMap().values
                 .filter { !it.isTrashed && (afterPath == null || it.filePath > afterPath) }
                 .take(limit)
+        override suspend fun getRecommendationCandidatesForDirectories(
+            parentPaths: List<String>,
+            limit: Int,
+        ): List<MediaEntity> = store.values
+            .filter { !it.isTrashed && it.parentPath in parentPaths }
+            .sortedWith(compareByDescending<MediaEntity> { it.capturedAtMs }.thenBy { it.filePath })
+            .take(limit)
         override fun pagingSource(): androidx.paging.PagingSource<Int, MediaEntity> =
             throw NotImplementedError("Not needed for test")
         override fun directoryPagingSource(query: androidx.sqlite.db.SupportSQLiteQuery): androidx.paging.PagingSource<Int, MediaEntity> =
@@ -71,6 +78,7 @@ class DatabaseExporterTest {
         ): Int = 0
         override suspend fun getDistinctModels(): List<String> = emptyList()
         override suspend fun getDirectorySummaries(): List<DirectorySummary> = emptyList()
+        override suspend fun getDirectorySummariesForPaths(parentPaths: List<String>): List<DirectorySummary> = emptyList()
         override suspend fun getCount(): Int = store.size
         override suspend fun search(query: String): List<MediaEntity> = emptyList()
         override suspend fun searchWithOcr(query: String, limit: Int): List<MediaEntity> = emptyList()
@@ -130,8 +138,15 @@ class DatabaseExporterTest {
             ftsStore.toSortedMap().values.filter { afterPath == null || it.filePath > afterPath }.take(limit)
         override suspend fun getFtsCount(): Int = ftsStore.size
         override suspend fun clearAllFts() { ftsStore.clear() }
-        override suspend fun insertFtsEntry(filePath: String, fileName: String, ocrText: String?, make: String?, model: String?) {
-            ftsStore[filePath] = MediaFts(filePath, fileName, ocrText, make, model)
+        override suspend fun insertFtsEntry(
+            filePath: String,
+            fileName: String,
+            parentPath: String,
+            ocrText: String?,
+            make: String?,
+            model: String?,
+        ) {
+            ftsStore[filePath] = MediaFts(filePath, fileName, parentPath, ocrText, make, model)
         }
         override suspend fun insertFtsAll(entries: List<MediaFts>) {
             for (e in entries) ftsStore[e.filePath] = e
@@ -285,6 +300,7 @@ class DatabaseExporterTest {
     private fun makeFts(path: String): MediaFts = MediaFts(
         filePath = path,
         fileName = path.substringAfterLast('/'),
+        parentPath = path.substringBeforeLast('/', ""),
         ocrText = "hello world",
         make = "Google",
         model = "Pixel 8",
@@ -299,8 +315,8 @@ class DatabaseExporterTest {
         val embeddingDao = FakeEmbeddingDao()
 
         mediaDao.insertAll(listOf(makeMediaEntity("/photos/a.jpg"), makeMediaEntity("/photos/b.jpg")))
-        mediaDao.insertFtsEntry("/photos/a.jpg", "a.jpg", "hello world", "Google", "Pixel 8")
-        mediaDao.insertFtsEntry("/photos/b.jpg", "b.jpg", "hello world", "Google", "Pixel 8")
+        mediaDao.insertFtsEntry("/photos/a.jpg", "a.jpg", "/photos", "hello world", "Google", "Pixel 8")
+        mediaDao.insertFtsEntry("/photos/b.jpg", "b.jpg", "/photos", "hello world", "Google", "Pixel 8")
         faceDao.insertFaces(listOf(makeFaceEntity("/photos/a.jpg")))
         embeddingDao.insertEmbeddings(listOf(makeEmbedding("/photos/a.jpg"), makeEmbedding("/photos/b.jpg")))
 
@@ -343,8 +359,8 @@ class DatabaseExporterTest {
         val sourceEmbeddingDao = FakeEmbeddingDao()
 
         sourceMediaDao.insertAll(listOf(makeMediaEntity("/photos/a.jpg"), makeMediaEntity("/photos/b.jpg")))
-        sourceMediaDao.insertFtsEntry("/photos/a.jpg", "a.jpg", "hello world", "Google", "Pixel 8")
-        sourceMediaDao.insertFtsEntry("/photos/b.jpg", "b.jpg", "hello world", "Google", "Pixel 8")
+        sourceMediaDao.insertFtsEntry("/photos/a.jpg", "a.jpg", "/photos", "hello world", "Google", "Pixel 8")
+        sourceMediaDao.insertFtsEntry("/photos/b.jpg", "b.jpg", "/photos", "hello world", "Google", "Pixel 8")
         sourceFaceDao.insertFaces(listOf(makeFaceEntity("/photos/a.jpg")))
         sourceEmbeddingDao.insertEmbeddings(listOf(makeEmbedding("/photos/a.jpg")))
 
@@ -389,7 +405,9 @@ class DatabaseExporterTest {
         // Verify FTS data
         val restoredFts = targetMediaDao.getAllFtsEntries()
         assertEquals(2, restoredFts.size)
-        assertEquals("hello world", restoredFts.find { it.filePath == "/photos/a.jpg" }?.ocrText)
+        val restoredA = restoredFts.find { it.filePath == "/photos/a.jpg" }
+        assertEquals("/photos", restoredA?.parentPath)
+        assertEquals("hello world", restoredA?.ocrText)
     }
 
     @Test

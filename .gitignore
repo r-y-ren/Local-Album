@@ -62,14 +62,16 @@ new_clip/
 
 # ── Large model binaries (NOT tracked — download via scripts/download_models.sh) ──
 # Small config files (vocab.json, merges.txt, tokenizer_config.json, inference.yml)
-# are kept in the repo — only large model binaries are excluded.
+# are kept in their edition source set — only large model binaries are excluded.
+# Shared interactive face-swap models remain in main so Full and Lite can package them.
 app/src/main/assets/models/*.onnx
 app/src/main/assets/models/*.bin
 app/src/main/assets/models/*.zip
 app/src/main/assets/models/*.tflite
 app/src/main/assets/models/*.ptl
-app/src/main/assets/models/eva02_clip/*.onnx
-app/src/main/assets/models/PP-OCRv5_mobile_rec_infer/*.onnx
-app/src/main/assets/models/PP-OCRv6_small_det_infer/*.onnx
+# Semantic/OCR model binaries are Full-only and must never be sourced from main.
+app/src/full/assets/models/eva02_clip/*.onnx
+app/src/full/assets/models/PP-OCRv5_mobile_rec_infer/*.onnx
+app/src/full/assets/models/PP-OCRv6_small_det_infer/*.onnx
 # 例外：MobileNetV3 场景分类模型随包打包（~21MB），需纳入版本控制
 !app/src/main/assets/models/MobileNet-v3-Large.tflite

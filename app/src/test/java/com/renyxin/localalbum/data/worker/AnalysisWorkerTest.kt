@@ -2,6 +2,7 @@ package com.renyxin.localalbum.data.worker
 
 import com.renyxin.localalbum.core.pipeline.PluginAnalysisPipeline
 import com.renyxin.localalbum.core.pipeline.StageResult
+import com.renyxin.localalbum.data.db.entity.EnhancementState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -81,6 +82,38 @@ class AnalysisWorkerTest {
                 mapOf("face" to StageResult(2, 0)),
                 setOf("face", "semantic"),
                 listOf("/a.jpg", "/b.jpg"),
+            ),
+        )
+    }
+
+    @Test
+    fun `active tasks keep enhancement non terminal`() {
+        assertNull(
+            AnalysisWorker.terminalEnhancementState(
+                activeTasks = 1,
+                failedTasks = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun `failed terminal tasks do not fail core scan`() {
+        assertEquals(
+            EnhancementState.COMPLETED_WITH_FAILURES,
+            AnalysisWorker.terminalEnhancementState(
+                activeTasks = 0,
+                failedTasks = 2,
+            ),
+        )
+    }
+
+    @Test
+    fun `empty failed set completes enhancement independently`() {
+        assertEquals(
+            EnhancementState.COMPLETED,
+            AnalysisWorker.terminalEnhancementState(
+                activeTasks = 0,
+                failedTasks = 0,
             ),
         )
     }

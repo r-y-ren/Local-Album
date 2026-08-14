@@ -244,12 +244,6 @@ fun FacesScreen(
     }
 }
 
-internal fun shouldShowAnalysisProgressGrid(
-    showAnalysisProgressUi: Boolean,
-    isPipelineRunning: Boolean,
-    hasFileProgress: Boolean,
-): Boolean = showAnalysisProgressUi && isPipelineRunning && hasFileProgress
-
 @Composable
 private fun FaceClusterGrid(
     faceClusters: List<FaceCluster>,

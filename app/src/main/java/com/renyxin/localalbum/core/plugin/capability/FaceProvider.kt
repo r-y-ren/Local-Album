@@ -26,6 +26,15 @@ interface FaceProvider {
     val embeddingDim: Int
 
     /**
+     * 是否保证每个检测结果都提供换脸对齐所需的 5 点关键点。
+     *
+     * 默认关闭以保持第三方与旧 Provider 的兼容性；只有明确实现并验证关键点顺序为
+     * 左眼、右眼、鼻尖、嘴左、嘴右的 Provider 才应覆盖为 `true`。
+     */
+    val supportsFivePointLandmarks: Boolean
+        get() = false
+
+    /**
      * 检测单张图片中的人脸并提取嵌入向量。
      *
      * @param file 图片文件

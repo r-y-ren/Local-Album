@@ -9,6 +9,7 @@ import com.renyxin.localalbum.core.pipeline.ParallelFileProcessor
 import com.renyxin.localalbum.core.pipeline.StageResult
 import com.renyxin.localalbum.core.pipeline.StageType
 import com.renyxin.localalbum.data.db.dao.MediaDao
+import com.renyxin.localalbum.data.db.dao.SceneTypeUpdate
 import java.io.File
 
 /**
@@ -44,17 +45,26 @@ class SceneStage(
     ): StageResult {
         val labelCounts = mutableMapOf<String, Int>()
 
-        // 与 TFLite Interpreter 池容量匹配，避免无收益的协程和 Bitmap 排队。
+        // 与 TFLite Interpreter 池容量匹配，避免无收益的协程和 Bitmap 排队。推理与
+        // persistence 分离；每个 Worker lease 最多 250 项，因此成功结果只开启一个事务。
         val results = ParallelFileProcessor.mapParallel(
             filePaths,
             enhancedCallback,
             concurrency = com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime
                 .effectiveStageConcurrency(stageId, fileConcurrency),
+            metricOperation = "pipeline:file:$stageId",
         ) { path ->
-            val result = sceneProvider.classify(File(path))
-            mediaDao.setSceneType(path, result.topLabel.lowercase())
-            result.topLabel
+            sceneProvider.classify(File(path)).topLabel.lowercase()
         }
+        val updates = results.mapNotNull { result ->
+            result.value?.takeIf { result.success }?.let { label ->
+                SceneTypeUpdate(result.path, label)
+            }
+        }
+        updates.chunked(MediaDao.ENHANCEMENT_WRITE_BATCH_SIZE).forEach { batch ->
+            mediaDao.setSceneTypes(batch)
+        }
+
         val success = results.count { it.success }
         val failed = results.count { !it.success }
         for (r in results) {
@@ -68,7 +78,10 @@ class SceneStage(
         return StageResult(
             successCount = success,
             failedCount = failed,
-            extra = labelCounts.mapValues { it.value.toString() } + ("providerId" to sceneProvider.providerId),
+            extra = labelCounts.mapValues { it.value.toString() } + mapOf(
+                "providerId" to sceneProvider.providerId,
+                "databaseTransactions" to updates.chunked(MediaDao.ENHANCEMENT_WRITE_BATCH_SIZE).size.toString(),
+            ),
             failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
         )
     }

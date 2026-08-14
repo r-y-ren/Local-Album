@@ -9,6 +9,7 @@ import com.renyxin.localalbum.core.pipeline.ParallelFileProcessor
 import com.renyxin.localalbum.core.pipeline.StageResult
 import com.renyxin.localalbum.core.pipeline.StageType
 import com.renyxin.localalbum.data.db.dao.MediaDao
+import com.renyxin.localalbum.data.db.dao.QualityScoreUpdate
 import java.io.File
 
 /**
@@ -41,10 +42,21 @@ class BuiltinQualityStage(
         filePaths: List<String>,
         enhancedCallback: EnhancedProgressCallback,
     ): StageResult {
-        // 文件级并行质量评估
-        val results = ParallelFileProcessor.mapParallel(filePaths, enhancedCallback) { path ->
-            val result = analyzer.analyze(File(path))
-            mediaDao.setQualityScore(path, result.overall)
+        // Legacy adapter remains batch-safe even though the policy-aware factory no longer uses it.
+        val results = ParallelFileProcessor.mapParallel(
+            filePaths,
+            enhancedCallback,
+            metricOperation = "pipeline:file:$stageId",
+        ) { path ->
+            analyzer.analyze(File(path)).overall
+        }
+        val updates = results.mapNotNull { result ->
+            result.value?.takeIf { result.success }?.let { score ->
+                QualityScoreUpdate(result.path, score)
+            }
+        }
+        updates.chunked(MediaDao.ENHANCEMENT_WRITE_BATCH_SIZE).forEach { batch ->
+            mediaDao.setQualityScores(batch)
         }
         val success = results.count { it.success }
         val failed = results.count { !it.success }
@@ -55,6 +67,11 @@ class BuiltinQualityStage(
         return StageResult(
             successCount = success,
             failedCount = failed,
+            extra = mapOf(
+                "databaseTransactions" to
+                    updates.chunked(MediaDao.ENHANCEMENT_WRITE_BATCH_SIZE).size.toString(),
+                "bitmapDecodeReused" to "false",
+            ),
             failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
         )
     }

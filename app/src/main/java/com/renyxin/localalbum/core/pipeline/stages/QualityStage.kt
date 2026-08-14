@@ -9,6 +9,7 @@ import com.renyxin.localalbum.core.pipeline.ParallelFileProcessor
 import com.renyxin.localalbum.core.pipeline.StageResult
 import com.renyxin.localalbum.core.pipeline.StageType
 import com.renyxin.localalbum.data.db.dao.MediaDao
+import com.renyxin.localalbum.data.db.dao.QualityScoreUpdate
 import java.io.File
 
 /**
@@ -42,16 +43,26 @@ class QualityStage(
         filePaths: List<String>,
         enhancedCallback: EnhancedProgressCallback,
     ): StageResult {
-        // 启发式阶段不占模型 session，可使用较高但仍有界的 CPU 并发。
+        // 启发式阶段不占模型 session，可使用较高但仍有界的 CPU 并发。推理结果先聚合，
+        // 再以最多 250 行的单事务批次写入，禁止逐图 autocommit。
         val results = ParallelFileProcessor.mapParallel(
             filePaths,
             enhancedCallback,
             concurrency = com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime
                 .effectiveStageConcurrency(stageId, fileConcurrency),
+            metricOperation = "pipeline:file:$stageId",
         ) { path ->
-            val result = qualityProvider.assess(File(path))
-            mediaDao.setQualityScore(path, result.overall)
+            qualityProvider.assess(File(path)).overall
         }
+        val updates = results.mapNotNull { result ->
+            result.value?.takeIf { result.success }?.let { score ->
+                QualityScoreUpdate(result.path, score)
+            }
+        }
+        updates.chunked(MediaDao.ENHANCEMENT_WRITE_BATCH_SIZE).forEach { batch ->
+            mediaDao.setQualityScores(batch)
+        }
+
         val success = results.count { it.success }
         val failed = results.count { !it.success }
         results.filter { !it.success }.forEach {
@@ -61,7 +72,12 @@ class QualityStage(
         return StageResult(
             successCount = success,
             failedCount = failed,
-            extra = mapOf("providerId" to qualityProvider.providerId),
+            extra = mapOf(
+                "providerId" to qualityProvider.providerId,
+                "databaseTransactions" to updates.chunked(MediaDao.ENHANCEMENT_WRITE_BATCH_SIZE).size.toString(),
+                // Provider API currently owns decoding; no shared decoded-media input exists yet.
+                "bitmapDecodeReused" to "false",
+            ),
             failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
         )
     }

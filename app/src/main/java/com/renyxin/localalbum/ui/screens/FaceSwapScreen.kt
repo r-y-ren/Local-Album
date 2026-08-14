@@ -51,12 +51,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,8 +70,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.renyxin.localalbum.core.plugin.capability.ModelReadiness
-import com.renyxin.localalbum.ui.vm.PluginViewModel
+import com.renyxin.localalbum.core.plugin.extension.OnDemandRuntimeState
+import com.renyxin.localalbum.ui.vm.FaceSwapViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -86,33 +88,50 @@ import java.io.File
  * [com.renyxin.localalbum.core.plugin.extension.InSwapperPlugin] 执行换脸，
  * 结果预览后可保存到相册。
  *
- * 前置条件：换脸模型（inswapper_128.onnx）与人脸检测模型均就绪，否则禁用执行按钮。
+ * 前置条件：InSwapper descriptor 与兼容的五点关键点 FaceProvider 可用。模型无需常驻；
+ * 点击后才在交互资源仲裁内按 modelId 准备并加载。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FaceSwapScreen(
-    viewModel: PluginViewModel,
+    viewModel: FaceSwapViewModel,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    val coreStatuses by viewModel.coreFeatureStatuses.collectAsState()
-    val faceSwapState by viewModel.faceSwapState.collectAsState()
-    val faceSwapStatus = coreStatuses.firstOrNull { it.featureId == "face_swap" }
-    val ready = faceSwapStatus?.readiness == ModelReadiness.READY
+    val readiness by viewModel.readiness.collectAsState()
+    val faceSwapState by viewModel.state.collectAsState()
+    val actionable = readiness == OnDemandRuntimeState.AVAILABLE_NEEDS_LOAD ||
+        readiness == OnDemandRuntimeState.READY
 
     var sourceFile by remember { mutableStateOf<File?>(null) }
     var targetFile by remember { mutableStateOf<File?>(null) }
     var sourcePreview by remember { mutableStateOf<Bitmap?>(null) }
     var targetPreview by remember { mutableStateOf<Bitmap?>(null) }
 
+    val latestSourceFile = rememberUpdatedState(sourceFile)
+    val latestTargetFile = rememberUpdatedState(targetFile)
+    val latestSourcePreview = rememberUpdatedState(sourcePreview)
+    val latestTargetPreview = rememberUpdatedState(targetPreview)
+    DisposableEffect(viewModel) {
+        onDispose {
+            viewModel.onPageExit()
+            latestSourcePreview.value?.let { if (!it.isRecycled) it.recycle() }
+            latestTargetPreview.value?.let { if (!it.isRecycled) it.recycle() }
+            latestSourceFile.value?.delete()
+            latestTargetFile.value?.delete()
+        }
+    }
+
     // SAF 选图 launcher
     val sourcePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val file = copyUriToCache(context, uri, "faceswap_source")
             if (file != null) {
+                sourcePreview?.let { if (!it.isRecycled) it.recycle() }
+                sourceFile?.delete()
                 sourceFile = file
                 sourcePreview = decodeSampledBitmap(file, 512)
             }
@@ -122,6 +141,8 @@ fun FaceSwapScreen(
         if (uri != null) {
             val file = copyUriToCache(context, uri, "faceswap_target")
             if (file != null) {
+                targetPreview?.let { if (!it.isRecycled) it.recycle() }
+                targetFile?.delete()
                 targetFile = file
                 targetPreview = decodeSampledBitmap(file, 512)
             }
@@ -131,9 +152,9 @@ fun FaceSwapScreen(
     // 状态消息
     LaunchedEffect(faceSwapState) {
         when (val s = faceSwapState) {
-            is PluginViewModel.FaceSwapUiState.Error ->
+            is FaceSwapViewModel.UiState.Error ->
                 snackbarHostState.showSnackbar(s.message)
-            is PluginViewModel.FaceSwapUiState.Success ->
+            is FaceSwapViewModel.UiState.Success ->
                 snackbarHostState.showSnackbar("换脸完成，可保存到相册")
             else -> Unit
         }
@@ -143,7 +164,9 @@ fun FaceSwapScreen(
         topBar = {
             TopAppBar(
                 title = { Text("换脸") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("返回") } },
+                navigationIcon = {
+                    TextButton(onClick = onBack) { Text("返回") }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                     titleContentColor = MaterialTheme.colorScheme.onSurface,
@@ -160,8 +183,8 @@ fun FaceSwapScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            // ── 模型就绪状态提示 ──────────────────────────────
-            ModelReadinessBanner(ready = ready)
+            // ── 按需运行时状态提示 ────────────────────────────
+            ModelReadinessBanner(readiness = readiness)
 
             // ── 源人脸图选择 ──────────────────────────────────
             ImagePickerCard(
@@ -170,9 +193,11 @@ fun FaceSwapScreen(
                 bitmap = sourcePreview,
                 onPick = { sourcePicker.launch(arrayOf("image/*")) },
                 onClear = {
+                    sourcePreview?.let { if (!it.isRecycled) it.recycle() }
+                    sourceFile?.delete()
                     sourceFile = null
                     sourcePreview = null
-                    viewModel.resetFaceSwapState()
+                    viewModel.reset()
                 },
             )
 
@@ -183,42 +208,59 @@ fun FaceSwapScreen(
                 bitmap = targetPreview,
                 onPick = { targetPicker.launch(arrayOf("image/*")) },
                 onClear = {
+                    targetPreview?.let { if (!it.isRecycled) it.recycle() }
+                    targetFile?.delete()
                     targetFile = null
                     targetPreview = null
-                    viewModel.resetFaceSwapState()
+                    viewModel.reset()
                 },
             )
 
             // ── 执行换脸 ──────────────────────────────────────
-            val canSwap = ready && sourceFile != null && targetFile != null &&
-                faceSwapState !is PluginViewModel.FaceSwapUiState.Loading
+            val canSwap = actionable && sourceFile != null && targetFile != null &&
+                faceSwapState !is FaceSwapViewModel.UiState.Loading
 
             Button(
                 onClick = {
                     val s = sourceFile ?: return@Button
                     val t = targetFile ?: return@Button
-                    viewModel.performFaceSwap(s, t)
+                    viewModel.perform(s, t)
                 },
                 enabled = canSwap,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
             ) {
-                if (faceSwapState is PluginViewModel.FaceSwapUiState.Loading) {
+                if (faceSwapState is FaceSwapViewModel.UiState.Loading) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
                         strokeWidth = 2.dp,
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("换脸中…")
+                    Text(
+                        if (readiness == OnDemandRuntimeState.WAITING_FOR_CORE) {
+                            "等待核心扫描…"
+                        } else {
+                            "按需加载并换脸…"
+                        },
+                    )
                 } else {
                     Text("开始换脸")
+                }
+            }
+            if (faceSwapState is FaceSwapViewModel.UiState.Loading) {
+                OutlinedButton(
+                    onClick = viewModel::cancel,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Text("取消并释放模型")
                 }
             }
 
             // ── 结果预览 ──────────────────────────────────────
             when (val s = faceSwapState) {
-                is PluginViewModel.FaceSwapUiState.Success -> {
+                is FaceSwapViewModel.UiState.Success -> {
                     ResultPreviewCard(
                         bitmap = s.bitmap,
                         onSave = {
@@ -229,7 +271,7 @@ fun FaceSwapScreen(
                                 )
                             }
                         },
-                        onRedo = { viewModel.resetFaceSwapState() },
+                        onRedo = viewModel::reset,
                     )
                 }
                 else -> Unit
@@ -244,13 +286,28 @@ fun FaceSwapScreen(
 
 @Composable
 private fun ModelReadinessBanner(
-    ready: Boolean,
+    readiness: OnDemandRuntimeState,
 ) {
+    val available = readiness != OnDemandRuntimeState.ERROR
+    val title = when (readiness) {
+        OnDemandRuntimeState.AVAILABLE_NEEDS_LOAD -> "换脸可用 · 点击后按需加载"
+        OnDemandRuntimeState.WAITING_FOR_CORE -> "核心扫描优先 · 换脸正在排队"
+        OnDemandRuntimeState.LOADING -> "正在加载换脸运行时与模型"
+        OnDemandRuntimeState.READY -> "换脸模型已临时就绪"
+        OnDemandRuntimeState.ERROR -> "换脸暂不可用"
+    }
+    val detail = when (readiness) {
+        OnDemandRuntimeState.AVAILABLE_NEEDS_LOAD -> "启动与扫描期间不占用人脸或 InSwapper 模型内存"
+        OnDemandRuntimeState.WAITING_FOR_CORE -> "核心发布完成后自动继续，可随时取消"
+        OnDemandRuntimeState.LOADING -> "按 emutls → OpenCV → ONNX 顺序初始化"
+        OnDemandRuntimeState.READY -> "操作完成后将精确释放三个 ONNX 模型"
+        OnDemandRuntimeState.ERROR -> "请确认当前为支持五点关键点的 512 维 InsightFace Provider"
+    }
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (ready)
+            containerColor = if (available)
                 MaterialTheme.colorScheme.primaryContainer
             else MaterialTheme.colorScheme.errorContainer,
         ),
@@ -260,9 +317,9 @@ private fun ModelReadinessBanner(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                if (ready) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+                if (available) Icons.Filled.CheckCircle else Icons.Filled.Warning,
                 contentDescription = null,
-                tint = if (ready)
+                tint = if (available)
                     MaterialTheme.colorScheme.onPrimaryContainer
                 else MaterialTheme.colorScheme.onErrorContainer,
                 modifier = Modifier.size(22.dp),
@@ -270,20 +327,20 @@ private fun ModelReadinessBanner(
             Spacer(modifier = Modifier.width(10.dp))
             Column {
                 Text(
-                    if (ready) "换脸模型已就绪" else "换脸模型未就绪",
+                    title,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (ready)
+                    color = if (available)
                         MaterialTheme.colorScheme.onPrimaryContainer
                     else MaterialTheme.colorScheme.onErrorContainer,
                 )
-                if (!ready) {
-                    Text(
-                        "请确认人脸聚类与换脸模型均已加载完成",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                }
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (available)
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onErrorContainer,
+                )
             }
         }
     }

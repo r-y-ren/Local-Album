@@ -1,6 +1,7 @@
 package com.renyxin.localalbum.core.plugin.model
 
 import android.util.Log
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.tensorflow.lite.Interpreter
@@ -119,6 +120,7 @@ class BatchedModelLoader(
             setUseXNNPACK(true)
         }
         Log.d(TAG, "创建 Interpreter: 1 线程 + XNNPACK（配合文件级并行）")
+        NativeAiRuntime.ensureNativePrerequisite()
         return Interpreter(buffer, options)
     }
 }

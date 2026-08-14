@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "lite-release-policy-v3",
+  "editions": {
+    "full": {
+      "applicationId": "com.renyxin.localalbum",
+      "productionPolicyId": "full",
+      "productionPolicyVersion": 1,
+      "claimLegacyFullAnalysisTasks": true,
+      "enhancementAdmissionIdentity": null,
+      "corePlan": [],
+      "automaticEnhancementPlan": [
+        "core:face",
+        "core:scene",
+        "core:semantic",
+        "core:quality",
+        "core:ocr"
+      ],
+      "manualEnhancementPlan": [
+        "core:face",
+        "core:scene",
+        "core:semantic",
+        "core:quality",
+        "core:ocr"
+      ],
+      "requiredAssetPaths": [
+        "assets/models/eva02_clip/eva02_text_int8.onnx",
+        "assets/models/eva02_clip/eva02_visual_336_int8.onnx",
+        "assets/models/eva02_clip/merges.txt",
+        "assets/models/eva02_clip/tokenizer_config.json",
+        "assets/models/eva02_clip/vocab.json",
+        "assets/models/PP-OCRv5_mobile_rec_infer/inference.onnx",
+        "assets/models/PP-OCRv5_mobile_rec_infer/inference.yml",
+        "assets/models/PP-OCRv6_small_det_infer/inference.onnx",
+        "assets/models/PP-OCRv6_small_det_infer/inference.yml",
+        "assets/ppocrv5_dict.txt",
+        "assets/models/inswapper_128.onnx",
+        "assets/models/emap_512.bin",
+        "assets/models/buffalo_l.zip",
+        "assets/models/MobileNet-v3-Large.tflite"
+      ]
+    },
+    "lite": {
+      "applicationId": "com.renyxin.localalbum.lite",
+      "productionPolicyId": "lite",
+      "productionPolicyVersion": 2,
+      "claimLegacyFullAnalysisTasks": false,
+      "enhancementAdmissionIdentity": {
+        "reportId": "lite-scene-quality-phase7",
+        "reportHash": "sha256:deb7718c2f158fc2c72d7fdde107df1657424274027370084b40eb5e78acb043"
+      },
+      "corePlan": [],
+      "automaticEnhancementPlan": [],
+      "manualEnhancementPlan": ["core:scene", "core:quality"],
+      "requiredAssetPaths": [
+        "assets/models/inswapper_128.onnx",
+        "assets/models/emap_512.bin",
+        "assets/models/buffalo_l.zip",
+        "assets/models/MobileNet-v3-Large.tflite"
+      ]
+    }
+  },
+  "dexGuards": {
+    "lite": {
+      "artifactKind": "apk",
+      "variant": "liteRelease",
+      "forbiddenClassRoots": [
+        "com.renyxin.localalbum.ui.screens.FacesScreenKt",
+        "com.renyxin.localalbum.ui.screens.AiAnalysisPreferencesScreenKt",
+        "com.renyxin.localalbum.data.worker.FaceClusterMaintenanceWorker",
+        "com.renyxin.localalbum.data.worker.SemanticMaintenanceWorker",
+        "com.renyxin.localalbum.data.worker.SemanticClusterMaintenanceWorker",
+        "com.renyxin.localalbum.core.pipeline.stages.FaceStage",
+        "com.renyxin.localalbum.core.pipeline.stages.SemanticStage",
+        "com.renyxin.localalbum.core.pipeline.stages.OcrStage",
+        "com.renyxin.localalbum.core.pipeline.stages.BuiltinFaceStage",
+        "com.renyxin.localalbum.core.pipeline.stages.BuiltinSemanticStage",
+        "com.renyxin.localalbum.core.pipeline.stages.BuiltinOcrStage",
+        "com.renyxin.localalbum.core.plugin.capability.builtin.MlKitOcrProvider",
+        "com.renyxin.localalbum.core.plugin.capability.builtin.PaddleOCRProvider",
+        "com.renyxin.localalbum.core.plugin.model.GLMOcrProvider"
+      ]
+    }
+  },
+  "guardedAssetPrefixes": [
+    "assets/models/",
+    "assets/ppocr",
+    "assets/mlkit-google-ocr-models/"
+  ],
+  "assetRules": [
+    {
+      "matchType": "prefix",
+      "pattern": "assets/models/eva02_clip/",
+      "purpose": "semantic-search-and-recommendations",
+      "allowedEditions": ["full"],
+      "requiredForEditions": ["full"],
+      "sourceSet": "full"
+    },
+    {
+      "matchType": "prefix",
+      "pattern": "assets/models/PP-OCRv5_mobile_rec_infer/",
+      "purpose": "automatic-ocr-recognition",
+      "allowedEditions": ["full"],
+      "requiredForEditions": ["full"],
+      "sourceSet": "full"
+    },
+    {
+      "matchType": "prefix",
+      "pattern": "assets/models/PP-OCRv6_small_det_infer/",
+      "purpose": "automatic-ocr-detection",
+      "allowedEditions": ["full"],
+      "requiredForEditions": ["full"],
+      "sourceSet": "full"
+    },
+    {
+      "matchType": "exact",
+      "pattern": "assets/ppocrv5_dict.txt",
+      "purpose": "automatic-ocr-decoding",
+      "allowedEditions": ["full"],
+      "requiredForEditions": ["full"],
+      "sourceSet": "full"
+    },
+    {
+      "matchType": "prefix",
+      "pattern": "assets/mlkit-google-ocr-models/",
+      "purpose": "optional-full-mlkit-ocr-models",
+      "allowedEditions": ["full"],
+      "requiredForEditions": [],
+      "sourceSet": "fullDependency"
+    },
+    {
+      "matchType": "wildcard",
+      "pattern": "lib/*/libmlkit_google_ocr_pipeline.so",
+      "purpose": "optional-full-mlkit-ocr-runtime",
+      "allowedEditions": ["full"],
+      "requiredForEditions": [],
+      "sourceSet": "fullDependency"
+    },
+    {
+      "matchType": "exact",
+      "pattern": "assets/models/inswapper_128.onnx",
+      "purpose": "interactive-face-swap",
+      "allowedEditions": ["full", "lite"],
+      "requiredForEditions": ["full", "lite"],
+      "sourceSet": "main"
+    },
+    {
+      "matchType": "exact",
+      "pattern": "assets/models/emap_512.bin",
+      "purpose": "interactive-face-swap-embedding-map",
+      "allowedEditions": ["full", "lite"],
+      "requiredForEditions": ["full", "lite"],
+      "sourceSet": "main"
+    },
+    {
+      "matchType": "exact",
+      "pattern": "assets/models/buffalo_l.zip",
+      "purpose": "interactive-face-swap-detection-and-embedding",
+      "allowedEditions": ["full", "lite"],
+      "requiredForEditions": ["full", "lite"],
+      "sourceSet": "main"
+    },
+    {
+      "matchType": "exact",
+      "pattern": "assets/models/MobileNet-v3-Large.tflite",
+      "purpose": "manual-scene-enhancement",
+      "allowedEditions": ["full", "lite"],
+      "requiredForEditions": ["full", "lite"],
+      "sourceSet": "main"
+    }
+  ],
+  "sharedNativeRuntimeRules": [
+    {
+      "pattern": "lib/*/libonnxruntime*.so",
+      "purpose": "shared-onnx-runtime"
+    },
+    {
+      "pattern": "lib/*/libopencv_java*.so",
+      "purpose": "interactive-face-swap-opencv"
+    },
+    {
+      "pattern": "lib/*/libemutls_shim.so",
+      "purpose": "shared-native-runtime-safety-shim"
+    },
+    {
+      "pattern": "lib/*/libtensorflowlite_jni.so",
+      "purpose": "manual-scene-enhancement-runtime"
+    },
+    {
+      "pattern": "lib/*/libface_detector*_jni.so",
+      "purpose": "interactive-face-swap-face-detection-runtime"
+    }
+  ]
+}

@@ -13,10 +13,12 @@ import com.renyxin.localalbum.data.db.dao.AnalysisTaskDao
 import com.renyxin.localalbum.data.db.dao.DeletionTombstoneDao
 import com.renyxin.localalbum.data.db.dao.DuplicateMaintenanceDao
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
+import com.renyxin.localalbum.data.db.dao.EnhancementOutboxDao
 import com.renyxin.localalbum.data.db.dao.FaceClusterDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.FeatureStoreDao
 import com.renyxin.localalbum.data.db.dao.ImportStagingDao
+import com.renyxin.localalbum.data.db.dao.MediaChangeDao
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.dao.PluginManifestDao
 import com.renyxin.localalbum.data.db.dao.ScanRunDao
@@ -32,6 +34,7 @@ import com.renyxin.localalbum.data.db.entity.DeletionTombstoneEntity
 import com.renyxin.localalbum.data.db.entity.DuplicateGroupEntity
 import com.renyxin.localalbum.data.db.entity.DuplicateHashStagingEntity
 import com.renyxin.localalbum.data.db.entity.DuplicateMemberEntity
+import com.renyxin.localalbum.data.db.entity.EnhancementOutboxEntity
 import com.renyxin.localalbum.data.db.entity.MaintenanceRunEntity
 import com.renyxin.localalbum.data.db.entity.FaceClusterMetaEntity
 import com.renyxin.localalbum.data.db.entity.FaceClusterPrototypeEntity
@@ -41,8 +44,10 @@ import com.renyxin.localalbum.data.db.entity.ImportEmbeddingStagingEntity
 import com.renyxin.localalbum.data.db.entity.ImportFaceStagingEntity
 import com.renyxin.localalbum.data.db.entity.ImportFtsStagingEntity
 import com.renyxin.localalbum.data.db.entity.ImportMediaStagingEntity
+import com.renyxin.localalbum.data.db.entity.MediaChangeEventEntity
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
 import com.renyxin.localalbum.data.db.entity.MediaEntity
+import com.renyxin.localalbum.data.db.entity.MediaStoreReferenceEntity
 import com.renyxin.localalbum.data.db.entity.MediaFts
 import com.renyxin.localalbum.data.db.entity.PluginManifestEntity
 import com.renyxin.localalbum.data.db.entity.SemanticClusterGenerationEntity
@@ -88,9 +93,12 @@ import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
         com.renyxin.localalbum.data.db.entity.BackupImportStagingEntity::class,
         AlbumSnapshotDirectoryEntity::class,
         AlbumSnapshotMetaEntity::class,
+        MediaChangeEventEntity::class,
+        MediaStoreReferenceEntity::class,
+        EnhancementOutboxEntity::class,
     ],
-    version = 28,
-    exportSchema = false,
+    version = 32,
+    exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun mediaDao(): MediaDao
@@ -104,6 +112,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun analysisTaskDao(): AnalysisTaskDao
     abstract fun scanRunDao(): ScanRunDao
     abstract fun scanStagingDao(): ScanStagingDao
+    abstract fun mediaChangeDao(): MediaChangeDao
+    abstract fun enhancementOutboxDao(): EnhancementOutboxDao
     abstract fun albumSnapshotDao(): AlbumSnapshotDao
     abstract fun importStagingDao(): ImportStagingDao
     abstract fun backupStagingDao(): BackupStagingDao
@@ -742,6 +752,247 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migration 28 → 29：持久化核心/增强扫描生命周期及分析任务归属。
+         *
+         * 所有新增列都有与实体默认值一致的 SQL 默认值，旧运行记录继续作为
+         * legacy status 使用；NULL scanId 保留旧导入和用户手动任务的无归属语义。
+         */
+        val MIGRATION_28_29 = object : Migration(28, 29) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE scan_runs ADD COLUMN indexAvailability TEXT NOT NULL DEFAULT 'EMPTY'")
+                db.execSQL("ALTER TABLE scan_runs ADD COLUMN coreScanState TEXT NOT NULL DEFAULT 'IDLE'")
+                db.execSQL("ALTER TABLE scan_runs ADD COLUMN enhancementState TEXT NOT NULL DEFAULT 'NOT_SCHEDULED'")
+                db.execSQL("ALTER TABLE scan_runs ADD COLUMN firstBatchCommittedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE scan_runs ADD COLUMN indexAvailableAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE scan_runs ADD COLUMN coreCompletedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE scan_runs ADD COLUMN enhancementStartedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE scan_runs ADD COLUMN enhancementCompletedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_scan_runs_coreScanState_startedAt ON scan_runs(coreScanState, startedAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_scan_runs_enhancementState_startedAt ON scan_runs(enhancementState, startedAt)")
+
+                // Preserve the meaning of legacy terminal runs instead of exposing the
+                // newly added default IDLE/EMPTY values after an upgrade.
+                db.execSQL(
+                    "UPDATE scan_runs SET indexAvailability = 'PUBLISHED', " +
+                        "coreScanState = 'COMPLETED', " +
+                        "indexAvailableAt = CASE WHEN completedAt = 0 THEN startedAt ELSE completedAt END, " +
+                        "coreCompletedAt = CASE WHEN completedAt = 0 THEN startedAt ELSE completedAt END " +
+                        "WHERE status = 'COMPLETED'",
+                )
+                db.execSQL(
+                    "UPDATE scan_runs SET coreScanState = 'FAILED' " +
+                        "WHERE status = 'FAILED'",
+                )
+                db.execSQL(
+                    "UPDATE scan_runs SET coreScanState = 'CANCELLED' " +
+                        "WHERE status = 'ABORTED'",
+                )
+                db.execSQL(
+                    "UPDATE scan_runs SET status = 'ABORTED', " +
+                        "completedAt = CASE WHEN completedAt = 0 THEN startedAt ELSE completedAt END, " +
+                        "coreScanState = 'PAUSED', errorType = 'process_restarted' " +
+                        "WHERE status = 'RUNNING'",
+                )
+
+                db.execSQL("ALTER TABLE analysis_tasks ADD COLUMN scanId TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_analysis_tasks_scanId_status ON analysis_tasks(scanId, status)")
+            }
+        }
+
+        /** Migration 29 -> 30: durable changed-set journal and stable MediaStore identity map. */
+        val MIGRATION_29_30 = object : Migration(29, 30) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS media_change_events (
+                        eventKey TEXT NOT NULL PRIMARY KEY,
+                        profileId TEXT NOT NULL,
+                        eventType TEXT NOT NULL,
+                        volumeName TEXT,
+                        mediaType TEXT,
+                        mediaStoreId INTEGER,
+                        contentUri TEXT,
+                        flags INTEGER NOT NULL,
+                        firstObservedAtMs INTEGER NOT NULL,
+                        observedAtMs INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        attemptCount INTEGER NOT NULL,
+                        nextAttemptAt INTEGER NOT NULL,
+                        leaseUntil INTEGER NOT NULL,
+                        leaseToken TEXT,
+                        lastError TEXT,
+                        createdAtMs INTEGER NOT NULL,
+                        updatedAtMs INTEGER NOT NULL
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_media_change_events_profileId_status_observedAtMs " +
+                        "ON media_change_events(profileId, status, observedAtMs)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_media_change_events_leaseToken " +
+                        "ON media_change_events(leaseToken)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_media_change_events_eventType_status " +
+                        "ON media_change_events(eventType, status)",
+                )
+
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS media_store_references (
+                        stableKey TEXT NOT NULL PRIMARY KEY,
+                        profileId TEXT NOT NULL,
+                        volumeName TEXT NOT NULL,
+                        mediaType TEXT NOT NULL,
+                        mediaStoreId INTEGER NOT NULL,
+                        contentUri TEXT NOT NULL,
+                        filePath TEXT NOT NULL,
+                        sourceVersion TEXT NOT NULL,
+                        observedAtMs INTEGER NOT NULL,
+                        scanGeneration INTEGER NOT NULL
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_media_store_references_profileId_volumeName_mediaType_mediaStoreId " +
+                        "ON media_store_references(profileId, volumeName, mediaType, mediaStoreId)",
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_media_store_references_profileId_filePath " +
+                        "ON media_store_references(profileId, filePath)",
+                )
+            }
+        }
+
+        /** Migration 30 -> 31: post-core enhancement handoff outbox and thumbnail ownership gate. */
+        val MIGRATION_30_31 = object : Migration(30, 31) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE thumbnail_tasks ADD COLUMN scanId TEXT")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_thumbnail_tasks_scanId_status " +
+                        "ON thumbnail_tasks(scanId, status)",
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS enhancement_outbox (
+                        outboxId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        scanId TEXT NOT NULL,
+                        profileId TEXT NOT NULL,
+                        filePath TEXT NOT NULL,
+                        sourceVersion TEXT NOT NULL,
+                        mediaType TEXT NOT NULL,
+                        pipelineScope TEXT NOT NULL,
+                        enqueueAnalysis INTEGER NOT NULL,
+                        enqueueThumbnail INTEGER NOT NULL,
+                        parentPath TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        attemptCount INTEGER NOT NULL,
+                        nextRetryAt INTEGER NOT NULL,
+                        leaseUntil INTEGER NOT NULL,
+                        leaseToken TEXT,
+                        lastError TEXT,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_enhancement_outbox_scanId_status_createdAt " +
+                        "ON enhancement_outbox(scanId, status, createdAt)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_enhancement_outbox_status_nextRetryAt_createdAt " +
+                        "ON enhancement_outbox(status, nextRetryAt, createdAt)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_enhancement_outbox_leaseUntil " +
+                        "ON enhancement_outbox(leaseUntil)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_enhancement_outbox_leaseToken " +
+                        "ON enhancement_outbox(leaseToken)",
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_enhancement_outbox_profileId_filePath_sourceVersion_pipelineScope " +
+                        "ON enhancement_outbox(profileId, filePath, sourceVersion, pipelineScope)",
+                )
+            }
+        }
+
+        /**
+         * Migration 31 -> 32: add parentPath to FTS and typed import staging without dropping data.
+         *
+         * SQLite cannot ALTER an FTS4 virtual table to add a column, so the old rows are copied to
+         * an ordinary migration table, the virtual table is recreated, and parentPath is backfilled
+         * from the canonical media row. Typed staging is rebuilt to match Room's exact no-default
+         * schema while preserving any crash-recovery generation that existed during an upgrade.
+         */
+        val MIGRATION_31_32 = object : Migration(31, 32) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE media_items_fts_v31_backup (
+                        filePath TEXT NOT NULL,
+                        fileName TEXT NOT NULL,
+                        ocrText TEXT,
+                        make TEXT,
+                        model TEXT
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    """INSERT INTO media_items_fts_v31_backup(filePath,fileName,ocrText,make,model)
+                        SELECT filePath,fileName,ocrText,make,model FROM media_items_fts""".trimIndent(),
+                )
+                db.execSQL("DROP TABLE media_items_fts")
+                db.execSQL(
+                    """CREATE VIRTUAL TABLE IF NOT EXISTS media_items_fts USING FTS4(
+                        filePath TEXT NOT NULL,
+                        fileName TEXT NOT NULL,
+                        parentPath TEXT NOT NULL,
+                        ocrText TEXT,
+                        make TEXT,
+                        model TEXT,
+                        tokenize=unicode61
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    """INSERT INTO media_items_fts(filePath,fileName,parentPath,ocrText,make,model)
+                        SELECT f.filePath,f.fileName,COALESCE(m.parentPath,''),f.ocrText,f.make,f.model
+                        FROM media_items_fts_v31_backup f
+                        LEFT JOIN media_items m ON m.filePath = f.filePath""".trimIndent(),
+                )
+                db.execSQL("DROP TABLE media_items_fts_v31_backup")
+
+                db.execSQL(
+                    """CREATE TABLE import_fts_staging_v32 (
+                        stagingId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        generation TEXT NOT NULL,
+                        filePath TEXT NOT NULL,
+                        fileName TEXT NOT NULL,
+                        parentPath TEXT NOT NULL,
+                        ocrText TEXT,
+                        make TEXT,
+                        model TEXT
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    """INSERT INTO import_fts_staging_v32(
+                        stagingId,generation,filePath,fileName,parentPath,ocrText,make,model
+                    ) SELECT s.stagingId,s.generation,s.filePath,s.fileName,
+                        COALESCE(
+                            (SELECT m.parentPath FROM import_media_staging m
+                             WHERE m.generation = s.generation AND m.filePath = s.filePath LIMIT 1),
+                            (SELECT m.parentPath FROM media_items m
+                             WHERE m.filePath = s.filePath LIMIT 1),
+                            ''
+                        ),s.ocrText,s.make,s.model
+                    FROM import_fts_staging s""".trimIndent(),
+                )
+                db.execSQL("DROP TABLE import_fts_staging")
+                db.execSQL("ALTER TABLE import_fts_staging_v32 RENAME TO import_fts_staging")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_import_fts_staging_generation " +
+                        "ON import_fts_staging(generation)",
+                )
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -770,6 +1021,10 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_25_26,
                         MIGRATION_26_27,
                         MIGRATION_27_28,
+                        MIGRATION_28_29,
+                        MIGRATION_29_30,
+                        MIGRATION_30_31,
+                        MIGRATION_31_32,
                     )
                     // 1.2: 仅在降级时销毁数据；升级缺失迁移时抛异常而非静默清库
                     .fallbackToDestructiveMigrationOnDowngrade()

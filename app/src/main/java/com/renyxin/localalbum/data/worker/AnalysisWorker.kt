@@ -1,12 +1,18 @@
 package com.renyxin.localalbum.data.worker
 
+import android.app.Notification
 import android.content.Context
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
+import androidx.work.ForegroundInfo
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.renyxin.localalbum.LocalAlbumApplication
+import com.renyxin.localalbum.R
 import com.renyxin.localalbum.core.analysis.AiAnalysisPreferences
 import com.renyxin.localalbum.core.analysis.AiAnalysisPreferencesRuntime
 import com.renyxin.localalbum.core.analysis.FaceGroupingStrictness
@@ -14,28 +20,34 @@ import com.renyxin.localalbum.core.analysis.OcrAnalysisScope
 import com.renyxin.localalbum.core.analysis.RecommendationPreference
 import com.renyxin.localalbum.core.analysis.SemanticSearchStrictness
 import com.renyxin.localalbum.core.concurrent.AnalysisDeviceCapabilityDetector
+import com.renyxin.localalbum.core.concurrent.EnhancementResourceGate
 import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingMode
 import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingResolver
 import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingRuntime
 import com.renyxin.localalbum.core.pipeline.StageResult
 import com.renyxin.localalbum.data.db.entity.AnalysisTaskEntity
+import com.renyxin.localalbum.data.db.entity.EnhancementState
 import com.renyxin.localalbum.data.prefs.SettingsStore
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.first
 
 /** 唯一、可恢复的持久分析任务消费者。 */
 class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val app = applicationContext as? LocalAlbumApplication ?: return Result.failure()
         val container = app.container
-        val dao = container.database.analysisTaskDao()
+        val database = container.database
+        val dao = database.analysisTaskDao()
+        val scanRunDao = database.scanRunDao()
         val pipeline = container.pluginAnalysisPipeline
-        val scope = pipeline.pipelineScope
+        val claimableScopes = pipeline.claimableTaskScopes
         val requestedMode = AnalysisSchedulingMode.fromPersistedValue(
             SettingsStore(applicationContext).analysisSchedulingMode.first(),
         )
@@ -61,77 +73,208 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 ),
             ),
         )
-        // 一次 Worker 先领取一个有界窗口，再让每个模型阶段连续处理整个窗口。
-        // 相比每 250 条完整切换五个阶段，该方式不增加模型峰值驻留，却将模型加载/卸载轮次
-        // 最多降低到原来的 1/MAX_BATCHES_PER_RUN。每个租约仍独立提交，保持恢复语义不变。
-        val leasedGroups = mutableListOf<LeasedTaskGroup>()
-        repeat(schedulingProfile.workerLeaseGroups.coerceIn(1, MAX_BATCHES_PER_RUN)) {
-            if (isStopped) return@repeat
-            val now = System.currentTimeMillis()
-            val token = UUID.randomUUID().toString()
-            val currentTasks = dao.claimBatch(now, BATCH_SIZE, token, LEASE_MS, scope)
-            // v19→v20 无法在 SQL 迁移期获知运行时 Provider；仅把迁移默认 scope 作为一次性兼容队列。
-            val tasks = if (currentTasks.isNotEmpty() || scope == AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE) {
-                currentTasks
-            } else {
-                dao.claimBatch(now, BATCH_SIZE, token, LEASE_MS, AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE)
-            }
-            if (tasks.isEmpty()) return@repeat
-            leasedGroups += LeasedTaskGroup(token, tasks)
-        }
 
-        if (leasedGroups.isNotEmpty()) {
-            try {
-                coroutineScope {
-                    val heartbeat = launch(start = CoroutineStart.UNDISPATCHED) {
-                        while (isActive) {
-                            val renewedAt = System.currentTimeMillis()
-                            leasedGroups.forEach { group ->
-                                dao.renewLease(group.token, renewedAt + LEASE_MS, renewedAt)
+        val leasedGroups = mutableListOf<LeasedTaskGroup>()
+        val touchedScanIds = linkedSetOf<String>()
+        try {
+            if (container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested) return Result.retry()
+            setForeground(getForegroundInfo())
+
+            val laneResult = EnhancementResourceGate.tryWithAutomaticEnhancement {
+                try {
+                    // Recovery, leasing, inference and lease cleanup all occur while this lane is
+                    // held. Backup maintenance cannot replace tables between those operations.
+                    scanRunDao.recoverRunningEnhancements()
+                    val recoveryNow = System.currentTimeMillis()
+                    dao.recoverInterruptedLeases(recoveryNow)
+                    pipeline.retiredAutomaticScopeSelectors.forEach { selector ->
+                        dao.supersedeRetiredPolicyScopes(
+                            pipelinePrefix = selector.pipelinePrefix,
+                            planName = selector.planName,
+                            policyIdentity = selector.policyIdentity,
+                            reason = RETIRED_POLICY_REASON,
+                            now = recoveryNow,
+                        )
+                    }
+                    // Include runs queued before this process started, even when their tasks were
+                    // completed or superseded during recovery and no new lease is claimed below.
+                    touchedScanIds += scanRunDao.getUnsettledEnhancementScanIds()
+
+                    // Pick exactly one durable identity per Worker run. Aggregate compatibility
+                    // scopes run first, then per-Stage scopes follow pipeline topological order.
+                    val activeScope = claimableScopes.firstOrNull { scope ->
+                        dao.countRunnable(scope) > 0
+                    }
+                    if (activeScope != null) {
+                        repeat(schedulingProfile.workerLeaseGroups.coerceIn(1, MAX_BATCHES_PER_RUN)) {
+                            if (
+                                isStopped ||
+                                container.albumRepository.isCoreScanActive() ||
+                                EnhancementResourceGate.isAutomaticWorkBlocked
+                            ) {
+                                return@repeat
                             }
-                            delay(LEASE_RENEW_INTERVAL_MS)
+                            val now = System.currentTimeMillis()
+                            val token = UUID.randomUUID().toString()
+                            val tasks = dao.claimBatch(
+                                now = now,
+                                limit = BATCH_SIZE,
+                                leaseToken = token,
+                                leaseDurationMs = LEASE_MS,
+                                scope = activeScope,
+                            )
+                            if (tasks.isEmpty()) return@repeat
+                            leasedGroups += LeasedTaskGroup(token, tasks)
+                            touchedScanIds += tasks.mapNotNull { it.scanId }
+                        }
+                    }
+
+                    if (touchedScanIds.isNotEmpty()) {
+                        val now = System.currentTimeMillis()
+                        touchedScanIds.forEach { scanId ->
+                            scanRunDao.markEnhancementRunning(scanId, now = now)
+                        }
+                    }
+
+                    if (leasedGroups.isNotEmpty()) {
+                        coroutineScope {
+                            val heartbeat = launch(start = CoroutineStart.UNDISPATCHED) {
+                                while (isActive) {
+                                    val renewedAt = System.currentTimeMillis()
+                                    leasedGroups.forEach { group ->
+                                        dao.renewLease(group.token, renewedAt + LEASE_MS, renewedAt)
+                                    }
+                                    delay(LEASE_RENEW_INTERVAL_MS)
+                                }
+                            }
+                            val notification = launch(start = CoroutineStart.UNDISPATCHED) {
+                                pipeline.progressManager.progress.collect { progress ->
+                                    if (!progress.isCompleted && progress.processedFiles > 0) {
+                                        val text = applicationContext.getString(
+                                            R.string.scan_notif_stage,
+                                            progress.currentStageName.ifEmpty { "正在分析" },
+                                            progress.processedFiles,
+                                            progress.totalFiles,
+                                        )
+                                        ScanServiceController.updateEnhancementProgress(applicationContext, text)
+                                    }
+                                }
+                            }
+                            try {
+                                leasedGroups.forEach { group ->
+                                    val taskScope = group.tasks.first().pipelineScope
+                                    check(group.tasks.all { it.pipelineScope == taskScope }) {
+                                        "Analysis lease mixed task scopes"
+                                    }
+                                    val requiredStageIds = pipeline.requiredStageIdsForTaskScope(taskScope)
+                                    val attemptedPaths = group.tasks.map { it.filePath }
+                                    val results = pipeline.runIncrementalForTaskScope(
+                                        taskScope = taskScope,
+                                        incrementalPaths = attemptedPaths,
+                                        allPaths = emptyList(),
+                                    )
+                                    val failure = failureSummary(results, requiredStageIds)
+                                    val failedPaths = failedPaths(results, requiredStageIds, attemptedPaths)
+                                    val failedTasks = group.tasks.filter { it.filePath in failedPaths }
+                                    val succeededTasks = group.tasks.filterNot { it.filePath in failedPaths }
+                                    val completedAt = System.currentTimeMillis()
+                                    if (succeededTasks.isNotEmpty()) {
+                                        dao.markDone(succeededTasks.map { it.taskId }, group.token, completedAt)
+                                    }
+                                    if (failedTasks.isNotEmpty()) {
+                                        markFailed(
+                                            dao,
+                                            failedTasks,
+                                            group.token,
+                                            failure ?: "stage_file_failure",
+                                        )
+                                    }
+                                }
+                            } finally {
+                                heartbeat.cancel()
+                                notification.cancel()
+                            }
+                        }
+                    }
+
+                    finalizeEnhancementStates(scanRunDao, dao, touchedScanIds)
+                    val active = activeTaskCount(dao, claimableScopes)
+                    if (active > 0) Result.retry() else Result.success()
+                } catch (cancelled: CancellationException) {
+                    // The caller persists PREEMPTED (core/maintenance) or PAUSED (user) before
+                    // cancellation. Release leases before this automatic lane becomes available.
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                        if (leasedGroups.isNotEmpty()) {
+                            dao.releaseLeases(
+                                leasedGroups.map { it.token },
+                                System.currentTimeMillis(),
+                            )
+                        }
+                    }
+                    throw cancelled
+                } catch (error: Throwable) {
+                    leasedGroups.forEach { group ->
+                        try {
+                            markFailed(dao, group.tasks, group.token, error.javaClass.simpleName)
+                        } catch (markError: Throwable) {
+                            Log.e(TAG, "保存增强失败任务状态失败", markError)
                         }
                     }
                     try {
-                        val tasks = leasedGroups.flatMap { it.tasks }
-                        val results = pipeline.runIncremental(tasks.map { it.filePath }, emptyList())
-                        val failure = failureSummary(results, pipeline.requiredStageIds)
-                        val failedPaths = failedPaths(results, pipeline.requiredStageIds, tasks.map { it.filePath })
-                        leasedGroups.forEach { group ->
-                            val failedTasks = group.tasks.filter { it.filePath in failedPaths }
-                            val succeededTasks = group.tasks.filterNot { it.filePath in failedPaths }
-                            val completedAt = System.currentTimeMillis()
-                            if (succeededTasks.isNotEmpty()) {
-                                dao.markDone(succeededTasks.map { it.taskId }, group.token, completedAt)
-                            }
-                            if (failedTasks.isNotEmpty()) {
-                                markFailed(
-                                    dao,
-                                    failedTasks,
-                                    group.token,
-                                    failure ?: "pipeline_file_failure",
-                                )
-                            }
-                        }
-                    } finally {
-                        heartbeat.cancel()
+                        finalizeEnhancementStates(scanRunDao, dao, touchedScanIds)
+                    } catch (stateError: Throwable) {
+                        Log.e(TAG, "保存增强终态失败", stateError)
                     }
-                }
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                leasedGroups.forEach { group ->
-                    markFailed(dao, group.tasks, group.token, error.javaClass.simpleName)
+                    val active = activeTaskCount(dao, claimableScopes)
+                    if (active > 0) Result.retry() else Result.success()
                 }
             }
+            return laneResult ?: Result.retry()
+        } catch (cancelled: CancellationException) {
+            ScanServiceController.clearEnhancementProgress(applicationContext)
+            throw cancelled
+        } catch (error: Throwable) {
+            Log.e(TAG, "增强任务执行失败", error)
+            return Result.retry()
+        } finally {
+            ScanServiceController.clearEnhancementProgress(applicationContext)
         }
-        val active = dao.countActive(scope) + if (scope == AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE) {
-            0
-        } else {
-            dao.countActive(AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE)
-        }
-        return if (active > 0) Result.retry() else Result.success()
     }
+
+    private suspend fun finalizeEnhancementStates(
+        scanRunDao: com.renyxin.localalbum.data.db.dao.ScanRunDao,
+        taskDao: com.renyxin.localalbum.data.db.dao.AnalysisTaskDao,
+        scanIds: Set<String>,
+    ) {
+        scanIds.forEach { scanId ->
+            val terminalState = terminalEnhancementState(
+                activeTasks = taskDao.countActiveForScan(scanId) +
+                    (applicationContext as LocalAlbumApplication).container.database
+                        .thumbnailTaskDao().countActiveForScan(scanId) +
+                    (applicationContext as LocalAlbumApplication).container.database
+                        .enhancementOutboxDao().countActiveForScan(scanId),
+                failedTasks = taskDao.countFailedForScan(scanId) +
+                    (applicationContext as LocalAlbumApplication).container.database
+                        .thumbnailTaskDao().countFailedForScan(scanId) +
+                    (applicationContext as LocalAlbumApplication).container.database
+                        .enhancementOutboxDao().countFailedForScan(scanId),
+            )
+            if (terminalState == null) {
+                scanRunDao.markEnhancementQueued(scanId)
+            } else {
+                scanRunDao.markEnhancementTerminal(
+                    scanId = scanId,
+                    state = terminalState.name,
+                    now = System.currentTimeMillis(),
+                )
+            }
+        }
+    }
+
+    private suspend fun activeTaskCount(
+        dao: com.renyxin.localalbum.data.db.dao.AnalysisTaskDao,
+        scopes: List<String>,
+    ): Int = scopes.sumOf { scope -> dao.countRunnable(scope) }
 
     private suspend fun markFailed(
         dao: com.renyxin.localalbum.data.db.dao.AnalysisTaskDao,
@@ -156,11 +299,30 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         val tasks: List<AnalysisTaskEntity>,
     )
 
+    override suspend fun getForegroundInfo(): ForegroundInfo {
+        ScanServiceController.ensureEnhancementChannel(applicationContext)
+        val notification: Notification = ScanServiceController.buildEnhancementNotification(
+            applicationContext,
+            applicationContext.getString(R.string.scan_notif_analyzing),
+        )
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(
+                ScanServiceController.ENHANCEMENT_NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        } else {
+            ForegroundInfo(ScanServiceController.ENHANCEMENT_NOTIFICATION_ID, notification)
+        }
+    }
+
     companion object {
+        private const val TAG = "AnalysisWorker"
         private const val WORK_NAME = "analysis_task_queue"
         private const val BATCH_SIZE = 250
         private const val MAX_BATCHES_PER_RUN = 4
         private const val MAX_ATTEMPTS = 3
+        private const val RETIRED_POLICY_REASON = "retired_automatic_policy"
         private const val LEASE_MS = 30 * 60 * 1000L
         private const val LEASE_RENEW_INTERVAL_MS = 5 * 60 * 1000L
 
@@ -172,8 +334,15 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
             )
         }
 
-        /** 取消 WorkManager 中真正执行 AI 的唯一任务，而不是只取消某个 UI 协程。 */
+        /** User cancellation is persistent and must not be auto-resumed. */
         fun cancel(context: Context) {
+            AnalysisResumePrefs.setPending(context, false)
+            WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
+        }
+
+        /** Core preemption preserves the durable resume marker for post-core re-release. */
+        fun cancelForCorePreemption(context: Context) {
+            AnalysisResumePrefs.setPending(context, true)
             WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
         }
 
@@ -206,5 +375,14 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
 
         internal fun retryDelay(attempt: Int): Long = 60_000L * (1L shl (attempt - 1).coerceIn(0, 8))
+
+        internal fun terminalEnhancementState(
+            activeTasks: Int,
+            failedTasks: Int,
+        ): EnhancementState? = when {
+            activeTasks > 0 -> null
+            failedTasks > 0 -> EnhancementState.COMPLETED_WITH_FAILURES
+            else -> EnhancementState.COMPLETED
+        }
     }
 }

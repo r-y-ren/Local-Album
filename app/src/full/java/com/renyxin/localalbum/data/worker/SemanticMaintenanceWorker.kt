@@ -8,10 +8,13 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.renyxin.localalbum.LocalAlbumApplication
+import com.renyxin.localalbum.core.concurrent.EnhancementResourceGate
 import com.renyxin.localalbum.core.search.EmbeddingCodec
 import com.renyxin.localalbum.core.search.SemanticSearcher
 import com.renyxin.localalbum.core.search.SemanticVectorSpace
+import com.renyxin.localalbum.data.db.AppDatabase
 import com.renyxin.localalbum.data.db.entity.SemanticMaintenanceRunEntity
+import com.renyxin.localalbum.edition.EditionConfiguration
 
 /**
  * 唯一、可恢复的 v25 legacy payload 回填。
@@ -23,25 +26,52 @@ import com.renyxin.localalbum.data.db.entity.SemanticMaintenanceRunEntity
 class SemanticMaintenanceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val app = applicationContext as? LocalAlbumApplication ?: return Result.failure()
+        if (!EditionConfiguration.features.enableSemanticSearch) return Result.success()
         val db = app.container.database
+        var batches = 0
+
+        while (batches < MAX_BATCHES_PER_WORK && !isStopped) {
+            if (
+                app.container.albumRepository.isCoreScanActive() ||
+                EnhancementResourceGate.isAutomaticWorkBlocked
+            ) {
+                return Result.retry()
+            }
+            val outcome = EnhancementResourceGate.tryWithAutomaticEnhancement {
+                runBatch(db)
+            } ?: return Result.retry()
+            when (outcome) {
+                BatchResult.DONE -> return Result.success()
+                BatchResult.CONTINUE -> batches++
+                BatchResult.RETRY -> return Result.retry()
+            }
+        }
+        return Result.retry()
+    }
+
+    private suspend fun runBatch(db: AppDatabase): BatchResult {
         val semanticDao = db.semanticDao()
         val embeddingDao = db.embeddingDao()
         val taskType = SemanticMaintenanceRunEntity.TASK_CSV_BACKFILL
-        val run = semanticDao.resumableMaintenanceRun(taskType) ?: db.withTransaction {
-            semanticDao.resumableMaintenanceRun(taskType) ?: SemanticMaintenanceRunEntity(
-                taskType = taskType,
-                generation = semanticDao.maxMaintenanceGeneration(taskType) + 1,
-                targetSpaceId = SemanticVectorSpace.LEGACY_SPACE_ID,
-                totalCount = embeddingDao.getCountInSpace(SemanticVectorSpace.LEGACY_SPACE_ID).toLong(),
-            ).also { semanticDao.insertMaintenanceRun(it) }
-        }
-        var cursor = run.cursorPath
-        var batches = 0
-        while (batches < MAX_BATCHES_PER_WORK && !isStopped) {
-            val page = embeddingDao.getLegacyBackfillPage(SemanticVectorSpace.LEGACY_SPACE_ID, cursor, BATCH_SIZE)
+        return try {
+            val run = semanticDao.resumableMaintenanceRun(taskType) ?: db.withTransaction {
+                semanticDao.resumableMaintenanceRun(taskType) ?: SemanticMaintenanceRunEntity(
+                    taskType = taskType,
+                    generation = semanticDao.maxMaintenanceGeneration(taskType) + 1,
+                    targetSpaceId = SemanticVectorSpace.LEGACY_SPACE_ID,
+                    totalCount = embeddingDao
+                        .getCountInSpace(SemanticVectorSpace.LEGACY_SPACE_ID)
+                        .toLong(),
+                ).also { semanticDao.insertMaintenanceRun(it) }
+            }
+            val page = embeddingDao.getLegacyBackfillPage(
+                SemanticVectorSpace.LEGACY_SPACE_ID,
+                run.cursorPath,
+                BATCH_SIZE,
+            )
             if (page.isEmpty()) {
                 semanticDao.completeMaintenance(taskType, run.generation, System.currentTimeMillis())
-                return Result.success()
+                return BatchResult.DONE
             }
             val decoded = page.map { row ->
                 runCatching {
@@ -81,12 +111,32 @@ class SemanticMaintenanceWorker(context: Context, params: WorkerParameters) : Co
                         },
                     )
                 }
-                check(semanticDao.advanceMaintenance(taskType, run.generation, nextCursor, page.size, converted, failed, covered, lastError, System.currentTimeMillis()) == 1)
+                check(
+                    semanticDao.advanceMaintenance(
+                        taskType = taskType,
+                        generation = run.generation,
+                        cursorPath = nextCursor,
+                        scanned = page.size,
+                        converted = converted,
+                        failed = failed,
+                        covered = covered,
+                        lastError = lastError,
+                        now = System.currentTimeMillis(),
+                    ) == 1,
+                ) { "语义回填维护状态已改变" }
             }
-            cursor = nextCursor
-            batches++
+            BatchResult.CONTINUE
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            BatchResult.RETRY
         }
-        return Result.retry()
+    }
+
+    private enum class BatchResult {
+        DONE,
+        CONTINUE,
+        RETRY,
     }
 
     companion object {

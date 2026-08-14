@@ -102,6 +102,7 @@ data class ImportFtsStagingEntity(
     val generation: String,
     val filePath: String,
     val fileName: String,
+    val parentPath: String,
     val ocrText: String?,
     val make: String?,
     val model: String?,
@@ -128,6 +129,6 @@ fun MediaEmbedding.toImportStaging(generation: String) = ImportEmbeddingStagingE
 )
 
 fun MediaFts.toImportStaging(generation: String) = ImportFtsStagingEntity(
-    generation = generation, filePath = filePath, fileName = fileName, ocrText = ocrText,
-    make = make, model = model,
+    generation = generation, filePath = filePath, fileName = fileName, parentPath = parentPath,
+    ocrText = ocrText, make = make, model = model,
 )

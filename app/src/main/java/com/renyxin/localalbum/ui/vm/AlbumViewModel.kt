@@ -27,7 +27,6 @@ import com.renyxin.localalbum.data.repo.SemanticSearchResult
 import com.renyxin.localalbum.data.repo.SemanticSearchState
 import com.renyxin.localalbum.data.repo.SemanticStats
 import com.renyxin.localalbum.data.worker.AnalysisWorker
-import com.renyxin.localalbum.data.worker.ThumbnailWorker
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,6 +49,10 @@ class AlbumViewModel(
     val leafAlbums: StateFlow<List<Album>> = repository.leafAlbums
     val recommendations: StateFlow<List<Recommendation>> = repository.recommendations
     val scanState: StateFlow<ScanState> = repository.scanState
+    val scanLifecycle = repository.scanLifecycle
+    val indexAvailability = repository.indexAvailability
+    val coreScanState = repository.coreScanState
+    val enhancementState = repository.enhancementState
     val albumSyncState = repository.albumSyncState
     val favoriteCount: StateFlow<Int> = repository.favoriteCount
     val trashedCount: StateFlow<Int> = repository.trashedCount
@@ -138,7 +141,15 @@ class AlbumViewModel(
     fun cancelTask() {
         scanJob?.cancel()
         scanJob = null
-        AnalysisWorker.cancel(application)
+        // Persist the user pause before cancelling workers so a process restart cannot interpret
+        // this action as core preemption and silently resume it.
+        viewModelScope.launch {
+            repository.pauseEnhancementsByUser()
+            AnalysisWorker.cancel(application)
+            com.renyxin.localalbum.data.worker.ThumbnailWorker.cancelBackground(application)
+            com.renyxin.localalbum.data.worker.EnhancementHandoffWorker.cancel(application)
+            com.renyxin.localalbum.data.worker.RecommendationRefreshWorker.cancel(application)
+        }
         progressManager?.reset()
         _taskProgress.value = emptyMap()
     }
@@ -159,9 +170,9 @@ class AlbumViewModel(
         // 启动前取消上一次扫描，避免并发扫描叠加导致状态/数据竞态。
         scanJob?.cancel()
         scanJob = viewModelScope.launch {
+            // Post-core analysis/thumbnail work is released exclusively by the durable
+            // enhancement outbox; the UI must not start a full-library pre-generation pass.
             repository.rescan()
-            // 扫描完成后调度缩略图异步补齐
-            ThumbnailWorker.enqueue(application)
         }
     }
 

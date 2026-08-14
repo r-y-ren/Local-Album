@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "reportId": "lite-scene-quality-phase7",
+  "policy": {
+    "id": "lite",
+    "version": 2
+  },
+  "evidenceState": "NO_ANDROID_DEVICE",
+  "approvalStatus": "NOT_APPROVED",
+  "environment": {
+    "deviceConnected": false,
+    "deviceId": null,
+    "datasetId": null
+  },
+  "decisions": [
+    {
+      "stage": "SCENE",
+      "decision": "AUTO_DISABLED",
+      "failedGates": [
+        "device_report_missing"
+      ],
+      "measurements": null
+    },
+    {
+      "stage": "QUALITY",
+      "decision": "AUTO_DISABLED",
+      "failedGates": [
+        "device_report_missing",
+        "bitmap_decode_reuse_unverified"
+      ],
+      "measurements": null
+    }
+  ],
+  "constraints": {
+    "sceneAndQualityRemainEnhancementOnly": true,
+    "manualCapabilityRetained": true,
+    "coreAdmissionAllowed": false,
+    "automaticAdmissionAllowed": false
+  },
+  "notes": [
+    "No Android device was connected, so no stage-only or TCore A/B values were recorded.",
+    "AndroidTest compilation is not device execution and is not performance evidence.",
+    "Enabling either automatic stage requires a reviewed device-bound report, a new report hash, and a Lite policy version bump."
+  ]
+}

@@ -2,6 +2,7 @@ package com.renyxin.localalbum.core.plugin.runtime
 
 import android.content.Context
 import com.renyxin.localalbum.core.plugin.PluginManifest
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import org.tensorflow.lite.Interpreter
 import java.io.File
 import java.nio.ByteBuffer
@@ -35,6 +36,7 @@ class TfliteModelRuntime : ModelRuntime {
             setNumThreads(Runtime.getRuntime().availableProcessors().coerceAtMost(4))
         }
 
+        NativeAiRuntime.ensureNativePrerequisite()
         interpreter = Interpreter(modelFile, options)
         ready = true
     }

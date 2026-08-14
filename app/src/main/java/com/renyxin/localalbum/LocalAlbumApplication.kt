@@ -3,13 +3,11 @@ package com.renyxin.localalbum
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
-import android.util.Log
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.VideoFrameDecoder
 import com.renyxin.localalbum.data.worker.DeletionRetryWorker
 import com.renyxin.localalbum.data.worker.TrashCleanupWorker
-import org.opencv.android.OpenCVLoader
 
 class LocalAlbumApplication : Application(), ImageLoaderFactory {
     lateinit var container: AppContainer
@@ -28,36 +26,18 @@ class LocalAlbumApplication : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i("CrashDebug", "=== Application.onCreate 开始 ===")
-        // 必须最先加载 emutls shim：导出标准 __emutls_get_address 实现，供后续加载的
-        // ONNX Runtime / OpenCV / TFLite / PyTorch 等 native 库共用，避免各库自带 emutls
-        // 实现的线程局部存储控制块（__emutls_v.*）布局不兼容导致 SIGSEGV 闪退
-        // （识别扫描 / 换脸时 ONNX↔OpenCV 交替调用触发）。
-        // 加载顺序关键：必须在 OpenCVLoader.initLocal() 及任何 ONNX Runtime 调用之前，
-        // 使 shim 的符号优先进入动态符号表，被 libonnxruntime.so 解析引用。
-        try {
-            System.loadLibrary("emutls_shim")
-            Log.i("CrashDebug", "emutls_shim 加载成功")
-        } catch (e: Throwable) {
-            Log.e("CrashDebug", "emutls_shim 加载失败! ${e.javaClass.simpleName}: ${e.message}", e)
-        }
-
-        // 初始化 OpenCV（换脸 Reactor 流水线：仿射变换 + diff-mask 贴回）
-        // libopencv_java5.so 为 NDK r27 + c++_static 自包含构建，无外部 libc++/emutls 依赖。
-        Log.i("CrashDebug", "即将加载 OpenCV (initLocal)...")
-        if (OpenCVLoader.initLocal()) {
-            Log.i("CrashDebug", "OpenCV 初始化成功")
-        } else {
-            Log.e("CrashDebug", "OpenCV 初始化失败")
-        }
-        Log.i("CrashDebug", "=== Application.onCreate native 库加载完成 ===")
+        // Native AI runtimes are deliberately absent from cold start. ONNX loads the emutls shim
+        // immediately before its first session, while interactive face swap acquires the shared
+        // resource lane before loading shim -> OpenCV and its model sessions.
         container = AppContainer(this)
-        // Phase 0: 提前创建扫描进度通知渠道（幂等），确保首次 acquire 时渠道就绪
-        com.renyxin.localalbum.data.worker.ScanServiceController.ensureChannel(this)
+        // Phase 1: 核心扫描与后台增强使用独立通知渠道。
+        com.renyxin.localalbum.data.worker.ScanServiceController.ensureChannels(this)
         TrashCleanupWorker.schedule(this)
         DeletionRetryWorker.enqueue(this)
         // 注册 MediaStore ContentObserver，监听图片/视频变更并触发防抖增量扫描
         container.registerContentObserver()
+        // 进程重启后仅恢复 Room 中尚未确认的 changed-set，不创建伪增量全量扫描
+        container.maybeResumePendingScanChanges()
         // 加载所有已安装的 AI 插件（Phase 2.5）
         container.loadPlugins()
         // Phase 1: 启动时若存在中断未完成的分析，自动续跑（跳过已完成阶段）

@@ -13,6 +13,7 @@ import com.renyxin.localalbum.core.plugin.PluginManifest
 import com.renyxin.localalbum.core.plugin.capability.FaceProvider
 import com.renyxin.localalbum.core.plugin.extension.FaceAligner
 import com.renyxin.localalbum.core.plugin.model.ModelManager
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -41,6 +42,7 @@ class InsightFaceProvider(
     override val providerId = "model:insightface"
     override val displayName = "InsightFace 人脸识别 (Buffalo_L)"
     override val embeddingDim = EMBEDDING_DIM
+    override val supportsFivePointLandmarks = true
 
     init {
         modelManager.registerModel(
@@ -67,13 +69,17 @@ class InsightFaceProvider(
     }
 
     override suspend fun detectFaces(file: File): List<FaceProvider.DetectedFace> = withContext(Dispatchers.IO) {
+        // Face alignment uses OpenCV. Initialization remains lazy and happens only after a Full face
+        // stage or an admitted interactive face swap actually invokes this provider.
+        NativeAiRuntime.ensureOpenCvRuntime()
         // 保护完整的检测 + 特征提取事务。批处理阶段结束时会调用 evictUnusedModels()；
         // 若不登记消费者，它可能在交互式换脸刚 ensure 完模型后关闭 session，导致换脸失效。
         val consumerId = "$CONSUMER_ID_PREFIX:${System.nanoTime()}"
         modelManager.registerConsumer(DET_MODEL_ID, consumerId)
         modelManager.registerConsumer(REC_MODEL_ID, consumerId)
+        var original: Bitmap? = null
         try {
-            val original = decodeBitmap(file) ?: return@withContext emptyList()
+            original = decodeBitmap(file) ?: return@withContext emptyList()
             val detResult = modelManager.ensureModelReady(DET_MODEL_ID)
             if (detResult.isFailure) return@withContext emptyList()
             val faces = modelManager.withOnnxSession(DET_MODEL_ID) { detSession ->
@@ -97,25 +103,43 @@ class InsightFaceProvider(
                 // 通过 session 池获取独立 rec session（独立 intra-op 线程池），实现多核并行
                 val emb = modelManager.withOnnxSession(REC_MODEL_ID) { recSession ->
                     // ArcFace 嵌入必须基于 5 关键点对齐到 112×112（ReActor ArcFaceONNX.get 的 norm_crop）。
-                    // 仅用 bbox 裁剪会产生劣质嵌入，导致 inswapper 换脸无效（输出≈输入）。
-                    if (face.landmarks != null) {
-                        val lmkPx = FaceAligner.denormalizeLandmarks(face.landmarks, original.width, original.height)
+                    // Every temporary face bitmap is owned and recycled inside this session block.
+                    val faceBitmap = if (face.landmarks != null) {
+                        val lmkPx = FaceAligner.denormalizeLandmarks(
+                            face.landmarks,
+                            original.width,
+                            original.height,
+                        )
                         val affineM = FaceAligner.computeAffineMatrix(lmkPx, REC_INPUT_SIZE)
-                        val aligned = if (!affineM.empty()) FaceAligner.warpAffine(original, affineM, REC_INPUT_SIZE) else null
-                        affineM.release()
-                        aligned?.let { extractEmbedding(it, recSession) } ?: run {
-                            val crop = cropFace(original, face.box)
-                            crop?.let { extractEmbedding(it, recSession) } ?: FloatArray(EMBEDDING_DIM)
-                        }
+                        try {
+                            if (!affineM.empty()) {
+                                FaceAligner.warpAffine(original, affineM, REC_INPUT_SIZE)
+                            } else {
+                                null
+                            }
+                        } finally {
+                            affineM.release()
+                        } ?: cropFace(original, face.box)
                     } else {
-                        val crop = cropFace(original, face.box)
-                        crop?.let { extractEmbedding(it, recSession) } ?: FloatArray(EMBEDDING_DIM)
+                        cropFace(original, face.box)
+                    }
+                    if (faceBitmap == null) {
+                        FloatArray(EMBEDDING_DIM)
+                    } else {
+                        try {
+                            extractEmbedding(faceBitmap, recSession) ?: FloatArray(EMBEDDING_DIM)
+                        } finally {
+                            if (faceBitmap !== original && !faceBitmap.isRecycled) faceBitmap.recycle()
+                        }
                     }
                 }
                 results.add(FaceProvider.DetectedFace(face.box, emb, face.landmarks))
             }
             results
         } finally {
+            original?.let { bitmap ->
+                if (!bitmap.isRecycled) bitmap.recycle()
+            }
             modelManager.unregisterConsumer(REC_MODEL_ID, consumerId)
             modelManager.unregisterConsumer(DET_MODEL_ID, consumerId)
         }
@@ -124,7 +148,7 @@ class InsightFaceProvider(
     override suspend fun release() = Unit
 
     private fun detectFacesOnnx(bitmap: Bitmap, session: OrtSession): List<FaceProvider.DetectedFace>? {
-        val env = OrtEnvironment.getEnvironment()
+        val env = NativeAiRuntime.getOrtEnvironment()
         return try {
             // 等比缩放（letterbox）：保持宽高比，padding 到 DET_INPUT_SIZE×DET_INPUT_SIZE
             // ComfyUI Reactor 标准预处理：非等比缩放会扭曲人脸导致 SCRFD 置信度降低
@@ -166,7 +190,7 @@ class InsightFaceProvider(
     }
 
     private fun extractEmbedding(faceBitmap: Bitmap, session: OrtSession): FloatArray? {
-        val env = OrtEnvironment.getEnvironment()
+        val env = NativeAiRuntime.getOrtEnvironment()
         return try {
             val resized = Bitmap.createScaledBitmap(faceBitmap, REC_INPUT_SIZE, REC_INPUT_SIZE, true)
             val buf = preprocessRecognition(resized)

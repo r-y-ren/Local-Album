@@ -14,6 +14,7 @@ import android.util.Size
 import androidx.annotation.RequiresApi
 import androidx.exifinterface.media.ExifInterface
 import com.renyxin.localalbum.core.index.IgnorePatternMatcher
+import com.renyxin.localalbum.core.index.MediaStoreIdentity
 import com.renyxin.localalbum.core.index.ScanRootPolicy
 import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
 import com.renyxin.localalbum.core.model.DirectoryNode
@@ -39,6 +40,20 @@ import java.util.concurrent.TimeUnit
 interface MediaMetadataCache {
     fun getCapturedAtMs(path: String, modifiedAtMs: Long): Long?
 }
+
+enum class MediaStoreLookupStatus {
+    INCLUDED,
+    EXCLUDED,
+    UNRESOLVED,
+}
+
+data class ResolvedMediaStoreItem(
+    val identity: MediaStoreIdentity,
+    val contentUri: String,
+    val status: MediaStoreLookupStatus,
+    val filePath: String? = null,
+    val mediaItem: MediaItem? = null,
+)
 
 /**
  * 增强版媒体扫描器。
@@ -84,6 +99,146 @@ class MediaSource(
             "durationMs" to durationMs,
             "mimeType" to mimeType,
         )
+    }
+
+    /** Resolves only the requested stable MediaStore identities. */
+    suspend fun resolveMediaStoreItems(
+        identities: Collection<MediaStoreIdentity>,
+        rootPaths: List<String>,
+        allowNomedia: Boolean = false,
+        ignorePatterns: List<String> = emptyList(),
+        cache: MediaMetadataCache? = null,
+    ): List<ResolvedMediaStoreItem> = withContext(Dispatchers.IO) {
+        require(identities.size <= MAX_MEDIASTORE_RESOLVE_BATCH) {
+            "MediaStore 单批解析超过 $MAX_MEDIASTORE_RESOLVE_BATCH"
+        }
+        if (identities.isEmpty()) return@withContext emptyList()
+        val resolver = requireNotNull(context) { "MediaStore 解析需要 Android Context" }.contentResolver
+        val roots = ScanRootPolicy.normalize(rootPaths)
+        val compiledIgnore = IgnorePatternMatcher.compile(ignorePatterns)
+        val resolved = ArrayList<ResolvedMediaStoreItem>(identities.size)
+
+        identities.distinct().groupBy { it.volumeName to it.mediaType }.forEach { (group, groupItems) ->
+            val (volumeName, mediaType) = group
+            val collectionUri = mediaStoreCollectionUri(volumeName, mediaType)
+            val projection = mediaStoreProjection(mediaType)
+            val ids = groupItems.map { it.mediaStoreId }.distinct()
+            val selection = "${MediaStore.MediaColumns._ID} IN (${ids.joinToString(",") { "?" }})"
+            val cursor = resolver.query(
+                collectionUri,
+                projection,
+                selection,
+                ids.map(Long::toString).toTypedArray(),
+                null,
+            )
+            if (cursor == null) {
+                // ROM/provider visibility failure is not evidence of deletion. Keep every identity
+                // explicit so the indexer schedules bounded reconciliation instead of purging it.
+                groupItems.forEach { identity ->
+                    resolved += ResolvedMediaStoreItem(
+                        identity = identity,
+                        contentUri = identity.canonicalContentUri(),
+                        status = MediaStoreLookupStatus.UNRESOLVED,
+                    )
+                }
+                return@forEach
+            }
+            cursor.use {
+                val idColumn = it.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                val dataColumn = it.getColumnIndexOrThrow(MediaStore.MediaColumns.DATA)
+                val requestedById = groupItems.associateBy(MediaStoreIdentity::mediaStoreId)
+                while (it.moveToNext()) {
+                    val identity = requestedById[it.getLong(idColumn)] ?: continue
+                    val contentUri = ContentUris.withAppendedId(
+                        collectionUri,
+                        identity.mediaStoreId,
+                    ).toString()
+                    val path = if (dataColumn >= 0 && !it.isNull(dataColumn)) it.getString(dataColumn) else null
+                    if (path == null) {
+                        resolved += ResolvedMediaStoreItem(
+                            identity = identity,
+                            contentUri = contentUri,
+                            status = MediaStoreLookupStatus.UNRESOLVED,
+                        )
+                        continue
+                    }
+                    val file = File(path)
+                    if (!file.exists() || !file.isFile) {
+                        // A MediaStore row still exists, so transient storage/permission visibility
+                        // cannot be interpreted as a confirmed delete or policy exclusion.
+                        resolved += ResolvedMediaStoreItem(
+                            identity = identity,
+                            contentUri = contentUri,
+                            status = MediaStoreLookupStatus.UNRESOLVED,
+                            filePath = path,
+                        )
+                        continue
+                    }
+                    if (!isAllowedDeltaFile(file, roots, allowNomedia, compiledIgnore)) {
+                        resolved += ResolvedMediaStoreItem(
+                            identity = identity,
+                            contentUri = contentUri,
+                            status = MediaStoreLookupStatus.EXCLUDED,
+                            filePath = path,
+                        )
+                        continue
+                    }
+                    resolved += ResolvedMediaStoreItem(
+                        identity = identity,
+                        contentUri = contentUri,
+                        status = MediaStoreLookupStatus.INCLUDED,
+                        filePath = path,
+                        mediaItem = buildMediaItem(file, mediaType, cache),
+                    )
+                }
+            }
+        }
+        resolved
+    }
+
+    private fun mediaStoreCollectionUri(volumeName: String, mediaType: MediaType): Uri {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return when (mediaType) {
+                MediaType.IMAGE -> MediaStore.Images.Media.getContentUri(volumeName)
+                MediaType.VIDEO -> MediaStore.Video.Media.getContentUri(volumeName)
+            }
+        }
+        return when (mediaType) {
+            MediaType.IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            MediaType.VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        }
+    }
+
+    private fun mediaStoreProjection(mediaType: MediaType): Array<String> = when (mediaType) {
+        MediaType.IMAGE -> arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DATA)
+        MediaType.VIDEO -> arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DATA)
+    }
+
+    private fun isAllowedDeltaFile(
+        file: File,
+        roots: List<String>,
+        allowNomedia: Boolean,
+        ignorePatterns: List<Pattern>,
+    ): Boolean {
+        if (shouldIgnoreFile(file.name, ignorePatterns)) return false
+        val canonicalPath = runCatching { file.canonicalPath }.getOrElse { file.absolutePath }
+        val matchingRoot = roots.firstOrNull { root ->
+            canonicalPath == root || canonicalPath.startsWith("$root${File.separator}")
+        } ?: return false
+        var parent = file.parentFile
+        while (parent != null) {
+            val currentParent = parent
+            val parentPath = runCatching { currentParent.canonicalPath }
+                .getOrElse { currentParent.absolutePath }
+            if (parentPath == matchingRoot) break
+            if (shouldIgnoreDir(currentParent.name, ignorePatterns) ||
+                (!allowNomedia && File(currentParent, ".nomedia").exists())
+            ) {
+                return false
+            }
+            parent = currentParent.parentFile
+        }
+        return true
     }
 
     /**
@@ -619,6 +774,7 @@ class MediaSource(
     }
 
     internal companion object {
+        const val MAX_MEDIASTORE_RESOLVE_BATCH = 500
         const val TAG = "MediaSource"
 
         val IMAGE_EXTS = setOf(

@@ -10,6 +10,7 @@ import ai.onnxruntime.OrtSession
 import com.renyxin.localalbum.core.plugin.PluginManifest
 import com.renyxin.localalbum.core.plugin.capability.OcrProvider
 import com.renyxin.localalbum.core.plugin.model.ModelManager
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -157,7 +158,7 @@ class PaddleOCRProvider(
     // ---- 检测：DB 概率图 → 阈值 → 连通域外接框 ----
 
     private fun detectTextRegions(bitmap: Bitmap, session: OrtSession): List<IntArray> {
-        val env = OrtEnvironment.getEnvironment()
+        val env = NativeAiRuntime.getOrtEnvironment()
         return try {
             val resized = Bitmap.createScaledBitmap(bitmap, DET_INPUT_SIZE, DET_INPUT_SIZE, true)
             val buf = preprocessDet(resized)
@@ -260,7 +261,7 @@ class PaddleOCRProvider(
     // ---- 识别：CTC 解码 ----
 
     private fun recognizeText(crop: Bitmap, session: OrtSession): String {
-        val env = OrtEnvironment.getEnvironment()
+        val env = NativeAiRuntime.getOrtEnvironment()
         return try {
             val resized = Bitmap.createScaledBitmap(crop, REC_IMG_W, REC_IMG_H, true)
             val buf = preprocessRec(resized)

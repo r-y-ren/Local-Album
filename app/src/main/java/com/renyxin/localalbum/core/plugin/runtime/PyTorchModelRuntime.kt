@@ -3,6 +3,7 @@ package com.renyxin.localalbum.core.plugin.runtime
 import android.content.Context
 import android.util.Log
 import com.renyxin.localalbum.core.plugin.PluginManifest
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import org.pytorch.IValue
 import org.pytorch.Module
 import org.pytorch.Tensor
@@ -40,6 +41,7 @@ class PyTorchModelRuntime : ModelRuntime {
         outputTensors = manifest.outputTensors
 
         // PyTorch Mobile Lite 模型文件后缀为 .ptl
+        NativeAiRuntime.ensureNativePrerequisite()
         module = Module.load(modelFile.absolutePath)
         ready = true
         Log.i(TAG, "PyTorch 模型加载完成: ${modelFile.name}")

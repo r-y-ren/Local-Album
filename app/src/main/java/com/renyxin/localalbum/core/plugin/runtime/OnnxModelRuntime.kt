@@ -3,6 +3,7 @@ package com.renyxin.localalbum.core.plugin.runtime
 import android.content.Context
 import android.util.Log
 import com.renyxin.localalbum.core.plugin.PluginManifest
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
@@ -37,7 +38,7 @@ class OnnxModelRuntime : ModelRuntime {
         inputTensors = manifest.inputTensors
         outputTensors = manifest.outputTensors
 
-        environment = OrtEnvironment.getEnvironment()
+        environment = NativeAiRuntime.getOrtEnvironment()
         val options = OrtSession.SessionOptions().apply {
             // intra/inter op = 1，配合文件级并行避免 oversubscription
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)

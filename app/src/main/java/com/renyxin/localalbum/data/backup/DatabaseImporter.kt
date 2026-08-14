@@ -52,6 +52,8 @@ class DatabaseImporter(
      * 单元测试可省略该参数以保留 Fake DAO 兼容；生产 App 路径必须注入数据库。
      */
     private val database: AppDatabase? = null,
+    /** Edition policy owns regenerable work; the importer only restores durable data. */
+    private val postRestoreTaskSeeder: PostRestoreTaskSeeder? = null,
 ) {
     companion object {
         private const val TAG = "DatabaseImporter"
@@ -185,9 +187,12 @@ class DatabaseImporter(
     private suspend fun switchGenericStaging(generation: String, declaredEntries: Set<String>) = requireNotNull(database).withTransaction {
         val db = database.openHelper.writableDatabase
         // 子表优先清空。排除表也在同一最终事务清理，失败会完整回滚。
+        // maintenance_runs 必须在恢复声明行之前整体清空；否则同库覆盖恢复时，已有
+        // FACE_PROTOTYPES 主键会与 complete backup 中的同一快照冲突。
         listOf("media_items_fts", "faces", "media_embeddings", "analysis_state", "feature_store",
             "face_cluster_prototypes", "face_cluster_meta", "semantic_cluster_members", "semantic_cluster_meta",
-            "semantic_cluster_generations", "semantic_index_meta", "plugin_manifest", "deletion_tombstones", "media_items")
+            "semantic_cluster_generations", "semantic_index_meta", "plugin_manifest", "deletion_tombstones",
+            "maintenance_runs", "media_items")
             .forEach { db.execSQL("DELETE FROM $it") }
         BackupContract.tables.filter { it.entry in declaredEntries }.forEach { table ->
             var after = 0L
@@ -198,20 +203,23 @@ class DatabaseImporter(
                 after = rows.last().lineNumber
             }
         }
-        // 瞬态与可再生表明确不恢复；租约、半成品和重复结果不可跨设备继承。
-        listOf("thumbnail_cache_entries", "thumbnail_tasks", "analysis_tasks", "scan_staging", "scan_runs",
-            "semantic_maintenance_runs", "duplicate_hash_staging", "duplicate_members", "duplicate_groups")
+        // 瞬态与可再生表明确不恢复；租约、设备身份映射、半成品和重复结果不可跨设备继承。
+        // maintenance_runs 已在导入前清空，只有备份显式声明的 FACE_PROTOTYPES 快照会被恢复。
+        listOf("thumbnail_cache_entries", "thumbnail_tasks", "analysis_tasks", "enhancement_outbox", "scan_staging", "scan_runs",
+            "media_change_events", "media_store_references", "semantic_maintenance_runs",
+            "duplicate_hash_staging", "duplicate_members", "duplicate_groups")
             .forEach { db.execSQL("DELETE FROM $it") }
-        db.execSQL("DELETE FROM maintenance_runs WHERE taskType != 'FACE_PROTOTYPES'")
         // semantic 只允许激活具有同 space 向量的 metadata/cluster generation。
         db.execSQL("UPDATE semantic_index_meta SET isActive = 0 WHERE NOT EXISTS (SELECT 1 FROM media_embeddings e WHERE e.spaceId = semantic_index_meta.spaceId)")
         db.execSQL("UPDATE semantic_cluster_generations SET isActive = 0 WHERE NOT EXISTS (SELECT 1 FROM media_embeddings e WHERE e.spaceId = semantic_cluster_generations.spaceId)")
-        val now = System.currentTimeMillis()
-        db.execSQL("""INSERT OR IGNORE INTO analysis_tasks(filePath,sourceVersion,priority,status,attemptCount,nextRetryAt,leaseUntil,leaseToken,lastError,createdAt,updatedAt,pipelineScope) SELECT filePath,modifiedAtMs||':'||fileSize,0,'PENDING',0,0,0,NULL,NULL,$now,$now,'core:v1' FROM media_items WHERE mediaType='IMAGE' AND isTrashed=0""")
-        db.execSQL("""INSERT OR IGNORE INTO thumbnail_tasks(filePath,sizeClass,sourceVersion,mediaType,priority,status,attemptCount,nextRetryAt,leaseUntil,leaseToken,lastError,createdAt,updatedAt) SELECT filePath,'grid',modifiedAtMs||':'||fileSize,mediaType,0,'PENDING',0,0,0,NULL,NULL,$now,$now FROM media_items WHERE isTrashed=0""")
+        postRestoreTaskSeeder?.seed(db)
     }
 
     private fun insertJsonRow(db: androidx.sqlite.db.SupportSQLiteDatabase, table: BackupContract.Table, obj: JSONObject) {
+        if (table.table == "media_items_fts") {
+            insertFtsJsonRow(db, obj)
+            return
+        }
         val columns = mutableListOf<String>()
         db.query("PRAGMA table_info(${table.table})").use { cursor -> while (cursor.moveToNext()) columns += cursor.getString(cursor.getColumnIndexOrThrow("name")) }
         val present = columns.filter { obj.has(it) }
@@ -221,6 +229,26 @@ class DatabaseImporter(
         }.toTypedArray()
         val sql = "INSERT INTO ${table.table}(${present.joinToString()}) VALUES(${present.joinToString { "?" }})"
         db.execSQL(sql, values)
+    }
+
+    /** v31 及更早备份没有 FTS parentPath；以已恢复媒体表为可信回填源。 */
+    private fun insertFtsJsonRow(db: androidx.sqlite.db.SupportSQLiteDatabase, obj: JSONObject) {
+        val filePath = obj.getString("filePath")
+        val parentPath = obj.optStringOrNull("parentPath") ?: db.query(
+            "SELECT parentPath FROM media_items WHERE filePath = ? LIMIT 1",
+            arrayOf(filePath),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else inferParentPath(filePath) }
+        db.execSQL(
+            "INSERT INTO media_items_fts(filePath,fileName,parentPath,ocrText,make,model) VALUES(?,?,?,?,?,?)",
+            arrayOf(
+                filePath,
+                obj.getString("fileName"),
+                parentPath,
+                obj.optStringOrNull("ocrText"),
+                obj.optStringOrNull("make"),
+                obj.optStringOrNull("model"),
+            ),
+        )
     }
 
     private suspend fun importFromZipWithoutStaging(inputFile: File): ImportResult = ZipFile(inputFile).use { zip ->
@@ -297,11 +325,12 @@ class DatabaseImporter(
                 )
             }
 
-            // 解析各表数据
+            // 解析各表数据。旧备份的 FTS 没有 parentPath，以同一备份中的媒体行为可信回填源。
             val mediaItems = parseMediaItems(root.optJSONArray("mediaItems") ?: return ImportResult(success = false, errorMessage = "缺少 mediaItems 字段"))
             val faces = parseFaces(root.optJSONArray("faces"))
             val embeddings = parseEmbeddings(root.optJSONArray("embeddings"))
-            val ftsEntries = parseFtsEntries(root.optJSONArray("ftsEntries"))
+            val parentPaths = mediaItems.associate { it.filePath to it.parentPath }
+            val ftsEntries = parseFtsEntries(root.optJSONArray("ftsEntries"), parentPaths)
 
             if (database != null) return importParsedViaStaging(mediaItems, faces, embeddings, ftsEntries)
 
@@ -372,13 +401,20 @@ class DatabaseImporter(
         db.execSQL("DELETE FROM faces")
         db.execSQL("DELETE FROM media_embeddings")
         db.execSQL("DELETE FROM media_items")
+        db.execSQL("DELETE FROM analysis_tasks")
+        db.execSQL("DELETE FROM thumbnail_tasks")
+        db.execSQL("DELETE FROM enhancement_outbox")
+        db.execSQL("DELETE FROM scan_runs")
+        db.execSQL("DELETE FROM media_change_events")
+        db.execSQL("DELETE FROM media_store_references")
         db.execSQL("""INSERT INTO media_items SELECT filePath,fileName,mediaType,capturedAtMs,modifiedAtMs,indexedAtMs,parentPath,fileSize,isFavorite,isTrashed,width,height,mimeType,durationMs,latitude,longitude,make,model,aperture,focalLength,iso,exposureTime,orientation,sceneType,thumbnailPath,fingerprintHead,perceptualHash,ocrText,qualityScore,deletedAtMs,isCorrupted,faceClusterId,scanGeneration FROM import_media_staging WHERE generation = ?""", arrayOf(generation))
         db.execSQL("""INSERT INTO faces(faceId,filePath,clusterId,personName,embedding,boxLeft,boxTop,boxRight,boxBottom,thumbnailPath,detectedAtMs) SELECT faceId,filePath,clusterId,personName,embedding,boxLeft,boxTop,boxRight,boxBottom,thumbnailPath,detectedAtMs FROM import_face_staging WHERE generation = ?""", arrayOf(generation))
         db.execSQL("""INSERT INTO media_embeddings(filePath,embedding,modelVersion,generatedAtMs,source,embeddingBlob,providerId,modelId,dimension,spaceId,generation,codecId,formatVersion) SELECT filePath,embedding,modelVersion,generatedAtMs,source,embeddingBlob,providerId,modelId,dimension,spaceId,vectorGeneration,codecId,formatVersion FROM import_embedding_staging WHERE generation = ?""", arrayOf(generation))
         // 导入结果默认不激活任何空间；运行时 Provider 需重新声明/建立 metadata，避免跨设备静默混用。
         db.execSQL("UPDATE semantic_index_meta SET isActive = 0")
         db.execSQL("UPDATE semantic_cluster_generations SET isActive = 0")
-        db.execSQL("""INSERT INTO media_items_fts(filePath,fileName,ocrText,make,model) SELECT filePath,fileName,ocrText,make,model FROM import_fts_staging WHERE generation = ?""", arrayOf(generation))
+        db.execSQL("""INSERT INTO media_items_fts(filePath,fileName,parentPath,ocrText,make,model) SELECT filePath,fileName,parentPath,ocrText,make,model FROM import_fts_staging WHERE generation = ?""", arrayOf(generation))
+        postRestoreTaskSeeder?.seed(db)
     }
 
     private suspend fun cleanupStaging(generation: String) = withContext(NonCancellable) {
@@ -579,15 +615,22 @@ class DatabaseImporter(
         return list
     }
 
-    private fun parseFtsEntries(arr: org.json.JSONArray?): List<MediaFts> {
+    private fun parseFtsEntries(
+        arr: org.json.JSONArray?,
+        parentPaths: Map<String, String> = emptyMap(),
+    ): List<MediaFts> {
         if (arr == null) return emptyList()
         val list = mutableListOf<MediaFts>()
         for (i in 0 until arr.length()) {
             val obj = arr.getJSONObject(i)
+            val filePath = obj.getString("filePath")
             list.add(
                 MediaFts(
-                    filePath = obj.getString("filePath"),
+                    filePath = filePath,
                     fileName = obj.getString("fileName"),
+                    parentPath = obj.optStringOrNull("parentPath")
+                        ?: parentPaths[filePath]
+                        ?: inferParentPath(filePath),
                     ocrText = obj.optStringOrNull("ocrText"),
                     make = obj.optStringOrNull("make"),
                     model = obj.optStringOrNull("model"),
@@ -595,6 +638,11 @@ class DatabaseImporter(
             )
         }
         return list
+    }
+
+    private fun inferParentPath(filePath: String): String {
+        val separator = maxOf(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
+        return if (separator < 0) "" else filePath.substring(0, separator)
     }
 }
 

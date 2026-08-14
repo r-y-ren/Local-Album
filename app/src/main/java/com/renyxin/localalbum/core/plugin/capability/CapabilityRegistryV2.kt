@@ -332,6 +332,12 @@ class CapabilityRegistryV2 {
 
     // ===================== 查询 =====================
 
+    /** Returns the active Provider identity only when that Provider is registered. */
+    fun getActiveProviderId(slotId: String): String? {
+        val entry = slots[slotId] ?: return null
+        return entry.activeProviderId.value.takeIf { it in entry.providers }
+    }
+
     /**
      * 获取指定槽位中当前激活的 Provider 实例。
      *

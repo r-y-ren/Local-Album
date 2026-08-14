@@ -11,6 +11,7 @@ import ai.onnxruntime.OrtSession
 import com.renyxin.localalbum.core.concurrent.InferenceDispatchers
 import com.renyxin.localalbum.core.concurrent.InferenceMetrics
 import com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -83,7 +84,7 @@ class Eva02ClipProvider(
     override val displayName = "EVA02-CLIP 跨模态语义检索"
     override val embeddingDim = EMBED_DIM
 
-    private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
+    private val env: OrtEnvironment by lazy { NativeAiRuntime.getOrtEnvironment() }
     private val initMutex = Mutex()
 
     @Volatile private var visualSession: OrtSession? = null

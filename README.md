@@ -36,9 +36,17 @@
 - **数据维护**：支持将媒体索引、FTS、人脸与语义嵌入等数据导出为 JSON 备份，并可覆盖式导入恢复。导入写入使用 staging 隔离 + 单个 Room 事务提交，失败时不会提交部分数据。
 - **后台与进度**：扫描、分析、缩略图、重复检测、删除重试等任务由 WorkManager 驱动的持久任务队列执行，前台扫描通过前台服务保活；全局进度指示器展示各阶段进度与 ETA。
 
+### Full / Lite 版本边界
+
+项目通过同一应用模块中的 `full` / `lite` product flavor 维护两个编译期版本：
+
+- **Full**：保留人物相册、语义搜索、语义聚类维护、自动人脸/语义/OCR 分析及对应设置入口。
+- **Lite**：以媒体索引和扫描完成时延为优先，只提供关键词/文件名/目录/基础元数据搜索；不编译人物相册、语义搜索、AI 识别偏好页、人物/语义维护 Worker 或自动 Face/Semantic/OCR Stage。
+- **两者共享**：基础相册、时间线、查看器、收藏、回收站、备份恢复、场景/质量增强，以及实验性的真实换脸。Lite 的换脸仍保留 FaceProvider、InSwapper、ONNX Runtime、OpenCV、emutls shim 和必需模型，但仅在用户交互时按需加载，不会创建人脸批处理任务。
+
 ### 页面结构
 
-应用底部为 4 个主 Tab（平板为侧边导航栏）：
+应用底部为 4 个主 Tab（平板为侧边导航栏）。下表描述 Full 版本；Lite 会隐藏人物、语义搜索和 AI 识别偏好入口：
 
 
 | Tab  | 内容                                                                                               |
@@ -91,7 +99,12 @@
 
 #### 下载模型
 
-模型资源位于 [`app/src/main/assets/models/`](app/src/main/assets/models/)。仓库只提交小型配置文件和 [`MobileNet-v3-Large.tflite`](app/src/main/assets/models/MobileNet-v3-Large.tflite)；ONNX、OCR、人脸与换脸模型通过脚本下载。
+模型按 edition 放置：
+
+- [`app/src/main/assets/models/`](app/src/main/assets/models/)：Full/Lite 共享的 MobileNet 场景模型、InsightFace `buffalo_l`、InSwapper 与 emap 换脸资源。
+- [`app/src/full/assets/models/`](app/src/full/assets/models/)：仅 Full 打包的 EVA02-CLIP 与 PaddleOCR 模型；OCR 字典位于 [`app/src/full/assets/ppocrv5_dict.txt`](app/src/full/assets/ppocrv5_dict.txt)。
+
+仓库只提交小型配置文件和 [`MobileNet-v3-Large.tflite`](app/src/main/assets/models/MobileNet-v3-Large.tflite)；大型 ONNX、人脸与换脸模型通过脚本下载。
 
 ```bash
 chmod +x scripts/download_models.sh
@@ -101,21 +114,21 @@ chmod +x scripts/download_models.sh
 脚本从项目 Release（v0.1.0）下载以下模型，已存在的非空文件会被跳过：
 
 
-| 模型                  | 文件                                                                                  | 用途                  |
-| --------------------- | ------------------------------------------------------------------------------------- | --------------------- |
-| EVA02-CLIP（int8）    | `eva02_clip/eva02_text_int8.onnx`、`eva02_visual_336_int8.onnx`                       | 语义搜索文本/图片编码 |
-| InsightFace buffalo_l | `buffalo_l.zip`（内含 SCRFD `det_10g` + ArcFace `w600k_r50`）                         | 默认人脸检测与特征    |
-| inswapper_128         | `inswapper_128.onnx` + `emap_512.bin`                                                 | 换脸（实验性）        |
-| PaddleOCR             | `PP-OCRv5_mobile_rec_infer/inference.onnx`、`PP-OCRv6_small_det_infer/inference.onnx` | 文字识别/检测         |
+| 模型                  | 文件                                                                                  | Source set | 用途                  |
+| --------------------- | ------------------------------------------------------------------------------------- | ---------- | --------------------- |
+| EVA02-CLIP（int8）    | `eva02_clip/eva02_text_int8.onnx`、`eva02_visual_336_int8.onnx`                       | Full-only  | 语义搜索文本/图片编码 |
+| InsightFace buffalo_l | `buffalo_l.zip`（内含 SCRFD `det_10g` + ArcFace `w600k_r50`）                         | 共享       | 默认人脸检测与换脸特征 |
+| inswapper_128         | `inswapper_128.onnx` + `emap_512.bin`                                                 | 共享       | 换脸（实验性）        |
+| PaddleOCR             | `PP-OCRv5_mobile_rec_infer/inference.onnx`、`PP-OCRv6_small_det_infer/inference.onnx` | Full-only  | 文字识别/检测         |
 
 模型下载失败时可重新执行脚本；emap 矩阵也可通过 `python scripts/extract_emap.py` 从 `inswapper_128.onnx` 重新提取。请不要将大型二进制模型提交到 Git。
 
 #### Debug 构建、测试与安装
 
 ```bash
-./gradlew assembleDebug
-./gradlew testDebugUnitTest
-./gradlew installDebug
+./gradlew assembleFullDebug assembleLiteDebug
+./gradlew testFullDebugUnitTest testLiteDebugUnitTest
+./gradlew installFullDebug   # 或 installLiteDebug
 ```
 
 正式包使用项目根目录的 `keystore.properties` 注入签名信息（`storeFile`/`storePassword`/`keyAlias`/`keyPassword` 四个键，格式见 `app/build.gradle.kts`）。该文件和密钥库均不应提交到版本控制；未提供签名文件时，`assembleRelease` 仍可用于编译验证，但输出 APK 未签名。
@@ -141,8 +154,10 @@ Room / DataStore       Provider + ModelManager
 | [`core/plugin/model/`](app/src/main/java/com/renyxin/localalbum/core/plugin/model/)           | 模型下载、加载、对象池与后端策略                                       |
 | [`core/search/`](app/src/main/java/com/renyxin/localalbum/core/search/)                       | 关键词、语义和混合检索                                                 |
 | [`core/analysis/`](app/src/main/java/com/renyxin/localalbum/core/analysis/)                   | 人脸聚类、完全重复检测（SHA-256）、AI 偏好                             |
-| [`data/db/`](app/src/main/java/com/renyxin/localalbum/data/db/)                               | Room 实体、DAO 与数据库迁移（当前 v28，迁移链 8→28）                  |
-| [`data/worker/`](app/src/main/java/com/renyxin/localalbum/data/worker/)                       | 扫描、分析、缩略图、重复检测、删除重试等 WorkManager 任务              |
+| [`data/db/`](app/src/main/java/com/renyxin/localalbum/data/db/)                               | Room 实体、DAO 与非破坏数据库迁移（当前 v32，迁移链 8→32）             |
+| [`data/worker/`](app/src/main/java/com/renyxin/localalbum/data/worker/)                       | 共享扫描、分析、缩略图、重复检测、删除重试等 WorkManager 任务          |
+| [`full/`](app/src/full/)                                                                       | Full-only Stage、人物/语义维护 Worker、人物/语义 UI 与模型资产          |
+| [`lite/`](app/src/lite/)                                                                       | Lite policy、禁用的可选搜索模式及空 UI/Stage/Worker contribution       |
 | [`data/backup/`](app/src/main/java/com/renyxin/localalbum/data/backup/)                       | JSON 索引导入与导出（staging + 单事务提交）                            |
 | [`ui/`](app/src/main/java/com/renyxin/localalbum/ui/)                                         | Compose 页面、组件、主题与自管理返回栈导航                             |
 
@@ -194,7 +209,9 @@ LocalAlbum is an Android 10+ local media manager. It indexes user-selected folde
 - Loading external APK/Dex plugins is hidden and experimental, **not** a supported end-user extension mechanism. Do not load untrusted plugin APKs.
 - The face-swap feature is experimental; use it responsibly.
 
-### Build
+### Editions and build
+
+The same app module provides compile-time `full` and `lite` product flavors. Full includes people albums, semantic search, and automatic face/semantic/OCR analysis. Lite excludes those batch stages, maintenance workers, and UI entries while retaining keyword/metadata search and interactive face swap with its shared ONNX/OpenCV runtime and models.
 
 Requirements: JDK 17+, Android SDK 35, NDK `27.0.12077973`, and CMake `3.22.1`.
 
@@ -202,12 +219,12 @@ Requirements: JDK 17+, Android SDK 35, NDK `27.0.12077973`, and CMake `3.22.1`.
 chmod +x scripts/download_models.sh
 ./scripts/download_models.sh   # EVA02-CLIP, buffalo_l, inswapper+emap, PaddleOCR
 
-./gradlew assembleDebug
-./gradlew testDebugUnitTest
-./gradlew installDebug
+./gradlew assembleFullDebug assembleLiteDebug
+./gradlew testFullDebugUnitTest testLiteDebugUnitTest
+./gradlew installFullDebug   # or installLiteDebug
 ```
 
-The model-download script fetches the binary models excluded from source control (only small configs and `MobileNet-v3-Large.tflite` are committed). Release builds read signing config from `keystore.properties` (not committed); without it, `assembleRelease` still compiles but produces an unsigned APK. See the Chinese sections above for the detailed architecture, permission matrix, privacy notes, and setup flow.
+The model-download script places shared face-swap/scene models under `app/src/main/assets/models/` and Full-only semantic/OCR models under `app/src/full/assets/models/`. Release builds read signing config from `keystore.properties` (not committed); without it, the release tasks still compile but produce unsigned APKs. See the Chinese sections above for the detailed architecture, permission matrix, privacy notes, and setup flow.
 
 ### Documentation
 

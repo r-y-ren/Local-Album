@@ -1,5 +1,6 @@
 import com.android.build.api.dsl.ApplicationExtension
 import com.android.build.gradle.AppExtension
+import com.google.devtools.ksp.gradle.KspExtension
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 apply(plugin = "com.android.application")
@@ -71,6 +72,19 @@ extensions.configure<ApplicationExtension>("android") {
         }
     }
 
+    flavorDimensions += "edition"
+    productFlavors {
+        create("full") {
+            dimension = "edition"
+        }
+        create("lite") {
+            dimension = "edition"
+            applicationIdSuffix = ".lite"
+            versionNameSuffix = "-lite"
+            resValue("string", "app_name", "LocalAlbum Lite")
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
@@ -115,7 +129,7 @@ extensions.configure<ApplicationExtension>("android") {
     // emutls 统一实现 shim：编译 libemutls_shim.so，导出标准 __emutls_get_address
     // 解决 ONNX Runtime / OpenCV / TFLite / PyTorch 多 native 库 emutls 符号冲突
     // （识别扫描 / 换脸时 ONNX↔OpenCV 交替调用触发 SIGSEGV 闪退）。
-    // 加载顺序见 LocalAlbumApplication.onCreate（System.loadLibrary("emutls_shim")）。
+    // 冷启动不加载；NativeAiRuntime 在首次 native AI 对象创建前按需保证 shim-first。
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -132,9 +146,18 @@ extensions.configure<ApplicationExtension>("android") {
         disable += "NewApi"
     }
 
+    sourceSets {
+        getByName("androidTest").assets.srcDir(file("schemas"))
+    }
+
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+}
+
+extensions.configure<KspExtension>("ksp") {
+    arg("room.schemaLocation", file("schemas").path)
+    arg("room.incremental", "true")
 }
 
 // ── APK 输出命名 ──
@@ -196,6 +219,7 @@ dependencies {
     add("implementation", "androidx.room:room-ktx:$roomVersion")
     add("implementation", "androidx.room:room-paging:$roomVersion")
     add("ksp", "androidx.room:room-compiler:$roomVersion")
+    add("androidTestImplementation", "androidx.room:room-testing:$roomVersion")
 
     // WorkManager
     add("implementation", "androidx.work:work-runtime-ktx:2.9.1")
@@ -204,11 +228,11 @@ dependencies {
     add("implementation", "androidx.paging:paging-runtime-ktx:3.3.2")
     add("implementation", "androidx.paging:paging-compose:3.3.2")
 
-    // ML Kit Text Recognition (OCR)
-    add("implementation", "com.google.mlkit:text-recognition:16.0.1")
-    add("implementation", "com.google.mlkit:text-recognition-chinese:16.0.1")
+    // ML Kit Text Recognition (OCR) — Full-only；Lite v1 无自动或手动 OCR 能力。
+    add("fullImplementation", "com.google.mlkit:text-recognition:16.0.1")
+    add("fullImplementation", "com.google.mlkit:text-recognition-chinese:16.0.1")
 
-    // ML Kit Face Detection (人脸聚类)
+    // ML Kit Face Detection (人脸聚类 + Lite 交互式换脸的人脸 Provider)
     add("implementation", "com.google.mlkit:face-detection:16.1.7")
 
     // TensorFlow Lite — 设备端 ML 推理（项目仅使用核心 Interpreter API）

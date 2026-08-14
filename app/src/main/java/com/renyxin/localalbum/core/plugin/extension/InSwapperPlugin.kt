@@ -8,7 +8,7 @@ import android.util.Log
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
-import com.renyxin.localalbum.core.plugin.GenerativePlugin
+import com.renyxin.localalbum.core.concurrent.EnhancementResourceGate
 import com.renyxin.localalbum.core.plugin.PluginContext
 import com.renyxin.localalbum.core.plugin.PluginInput
 import com.renyxin.localalbum.core.plugin.PluginJsonCodec
@@ -16,9 +16,14 @@ import com.renyxin.localalbum.core.plugin.PluginManifest
 import com.renyxin.localalbum.core.plugin.PluginOutput
 import com.renyxin.localalbum.core.plugin.capability.FaceProvider
 import com.renyxin.localalbum.core.plugin.model.ModelManager
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
-import org.opencv.android.OpenCVLoader
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
@@ -62,7 +67,8 @@ import kotlin.math.sqrt
 class InSwapperPlugin(
     private val modelManager: ModelManager,
     private val faceProviderFactory: () -> FaceProvider? = { null },
-) : GenerativePlugin {
+    private val faceModelIdsFactory: () -> List<String> = { emptyList() },
+) : OnDemandGenerativePlugin {
 
     companion object {
         private const val TAG = "InSwapper"
@@ -76,12 +82,14 @@ class InSwapperPlugin(
         private const val EMAP_ASSET_PATH = "models/emap_512.bin"
     }
 
-    private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private lateinit var manifest: PluginManifest
-    private var ready = false
-    /** emap 矩阵（行主序，[EMAP_DIM]×[EMAP_DIM]），null 表示未加载（将退回无 emap 路径） */
+    @Volatile private var descriptorReady = false
+    private val _runtimeState = MutableStateFlow(OnDemandRuntimeState.AVAILABLE_NEEDS_LOAD)
+    override val runtimeState: StateFlow<OnDemandRuntimeState> = _runtimeState.asStateFlow()
+
+    /** emap is resident only while an admitted interactive execution owns the heavy lane. */
     private var emap: FloatArray? = null
-    /** initialize 时保存的 Context，用于从 assets 加载 emap */
+    /** Descriptor initialization stores only the application context; no asset is copied here. */
     private var appContext: Context? = null
 
     override fun getId() = "plugin.inswapper"
@@ -146,29 +154,9 @@ class InSwapperPlugin(
                 assetFileName = "inswapper_128.onnx",
             )
         )
-        val result = modelManager.ensureModelReady(MODEL_ID)
-        ready = result.isSuccess
-        if (ready) Log.i(TAG, "InSwapper 模型就绪")
-        else Log.w(TAG, "InSwapper 模型未就绪: ${result.exceptionOrNull()?.message}")
-
-        // 校验 OpenCV 原生库已加载（换脸流水线依赖 Mat/warpAffine/estimateAffinePartial2D 等）。
-        // 若未加载（如 .so 因 __emutls_get_address 等符号缺失而 dlopen 失败），标记未就绪，
-        // 避免 execute 时抛 UnsatisfiedLinkError 闪退。
-        val opencvOk = OpenCVLoader.initLocal()
-        if (!opencvOk) {
-            Log.e(TAG, "OpenCV 原生库加载失败，换脸插件不可用（请检查 libopencv_java5.so 是否适配当前 Android 版本）")
-            ready = false
-        } else {
-            Log.i(TAG, "OpenCV 原生库已加载")
-        }
-
-        // 加载 emap 矩阵（inswapper_128 source latent 变换所必需）
-        emap = loadEmap()
-        if (emap == null) {
-            Log.w(TAG, "emap 未加载: $EMAP_ASSET_PATH 缺失，换脸质量将严重下降（source latent 未变换）")
-        } else {
-            Log.i(TAG, "emap 加载完成: ${EMAP_DIM}×${EMAP_DIM}")
-        }
+        descriptorReady = true
+        _runtimeState.value = OnDemandRuntimeState.AVAILABLE_NEEDS_LOAD
+        Log.i(TAG, "InSwapper descriptor registered; native runtime remains unloaded")
     }
 
     /**
@@ -231,11 +219,102 @@ class InSwapperPlugin(
         return latent
     }
 
-    override fun isReady() = ready
+    override fun isReady() = descriptorReady
 
     override suspend fun execute(input: PluginInput): PluginOutput.ImageOutput = withContext(Dispatchers.IO) {
+        if (!descriptorReady) {
+            throw FaceSwapExecutionPolicy.descriptorFailure()
+        }
+        _runtimeState.value = if (EnhancementResourceGate.isCoreRequested) {
+            OnDemandRuntimeState.WAITING_FOR_CORE
+        } else {
+            OnDemandRuntimeState.LOADING
+        }
+        try {
+            EnhancementResourceGate.withInteractiveAi(
+                onWaitingForCore = {
+                    _runtimeState.value = OnDemandRuntimeState.WAITING_FOR_CORE
+                },
+            ) {
+                executeAdmitted(input)
+            }
+        } finally {
+            // Cancellation and pre-session compatibility failures can happen before executeAdmitted()
+            // installs its model cleanup boundary. Never leave a usable descriptor in a transient or
+            // sticky ERROR state; capability compatibility is derived independently by the UI.
+            if (
+                _runtimeState.value == OnDemandRuntimeState.WAITING_FOR_CORE ||
+                _runtimeState.value == OnDemandRuntimeState.LOADING ||
+                (_runtimeState.value == OnDemandRuntimeState.ERROR && descriptorReady)
+            ) {
+                _runtimeState.value = FaceSwapExecutionPolicy.idleState(descriptorReady)
+            }
+        }
+    }
+
+    private suspend fun executeAdmitted(input: PluginInput): PluginOutput.ImageOutput {
+        _runtimeState.value = OnDemandRuntimeState.LOADING
+        val faceProvider = faceProviderFactory()
+        val compatibilityFailure = FaceSwapExecutionPolicy.compatibilityFailure(
+            providerDisplayName = faceProvider?.displayName,
+            embeddingDim = faceProvider?.embeddingDim,
+            supportsFivePointLandmarks = faceProvider?.supportsFivePointLandmarks == true,
+        )
+        if (compatibilityFailure != null) throw compatibilityFailure
+        checkNotNull(faceProvider)
+
+        val modelIds = (faceModelIdsFactory() + MODEL_ID).distinct()
+        val consumerId = "$CONSUMER_ID_PREFIX:session:${System.nanoTime()}"
+        val registered = mutableListOf<String>()
+        return try {
+            // The interactive lane is already owned here. Native load order is strict and neither
+            // this method nor descriptor initialization is reachable from automatic Lite stages.
+            NativeAiRuntime.ensureFaceSwapRuntime()
+            modelManager.prepareBundledModels(modelIds)
+            for (modelId in modelIds) {
+                modelManager.registerConsumer(modelId, consumerId)
+                registered += modelId
+            }
+            for (modelId in modelIds) {
+                modelManager.ensureModelReady(modelId).getOrThrow()
+            }
+            emap = checkNotNull(loadEmap()) {
+                "Required InSwapper emap asset is missing: $EMAP_ASSET_PATH"
+            }
+            _runtimeState.value = OnDemandRuntimeState.READY
+            executeLoaded(input, faceProvider, NativeAiRuntime.getOrtEnvironment())
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            Log.e(TAG, "换脸交互资源加载或执行失败", error)
+            _runtimeState.value = OnDemandRuntimeState.ERROR
+            throw FaceSwapExecutionPolicy.operationalFailure(error)
+        } finally {
+            withContext(NonCancellable) {
+                emap = null
+                registered.asReversed().forEach { modelId ->
+                    modelManager.unregisterConsumer(modelId, consumerId)
+                }
+                modelIds.asReversed().forEach(modelManager::evictModelIfUnused)
+            }
+            // Native/model failures are retryable after the failed session has been fully cleaned.
+            _runtimeState.value = FaceSwapExecutionPolicy.idleState(descriptorReady)
+        }
+    }
+
+    private fun inputSourcePath(input: PluginInput): String = when (input) {
+        is PluginInput.ImageInput -> input.filePath
+        is PluginInput.MultiModalInput ->
+            input.inputs.filterIsInstance<PluginInput.ImageInput>().lastOrNull()?.filePath.orEmpty()
+        else -> ""
+    }
+
+    private suspend fun executeLoaded(
+        input: PluginInput,
+        faceProvider: FaceProvider,
+        env: OrtEnvironment,
+    ): PluginOutput.ImageOutput {
         Log.i(TAG, "换脸 execute 开始, input=${input::class.simpleName}")
-        // 解析源图与目标图
         val images = when (input) {
             is PluginInput.MultiModalInput -> input.inputs.filterIsInstance<PluginInput.ImageInput>()
             is PluginInput.ImageInput -> listOf(input)
@@ -243,136 +322,107 @@ class InSwapperPlugin(
         }
         if (images.isEmpty()) {
             Log.w(TAG, "换脸失败: 无图像输入")
-            return@withContext PluginOutput.ImageOutput(null, sourcePath = "")
+            return PluginOutput.ImageOutput(null, sourcePath = "")
         }
-        Log.i(TAG, "换脸输入图像数: ${images.size}, paths=${images.map { it.filePath }}")
 
         val sourceInput = images.first()
-        val targetInput = images.getOrElse(1) { sourceInput } // 单图：自换脸演示
+        val targetInput = images.getOrElse(1) { sourceInput }
         val targetPath = targetInput.filePath
-
-        // N11/B1: 源图存在性/可解码性由 detectLargestFace 链路自然兜底，
-        // 无需在此预解码 sourceBmp（该 Bitmap 解码后从未被消费，属死代码 + 内存泄漏）。
-        // V4: 换脸为交互式单图操作，目标图必须全分辨率解码（禁用 inSampleSize 降采样），
-        // 否则 >5MB 底图换脸结果会被贴回降采样图，输出分辨率直接减半。
+        val targetBitmapWasSupplied = targetInput.bitmap != null
         val targetBmp = targetInput.bitmap ?: decodeBitmapFullResolution(targetPath)
-            ?: run {
-                Log.w(TAG, "换脸失败: 目标图解码失败 $targetPath")
-                return@withContext PluginOutput.ImageOutput(null, sourcePath = targetPath)
-            }
-        Log.i(TAG, "目标图 ${targetBmp.width}x${targetBmp.height}")
+            ?: return PluginOutput.ImageOutput(null, sourcePath = targetPath)
 
-        val faceProvider = faceProviderFactory()
-        if (faceProvider == null) {
-            Log.w(TAG, "换脸失败: FaceProvider 未就绪")
-            return@withContext PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
-        }
-
-        try {
-            // ===== Reactor 流水线（对齐 InsightFace/ReActor 原生实现）=====
-
-            // R5: 校验嵌入维度 —— inswapper_128 强制要求 ArcFace 512-dim
-            if (faceProvider.embeddingDim != SOURCE_EMBED_DIM) {
-                Log.w(TAG, "换脸失败: FaceProvider 嵌入维度 ${faceProvider.embeddingDim} ≠ $SOURCE_EMBED_DIM，" +
-                    "请切换为 ArcFace/InsightFace 系 Provider")
-                return@withContext PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
-            }
-
-            // 1. 检测与对齐：源图 + 底图 SCRFD 检测 bbox + 5关键点
+        var affineM: Mat? = null
+        var alignedTargetMat: Mat? = null
+        var alignedTargetBmp: Bitmap? = null
+        var swappedCrop: Bitmap? = null
+        return try {
             val sourceFace = detectLargestFace(faceProvider, sourceInput.filePath)
-            if (sourceFace == null || sourceFace.landmarks == null) {
-                Log.w(TAG, "换脸失败: 源图未检测到人脸或无关键点 ${sourceInput.filePath}")
-                return@withContext PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
+            if (sourceFace?.landmarks == null) {
+                Log.w(TAG, "换脸失败: 源图未检测到带关键点的人脸 ${sourceInput.filePath}")
+                return PluginOutput.ImageOutput(null, sourcePath = targetPath)
             }
-            // N5: 源嵌入零范数检查 —— rec 模型未就绪时 InsightFaceProvider 会降级返回全零嵌入，
-            // 全零嵌入经 emap 后仍为零 latent，inswapper 会输出模型相关的退化结果（与源无相似），
-            // 且无任何错误提示（比 det 无脸更隐蔽的静默质量陷阱）。此处按失败处理（返回原图+日志）。
             var embedNorm = 0.0
-            for (v in sourceFace.embedding) embedNorm += (v * v).toDouble()
+            for (value in sourceFace.embedding) embedNorm += (value * value).toDouble()
             if (sqrt(embedNorm) < 1e-3) {
-                Log.w(TAG, "换脸失败: 源人脸嵌入范数≈0（rec 识别模型可能未就绪），无法提取有效特征")
-                return@withContext PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
+                Log.w(TAG, "换脸失败: 源人脸嵌入无效")
+                return PluginOutput.ImageOutput(null, sourcePath = targetPath)
             }
-            // R1: normed_embedding → emap 变换 → L2 归一化，得到 inswapper source latent
-            val normedEmbed = normalizeTo(sourceFace.embedding, SOURCE_EMBED_DIM)
-            val sourceLatent = applyEmap(normedEmbed)
-            // 诊断：latent 范数与前 5 值（应为非零、范数≈1）
-            var lnorm = 0.0
-            for (v in sourceLatent) lnorm += (v * v).toDouble()
-            Log.i(TAG, "源人脸嵌入: normed ${normedEmbed.size}d, emap latent ${sourceLatent.size}d, emapLoaded=${emap != null}, latentNorm=${sqrt(lnorm)}, latent[0..4]=${sourceLatent.take(5).joinToString(",")}")
+            val sourceLatent = applyEmap(normalizeTo(sourceFace.embedding, SOURCE_EMBED_DIM))
 
-            val targetFace = detectLargestFace(faceProvider, targetInput.filePath)
+            val targetFace = detectLargestFace(faceProvider, targetPath)
             val targetLandmarks = targetFace?.landmarks
-            if (targetFace == null || targetLandmarks == null) {
-                Log.w(TAG, "换脸失败: 底图未检测到人脸或无关键点 $targetPath")
-                return@withContext PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
+            if (targetLandmarks == null) {
+                Log.w(TAG, "换脸失败: 底图未检测到带关键点的人脸 $targetPath")
+                return PluginOutput.ImageOutput(null, sourcePath = targetPath)
             }
-            Log.i(TAG, "底图人脸框: ${targetFace.box}, 有关键点")
 
-            // 2. 相似变换对齐底图人脸到 128×128（inswapper 输入），保存仿射矩阵 M
             val targetLandmarksPx = FaceAligner.denormalizeLandmarks(
-                targetLandmarks, targetBmp.width, targetBmp.height
+                targetLandmarks,
+                targetBmp.width,
+                targetBmp.height,
             )
-            Log.i(TAG, "step: denormalize landmarks done, pts=${targetLandmarksPx.size}")
-            val affineM = FaceAligner.computeAffineMatrix(targetLandmarksPx, INPUT_SIZE)
-            Log.i(TAG, "step: estimateAffinePartial2D done, empty=${affineM.empty()}, rows=${affineM.rows()}, cols=${affineM.cols()}")
-            if (affineM.empty()) {
-                Log.w(TAG, "换脸失败: estimateAffinePartial2D 返回空矩阵（关键点退化）")
-                affineM.release()
-                return@withContext PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
+            val stableAffine = FaceAligner.computeAffineMatrix(targetLandmarksPx, INPUT_SIZE)
+            affineM = stableAffine
+            if (stableAffine.empty()) {
+                Log.w(TAG, "换脸失败: 关键点仿射矩阵为空")
+                return PluginOutput.ImageOutput(null, sourcePath = targetPath)
             }
-            // 对齐底图 Mat（BGR），供 diff-mask 贴回计算 |fake - alignedTarget|
-            val alignedTargetMat = FaceAligner.warpAffineMat(targetBmp, affineM, INPUT_SIZE)
-            Log.i(TAG, "step: warpAffineMat done, ${alignedTargetMat.cols()}x${alignedTargetMat.rows()}")
-            val alignedTargetBmp = FaceAligner.matBGRToBitmap(alignedTargetMat)
-            Log.i(TAG, "底图仿射对齐完成: ${alignedTargetMat.cols()}x${alignedTargetMat.rows()}, 均值RGB=${bitmapMeanRgb(alignedTargetBmp)}")
 
-            // 3. 换脸推理：模型可能已被批处理阶段结束时的 evictUnusedModels() 卸载。
-            // 插件的 ready 只表示资产与运行环境可用，不能代表 session 永远驻留内存，
-            // 因此每次交互式执行都必须按需恢复模型。消费者注册覆盖 ensure + run，
-            // 防止并发结束的分析阶段在 session 使用期间将其淘汰。
-            Log.i(TAG, "step: runSwap begin")
-            val consumerId = "$CONSUMER_ID_PREFIX:${System.nanoTime()}"
-            modelManager.registerConsumer(MODEL_ID, consumerId)
-            val swappedCrop = try {
-                val modelReady = modelManager.ensureModelReady(MODEL_ID)
-                if (modelReady.isFailure) {
-                    Log.w(TAG, "换脸模型按需恢复失败", modelReady.exceptionOrNull())
-                    null
-                } else {
-                    modelManager.withOnnxSession(MODEL_ID) { session ->
-                        runSwap(session, alignedTargetBmp, sourceLatent)
-                    }
-                }
-            } finally {
-                modelManager.unregisterConsumer(MODEL_ID, consumerId)
-            }
-            if (swappedCrop == null) {
-                alignedTargetBmp.recycle()
-                Log.w(TAG, "换脸失败: runSwap 返回 null（ONNX 输出解析失败）")
-                affineM.release()
-                alignedTargetMat.release()
-                return@withContext PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
-            }
-            Log.i(TAG, "换脸推理成功, 输出 ${swappedCrop.width}x${swappedCrop.height}, 均值RGB=${bitmapMeanRgb(swappedCrop)}")
-            Log.i(TAG, "diag: maxDiff(alignedTarget, swapped)=${bitmapMaxDiff(alignedTargetBmp, swappedCrop)}")
-            alignedTargetBmp.recycle()
+            val stableAlignedMat = FaceAligner.warpAffineMat(targetBmp, stableAffine, INPUT_SIZE)
+            alignedTargetMat = stableAlignedMat
+            val stableAlignedBitmap = FaceAligner.matBGRToBitmap(stableAlignedMat)
+            alignedTargetBmp = stableAlignedBitmap
 
-            // 4. diff-mask 贴回（InsightFace 原生 paste-back）：M⁻¹ 逆变换 + 差异 mask + alpha 混合
-            Log.i(TAG, "step: pasteBackDiffMask begin, target=${targetBmp.width}x${targetBmp.height}")
-            val result = pasteBackDiffMask(targetBmp, swappedCrop, alignedTargetMat, affineM)
-            affineM.release()
-            alignedTargetMat.release()
-            Log.i(TAG, "换脸完成, 结果 ${result.width}x${result.height}, maxDiff(result,target)=${bitmapMaxDiff(result, targetBmp)}")
+            swappedCrop = modelManager.withOnnxSession(MODEL_ID) { session ->
+                runSwap(session, stableAlignedBitmap, sourceLatent, env)
+            }
+            val stableSwapped = swappedCrop
+            if (stableSwapped == null) {
+                Log.w(TAG, "换脸失败: InSwapper 输出解析失败")
+                return PluginOutput.ImageOutput(null, sourcePath = targetPath)
+            }
+
+            val result = pasteBackDiffMask(
+                targetBmp,
+                stableSwapped,
+                stableAlignedMat,
+                stableAffine,
+            )
+            Log.i(TAG, "换脸完成: ${result.width}x${result.height}")
             PluginOutput.ImageOutput(result, sourcePath = targetPath)
-        } catch (e: Throwable) {
-            Log.e(TAG, "换脸失败(Throwable): ${e.javaClass.name}: ${e.message}", e)
-            PluginOutput.ImageOutput(targetBmp, sourcePath = targetPath)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            // Unexpected OpenCV/ONNX/provider failures are actionable and must not be collapsed into
+            // the normal "no face detected" empty result.
+            Log.e(TAG, "换脸执行失败", error)
+            throw error
+        } finally {
+            swappedCrop?.let { if (!it.isRecycled) it.recycle() }
+            alignedTargetBmp?.let { if (!it.isRecycled) it.recycle() }
+            alignedTargetMat?.release()
+            affineM?.release()
+            if (!targetBitmapWasSupplied && !targetBmp.isRecycled) targetBmp.recycle()
+        }
+    }
+
+    override suspend fun releaseRuntimeResources() {
+        EnhancementResourceGate.withInteractiveAi {
+            emap = null
+            (faceModelIdsFactory() + MODEL_ID).distinct().asReversed().forEach {
+                modelManager.evictModelIfUnused(it)
+            }
+            if (descriptorReady) {
+                _runtimeState.value = OnDemandRuntimeState.AVAILABLE_NEEDS_LOAD
+            }
         }
     }
 
     override suspend fun release() {
-        ready = false
+        descriptorReady = false
+        releaseRuntimeResources()
+        _runtimeState.value = OnDemandRuntimeState.ERROR
     }
 
     // ---- 人脸检测辅助 ----
@@ -409,7 +459,12 @@ class InSwapperPlugin(
 
     // ---- ONNX 推理 ----
 
-    private fun runSwap(session: OrtSession, targetBmp: Bitmap, sourceEmbed: FloatArray): Bitmap? {
+    private fun runSwap(
+        session: OrtSession,
+        targetBmp: Bitmap,
+        sourceEmbed: FloatArray,
+        env: OrtEnvironment = NativeAiRuntime.getOrtEnvironment(),
+    ): Bitmap? {
         // 按名称约定识别 target(图像) 与 source(嵌入) 两个输入
         // inswapper_128 的标准输入名为 "target"([1,3,128,128]) 与 "source"([1,512])
         val inputNames = session.inputNames.toList()
@@ -520,110 +575,133 @@ class InSwapperPlugin(
         aimg: Mat,
         affineM: Mat,
     ): Bitmap {
-        val tw = target.width
-        val th = target.height
-        val targetSize = Size(tw.toDouble(), th.toDouble())
+        val mats = MatResourceScope()
+        return try {
+            val tw = target.width
+            val th = target.height
+            val targetSize = Size(tw.toDouble(), th.toDouble())
 
-        // 1. 逆矩阵 M⁻¹
-        Log.i(TAG, "pb: step1 invertAffine begin")
-        val invAffine = FaceAligner.invertAffine(affineM)
-        Log.i(TAG, "pb: step1 invertAffine done")
+            // 1. 逆矩阵 M⁻¹
+            Log.i(TAG, "pb: step1 invertAffine begin")
+            val invAffine = mats.track(FaceAligner.invertAffine(affineM))
+            Log.i(TAG, "pb: step1 invertAffine done")
 
-        // 2. 换脸脸 warp 回原图尺寸
-        val bgrFake = FaceAligner.bitmapToMatBGR(swapped)
-        val bgrFakeWarped = Mat()
-        Imgproc.warpAffine(bgrFake, bgrFakeWarped, invAffine, targetSize,
-            Imgproc.INTER_LINEAR, 0 /* BORDER_CONSTANT */, Scalar.all(0.0))
-        bgrFake.release()
-        Log.i(TAG, "pb: step2 warpFake done ${bgrFakeWarped.cols()}x${bgrFakeWarped.rows()}")
+            // 2. 换脸脸 warp 回原图尺寸
+            val bgrFake = mats.track(FaceAligner.bitmapToMatBGR(swapped))
+            val bgrFakeWarped = mats.track(Mat())
+            Imgproc.warpAffine(bgrFake, bgrFakeWarped, invAffine, targetSize,
+                Imgproc.INTER_LINEAR, 0 /* BORDER_CONSTANT */, Scalar.all(0.0))
+            mats.release(bgrFake)
+            Log.i(TAG, "pb: step2 warpFake done ${bgrFakeWarped.cols()}x${bgrFakeWarped.rows()}")
 
-        // 3. 全白 mask (128×128, float32) warp 回原图
-        val imgWhite = Mat(INPUT_SIZE, INPUT_SIZE, CvType.CV_32F, Scalar.all(255.0))
-        val imgWhiteWarped = Mat()
-        Imgproc.warpAffine(imgWhite, imgWhiteWarped, invAffine, targetSize,
-            Imgproc.INTER_LINEAR, 0 /* BORDER_CONSTANT */, Scalar.all(0.0))
-        imgWhite.release()
-        invAffine.release()
-        Log.i(TAG, "pb: step3 warpWhite done")
+            // 3. 全白 mask (128×128, float32) warp 回原图
+            val imgWhite = mats.track(Mat(INPUT_SIZE, INPUT_SIZE, CvType.CV_32F, Scalar.all(255.0)))
+            val imgWhiteWarped = mats.track(Mat())
+            Imgproc.warpAffine(imgWhite, imgWhiteWarped, invAffine, targetSize,
+                Imgproc.INTER_LINEAR, 0 /* BORDER_CONSTANT */, Scalar.all(0.0))
+            mats.release(imgWhite)
+            mats.release(invAffine)
+            Log.i(TAG, "pb: step3 warpWhite done")
 
-        // 4. 阈值 >20 → 255（清理近边缘插值伪影）
-        Imgproc.threshold(imgWhiteWarped, imgWhiteWarped, 20.0, 255.0, Imgproc.THRESH_BINARY)
-        Log.i(TAG, "pb: step4 threshold done, type=${imgWhiteWarped.type()}, channels=${imgWhiteWarped.channels()}")
+            // 4. 阈值 >20 → 255（清理近边缘插值伪影）
+            Imgproc.threshold(imgWhiteWarped, imgWhiteWarped, 20.0, 255.0, Imgproc.THRESH_BINARY)
+            Log.i(TAG, "pb: step4 threshold done, type=${imgWhiteWarped.type()}, channels=${imgWhiteWarped.channels()}")
 
-        // 5. 由非零区域估算 mask_size，确定 erode/blur kernel 大小
-        val nonZero = Mat()
-        Core.findNonZero(imgWhiteWarped, nonZero)
-        var maskSize = 0.0
-        if (nonZero.rows() > 0) {
-            val rect = Geometry.boundingRect(nonZero)
-            maskSize = sqrt(rect.height.toDouble() * rect.width.toDouble())
-            Log.i(TAG, "pb: step5 nonzero=${nonZero.rows()}, rect=${rect.width}x${rect.height}, maskSize=$maskSize")
-        } else {
-            Log.w(TAG, "pb: step5 nonzero empty!")
+            // 5. 由非零区域估算 mask_size，确定 erode/blur kernel 大小
+            val nonZero = mats.track(Mat())
+            Core.findNonZero(imgWhiteWarped, nonZero)
+            var maskSize = 0.0
+            if (nonZero.rows() > 0) {
+                val rect = Geometry.boundingRect(nonZero)
+                maskSize = sqrt(rect.height.toDouble() * rect.width.toDouble())
+                Log.i(TAG, "pb: step5 nonzero=${nonZero.rows()}, rect=${rect.width}x${rect.height}, maskSize=$maskSize")
+            } else {
+                Log.w(TAG, "pb: step5 nonzero empty!")
+            }
+            mats.release(nonZero)
+
+            if (maskSize > 0) {
+                // erode img_mask: k = max(mask_size/10, 10)
+                var k = (maskSize / 10).toInt().coerceAtLeast(10)
+                val erodeKernel = mats.track(Imgproc.getStructuringElement(
+                    Imgproc.MORPH_RECT, Size(k.toDouble(), k.toDouble())
+                ))
+                Imgproc.erode(imgWhiteWarped, imgWhiteWarped, erodeKernel)
+                mats.release(erodeKernel)
+                // GaussianBlur img_mask: k = max(mask_size/20, 5)
+                k = (maskSize / 20).toInt().coerceAtLeast(5)
+                val bSize = Size((k * 2 + 1).toDouble(), (k * 2 + 1).toDouble())
+                Imgproc.GaussianBlur(imgWhiteWarped, imgWhiteWarped, bSize, 0.0)
+            }
+            Log.i(TAG, "pb: step5 erode/blur done")
+
+            // 6. img_mask / 255 → [0,1]，扩为 3 通道（用 cvtColor GRAY2BGR，避免 merge 同一 Mat 3 次的潜在问题）
+            val imgMask = mats.track(Mat())
+            Core.divide(imgWhiteWarped, Scalar.all(255.0), imgMask, 1.0, CvType.CV_32F)
+            mats.release(imgWhiteWarped)
+            Log.i(TAG, "pb: step6 divide done, type=${imgMask.type()}")
+            val mask3c = mats.track(Mat())
+            Imgproc.cvtColor(imgMask, mask3c, Imgproc.COLOR_GRAY2BGR)
+            mats.release(imgMask)
+            Log.i(TAG, "pb: step6 gray2bgr done, channels=${mask3c.channels()}")
+
+            // 7. alpha 混合：result = mask3c * bgrFakeWarped + (1-mask3c) * target （float32）
+            val bgrFakeF = mats.track(Mat())
+            bgrFakeWarped.convertTo(bgrFakeF, CvType.CV_32F)
+            mats.release(bgrFakeWarped)
+            val targetMat = mats.track(FaceAligner.bitmapToMatBGR(target))
+            val targetF = mats.track(Mat())
+            targetMat.convertTo(targetF, CvType.CV_32F)
+            mats.release(targetMat)
+            Log.i(TAG, "pb: step7 convert done, fake=${bgrFakeF.cols()}x${bgrFakeF.rows()}, tgt=${targetF.cols()}x${targetF.rows()}, mask=${mask3c.cols()}x${mask3c.rows()}")
+
+            val fakeContrib = mats.track(Mat())
+            Core.multiply(bgrFakeF, mask3c, fakeContrib)
+            mats.release(bgrFakeF)
+            // invMask = 1 - mask3c（OpenCV 5.0 Java 无 subtract(Scalar, Mat) 重载，用 -mask+1 等价）
+            val invMask = mats.track(Mat())
+            Core.multiply(mask3c, Scalar.all(-1.0), invMask)
+            Core.add(invMask, Scalar.all(1.0), invMask)
+            mats.release(mask3c)
+            val targetContrib = mats.track(Mat())
+            Core.multiply(targetF, invMask, targetContrib)
+            mats.release(targetF)
+            mats.release(invMask)
+            val resultF = mats.track(Mat())
+            Core.add(fakeContrib, targetContrib, resultF)
+            mats.release(fakeContrib)
+            mats.release(targetContrib)
+            Log.i(TAG, "pb: step7 blend done")
+
+            // 8. → uint8 → Bitmap
+            val result8u = mats.track(Mat())
+            resultF.convertTo(result8u, CvType.CV_8U)
+            mats.release(resultF)
+            val output = FaceAligner.matBGRToBitmap(result8u)
+            mats.release(result8u)
+            Log.i(TAG, "pb: step8 done, output=${output.width}x${output.height}")
+            output
+        } finally {
+            mats.releaseAll()
         }
-        nonZero.release()
+    }
 
-        if (maskSize > 0) {
-            // erode img_mask: k = max(mask_size/10, 10)
-            var k = (maskSize / 10).toInt().coerceAtLeast(10)
-            val erodeKernel = Imgproc.getStructuringElement(
-                Imgproc.MORPH_RECT, Size(k.toDouble(), k.toDouble())
-            )
-            Imgproc.erode(imgWhiteWarped, imgWhiteWarped, erodeKernel)
-            erodeKernel.release()
-            // GaussianBlur img_mask: k = max(mask_size/20, 5)
-            k = (maskSize / 20).toInt().coerceAtLeast(5)
-            val bSize = Size((k * 2 + 1).toDouble(), (k * 2 + 1).toDouble())
-            Imgproc.GaussianBlur(imgWhiteWarped, imgWhiteWarped, bSize, 0.0)
+    /** Identity-based tracker that releases every OpenCV allocation on success or failure. */
+    private class MatResourceScope {
+        private val tracked = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<Mat, Boolean>(),
+        )
+
+        fun track(mat: Mat): Mat = mat.also(tracked::add)
+
+        fun release(mat: Mat) {
+            if (tracked.remove(mat)) runCatching(mat::release)
         }
-        Log.i(TAG, "pb: step5 erode/blur done")
 
-        // 6. img_mask / 255 → [0,1]，扩为 3 通道（用 cvtColor GRAY2BGR，避免 merge 同一 Mat 3 次的潜在问题）
-        val imgMask = Mat()
-        Core.divide(imgWhiteWarped, Scalar.all(255.0), imgMask, 1.0, CvType.CV_32F)
-        imgWhiteWarped.release()
-        Log.i(TAG, "pb: step6 divide done, type=${imgMask.type()}")
-        val mask3c = Mat()
-        Imgproc.cvtColor(imgMask, mask3c, Imgproc.COLOR_GRAY2BGR)
-        imgMask.release()
-        Log.i(TAG, "pb: step6 gray2bgr done, channels=${mask3c.channels()}")
-
-        // 7. alpha 混合：result = mask3c * bgrFakeWarped + (1-mask3c) * target （float32）
-        val bgrFakeF = Mat()
-        bgrFakeWarped.convertTo(bgrFakeF, CvType.CV_32F)
-        bgrFakeWarped.release()
-        val targetMat = FaceAligner.bitmapToMatBGR(target)
-        val targetF = Mat()
-        targetMat.convertTo(targetF, CvType.CV_32F)
-        targetMat.release()
-        Log.i(TAG, "pb: step7 convert done, fake=${bgrFakeF.cols()}x${bgrFakeF.rows()}, tgt=${targetF.cols()}x${targetF.rows()}, mask=${mask3c.cols()}x${mask3c.rows()}")
-
-        val fakeContrib = Mat()
-        Core.multiply(bgrFakeF, mask3c, fakeContrib)
-        bgrFakeF.release()
-        // invMask = 1 - mask3c（OpenCV 5.0 Java 无 subtract(Scalar, Mat) 重载，用 -mask+1 等价）
-        val invMask = Mat()
-        Core.multiply(mask3c, Scalar.all(-1.0), invMask)
-        Core.add(invMask, Scalar.all(1.0), invMask)
-        mask3c.release()
-        val targetContrib = Mat()
-        Core.multiply(targetF, invMask, targetContrib)
-        targetF.release()
-        invMask.release()
-        val resultF = Mat()
-        Core.add(fakeContrib, targetContrib, resultF)
-        fakeContrib.release()
-        targetContrib.release()
-        Log.i(TAG, "pb: step7 blend done")
-
-        // 8. → uint8 → Bitmap
-        val result8u = Mat()
-        resultF.convertTo(result8u, CvType.CV_8U)
-        resultF.release()
-        val output = FaceAligner.matBGRToBitmap(result8u)
-        result8u.release()
-        Log.i(TAG, "pb: step8 done, output=${output.width}x${output.height}")
-        return output
+        fun releaseAll() {
+            tracked.toList().asReversed().forEach { runCatching(it::release) }
+            tracked.clear()
+        }
     }
 
     /**

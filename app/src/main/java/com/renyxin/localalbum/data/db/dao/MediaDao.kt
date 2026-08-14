@@ -138,6 +138,22 @@ interface MediaDao {
     """)
     suspend fun getDirectorySummaries(): List<DirectorySummary>
 
+    /** Incremental snapshot input; only aggregates directories touched by the claimed change set. */
+    @Query("""
+        SELECT parentPath, COUNT(*) AS mediaCount, MAX(capturedAtMs) AS latestCapturedAtMs,
+               (SELECT m2.thumbnailPath FROM media_items m2
+                WHERE m2.parentPath = m1.parentPath AND m2.isTrashed = 0
+                ORDER BY m2.capturedAtMs DESC, m2.filePath ASC LIMIT 1) AS coverThumbnailPath,
+               (SELECT m2.filePath FROM media_items m2
+                WHERE m2.parentPath = m1.parentPath AND m2.isTrashed = 0
+                ORDER BY m2.capturedAtMs DESC, m2.filePath ASC LIMIT 1) AS coverFilePath
+        FROM media_items m1
+        WHERE isTrashed = 0 AND parentPath IN (:parentPaths)
+        GROUP BY parentPath
+        ORDER BY latestCapturedAtMs DESC
+    """)
+    suspend fun getDirectorySummariesForPaths(parentPaths: List<String>): List<DirectorySummary>
+
     /**
      * 精选推荐池的稳定 keyset 分页输入。
      * 推荐轮换要求覆盖全部文件，因此按路径分批读取，避免 OFFSET 在大图库上的扫描放大。
@@ -288,13 +304,13 @@ interface MediaDao {
     /**
      * 查询全部 FTS 索引条目（Phase 4.2 数据库导出使用）。
      */
-    @Query("SELECT filePath, fileName, ocrText, make, model FROM media_items_fts")
+    @Query("SELECT filePath, fileName, parentPath, ocrText, make, model FROM media_items_fts")
     suspend fun getAllFtsEntries(): List<com.renyxin.localalbum.data.db.entity.MediaFts>
 
-    @Query("SELECT filePath, fileName, ocrText, make, model FROM media_items_fts LIMIT :limit OFFSET :offset")
+    @Query("SELECT filePath, fileName, parentPath, ocrText, make, model FROM media_items_fts LIMIT :limit OFFSET :offset")
     suspend fun getPagedFtsEntries(limit: Int, offset: Int): List<com.renyxin.localalbum.data.db.entity.MediaFts>
 
-    @Query("SELECT filePath, fileName, ocrText, make, model FROM media_items_fts WHERE :afterPath IS NULL OR filePath > :afterPath ORDER BY filePath LIMIT :limit")
+    @Query("SELECT filePath, fileName, parentPath, ocrText, make, model FROM media_items_fts WHERE :afterPath IS NULL OR filePath > :afterPath ORDER BY filePath LIMIT :limit")
     suspend fun getFtsEntriesAfter(afterPath: String?, limit: Int): List<com.renyxin.localalbum.data.db.entity.MediaFts>
 
     @Query("SELECT COUNT(*) FROM media_items_fts")
@@ -311,8 +327,15 @@ interface MediaDao {
      * 插入单条 FTS 索引条目（Phase 4.2 数据库导入使用）。
      * FTS4 虚拟表不支持 @Insert 注解，使用原生 INSERT SQL。
      */
-    @Query("INSERT INTO media_items_fts (filePath, fileName, ocrText, make, model) VALUES (:filePath, :fileName, :ocrText, :make, :model)")
-    suspend fun insertFtsEntry(filePath: String, fileName: String, ocrText: String?, make: String?, model: String?)
+    @Query("INSERT INTO media_items_fts (filePath, fileName, parentPath, ocrText, make, model) VALUES (:filePath, :fileName, :parentPath, :ocrText, :make, :model)")
+    suspend fun insertFtsEntry(
+        filePath: String,
+        fileName: String,
+        parentPath: String,
+        ocrText: String?,
+        make: String?,
+        model: String?,
+    )
 
     /** 批量插入 FTS 索引条目（配合 deleteFtsEntries 实现批量重建，避免逐条 autocommit） */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -337,6 +360,17 @@ interface MediaDao {
     @Query("UPDATE media_items SET qualityScore = :score WHERE filePath = :path")
     suspend fun setQualityScore(path: String, score: Float)
 
+    /** One Room transaction for at most the Stage's 250-row persistence batch. */
+    @Transaction
+    suspend fun setQualityScores(updates: List<QualityScoreUpdate>) {
+        require(updates.size <= ENHANCEMENT_WRITE_BATCH_SIZE) {
+            "quality update batch exceeds $ENHANCEMENT_WRITE_BATCH_SIZE rows"
+        }
+        updates.forEach { update ->
+            setQualityScore(update.filePath, update.qualityScore)
+        }
+    }
+
     @Query("UPDATE media_items SET perceptualHash = :hash WHERE filePath = :path")
     suspend fun updatePerceptualHash(path: String, hash: Long)
 
@@ -346,6 +380,17 @@ interface MediaDao {
     // ---- 场景分类 ----
     @Query("UPDATE media_items SET sceneType = :sceneType WHERE filePath = :path")
     suspend fun setSceneType(path: String, sceneType: String)
+
+    /** One Room transaction for at most the Stage's 250-row persistence batch. */
+    @Transaction
+    suspend fun setSceneTypes(updates: List<SceneTypeUpdate>) {
+        require(updates.size <= ENHANCEMENT_WRITE_BATCH_SIZE) {
+            "scene update batch exceeds $ENHANCEMENT_WRITE_BATCH_SIZE rows"
+        }
+        updates.forEach { update ->
+            setSceneType(update.filePath, update.sceneType)
+        }
+    }
 
     // ---- 综合分析字段更新 ----
     // 修复：qualityScore 和 sceneType 使用 COALESCE 保护，避免调用方传入零值/空串时
@@ -400,7 +445,18 @@ interface MediaDao {
     @Query("UPDATE media_items SET isCorrupted = 1 WHERE filePath = :path")
     suspend fun markCorrupted(path: String)
 
-    // ---- 缩略图补齐 (供 ThumbnailWorker 使用) ----
+    /** Bounded automatic recommendation refresh for explicitly affected directories. */
+    @Query(
+        """SELECT * FROM media_items
+           WHERE isTrashed = 0 AND parentPath IN (:parentPaths)
+           ORDER BY capturedAtMs DESC, filePath ASC LIMIT :limit""",
+    )
+    suspend fun getRecommendationCandidatesForDirectories(
+        parentPaths: List<String>,
+        limit: Int,
+    ): List<MediaEntity>
+
+    // ---- 缩略图补齐（仅兼容/显式维护；自动 Worker 不得调用全库 seed） ----
     @Query("SELECT * FROM media_items WHERE thumbnailPath IS NULL AND isTrashed = 0 LIMIT :limit")
     suspend fun getMissingThumbnails(limit: Int): List<MediaEntity>
 
@@ -435,7 +491,21 @@ interface MediaDao {
 
     @Query("SELECT * FROM media_items WHERE isTrashed = 0 AND faceClusterId IS NOT NULL ORDER BY capturedAtMs DESC")
     suspend fun getWithFaceCluster(): List<MediaEntity>
+    companion object {
+        const val ENHANCEMENT_WRITE_BATCH_SIZE = 250
+    }
 }
+
+/** Lightweight Stage result rows; unlike MediaEntity partial copies cannot overwrite other fields. */
+data class SceneTypeUpdate(
+    val filePath: String,
+    val sceneType: String,
+)
+
+data class QualityScoreUpdate(
+    val filePath: String,
+    val qualityScore: Float,
+)
 
 data class DirectorySummary(
     val parentPath: String,

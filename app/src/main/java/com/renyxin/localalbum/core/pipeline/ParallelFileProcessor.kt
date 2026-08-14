@@ -65,6 +65,7 @@ object ParallelFileProcessor {
         enhancedCallback: EnhancedProgressCallback,
         concurrency: Int = InferenceDispatchers.inferenceConcurrency,
         dispatcher: CoroutineDispatcher = InferenceDispatchers.cpuBound,
+        metricOperation: String = "pipeline:file",
         process: suspend (path: String) -> T,
     ): List<FileResult<T>> {
         val total = filePaths.size
@@ -90,7 +91,7 @@ object ParallelFileProcessor {
                                 enhancedCallback(processed.get(), total, path, FileProcessingStatus.PROCESSING)
                                 try {
                                     val value = InferenceMetrics.measure(
-                                        operation = "pipeline:file",
+                                        operation = metricOperation,
                                         backend = InferenceMetrics.Backend.CPU_DEFAULT,
                                     ) {
                                         process(path)
@@ -123,9 +124,17 @@ object ParallelFileProcessor {
         enhancedCallback: EnhancedProgressCallback,
         concurrency: Int = InferenceDispatchers.inferenceConcurrency,
         dispatcher: CoroutineDispatcher = InferenceDispatchers.cpuBound,
+        metricOperation: String = "pipeline:file",
         process: suspend (path: String) -> T,
     ): Pair<List<T>, Int> {
-        val results = mapParallel(filePaths, enhancedCallback, concurrency, dispatcher, process)
+        val results = mapParallel(
+            filePaths,
+            enhancedCallback,
+            concurrency,
+            dispatcher,
+            metricOperation,
+            process,
+        )
         val success = results.mapNotNull { it.value }
         val failed = results.count { !it.success }
         return success to failed

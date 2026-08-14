@@ -25,7 +25,8 @@ class BackupContractTest {
     fun `regenerable and transient tables are explicitly excluded`() {
         val included = BackupContract.tables.map { it.table }.toSet()
         listOf("thumbnail_cache_entries", "thumbnail_tasks", "analysis_tasks", "scan_runs",
-            "scan_staging", "semantic_maintenance_runs", "duplicate_groups", "duplicate_members")
+            "scan_staging", "media_change_events", "media_store_references",
+            "semantic_maintenance_runs", "duplicate_groups", "duplicate_members")
             .forEach { table ->
                 assertFalse(table in included)
                 assertTrue(table in BackupContract.excludedTables)

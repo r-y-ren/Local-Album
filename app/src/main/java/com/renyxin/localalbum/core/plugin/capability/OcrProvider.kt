@@ -9,10 +9,10 @@ import java.io.File
  * 每种实现（MLKit、PaddleOCR、Tesseract 等）提供不同的语言支持/精度权衡。
  *
  * ## 使用场景
- * - 管道批处理：[OcrStage] 逐图调用 [recognize]
- * - 搜索：关键词搜索 → 匹配 OCR 识别出的文字
+ * - Full edition 管道批处理逐图调用 [recognize]
+ * - Full edition 搜索匹配已识别的 OCR 文字
  *
- * @see com.renyxin.localalbum.core.plugin.capability.builtin.MlKitOcrProvider 内置默认实现
+ * 具体实现和运行时依赖由 edition 组合根注册；Lite v1 不注册 OCR Provider。
  */
 interface OcrProvider {
     /** Provider 唯一标识 */

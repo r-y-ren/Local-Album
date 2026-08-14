@@ -76,8 +76,6 @@ import androidx.compose.ui.platform.LocalContext
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.data.repo.MediaSearchQuery
-import com.renyxin.localalbum.data.repo.SemanticSearchResult
-import com.renyxin.localalbum.data.repo.SemanticSearchState
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.delay
 import java.time.Instant
@@ -96,18 +94,16 @@ private enum class SearchFilterType(val label: String) {
 fun SearchScreen(
     pagedSearch: (MediaSearchQuery) -> Flow<PagingData<MediaItem>>,
     cameraModels: List<String>,
-    semanticSearchResults: List<SemanticSearchResult> = emptyList(),
-    isSemanticMode: Boolean = false,
-    semanticSearchState: SemanticSearchState = SemanticSearchState.IDLE,
-    onSemanticModeChange: (Boolean) -> Unit = {},
-    onSearch: (String) -> Unit,
-    onClearSearch: () -> Unit,
+    optionalSearchMode: OptionalSearchModeState = OptionalSearchModeState.DISABLED,
     onBack: () -> Unit,
     onMediaClick: (MediaItem, MediaSearchQuery?, List<String>?) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     var showFilters by remember { mutableStateOf(false) }
     var typeFilter by remember { mutableStateOf(SearchFilterType.ALL) }
+    val optionalModeActive = optionalSearchMode.enabled &&
+        optionalSearchMode.active &&
+        optionalSearchMode.copy != null
     var showDateFromPicker by remember { mutableStateOf(false) }
     var showDateToPicker by remember { mutableStateOf(false) }
     var dateFrom by remember { mutableStateOf<LocalDate?>(null) }
@@ -115,22 +111,25 @@ fun SearchScreen(
 
     var cameraFilter by remember { mutableStateOf<String?>(null) }
 
-    // Debounce search
-    LaunchedEffect(query, isSemanticMode) {
-        if (query.isNotBlank()) {
+    // 关键词结果由 Paging 查询直接响应；可选模式仅在被当前 edition 启用且选中时执行回调。
+    LaunchedEffect(query, optionalModeActive) {
+        if (optionalModeActive && query.isNotBlank()) {
             delay(300)
-            onSearch(query)
+            optionalSearchMode.onSearch(query)
         } else {
-            onClearSearch()
+            optionalSearchMode.onClear()
         }
     }
 
-    // 语义索引会在扫描期间按批次逐步写入数据库。首次查询可能早于首批落库而得到
-    // NO_INDEX；在该状态下定时重试当前查询，首批可搜索向量出现后立即展示结果。
-    LaunchedEffect(query, isSemanticMode, semanticSearchState) {
-        if (isSemanticMode && query.isNotBlank() && semanticSearchState == SemanticSearchState.NO_INDEX) {
+    // 可选索引会在后台按批次发布；首次查询早于首批落库时有界重试当前查询。
+    LaunchedEffect(query, optionalModeActive, optionalSearchMode.status) {
+        if (
+            optionalModeActive &&
+            query.isNotBlank() &&
+            optionalSearchMode.status == OptionalSearchStatus.NO_INDEX
+        ) {
             delay(1_000L)
-            onSearch(query)
+            optionalSearchMode.onSearch(query)
         }
     }
 
@@ -149,9 +148,15 @@ fun SearchScreen(
     }
     val keywordItems = remember(searchQuery) { pagedSearch(searchQuery) }.collectAsLazyPagingItems()
 
-    // 语义搜索保持有界列表；其筛选仍可在内存执行。
-    val filteredResults = remember(semanticSearchResults, typeFilter, dateFrom, dateTo, cameraFilter) {
-        semanticSearchResults.filter { result ->
+    // edition 可选搜索模式保持有界列表；其筛选仍可在内存执行。
+    val filteredOptionalResults = remember(
+        optionalSearchMode.results,
+        typeFilter,
+        dateFrom,
+        dateTo,
+        cameraFilter,
+    ) {
+        optionalSearchMode.results.filter { result ->
             val item = result.mediaItem
             val typeMatch = when (typeFilter) {
                 SearchFilterType.ALL -> true
@@ -243,14 +248,20 @@ fun SearchScreen(
                             onValueChange = { query = it },
                             modifier = Modifier.weight(1f),
                             placeholder = {
-                                Text(if (isSemanticMode) "语义搜索（请用英文）：sunset, beach…" else "搜索图片或视频…")
+                                Text(
+                                    if (optionalModeActive) {
+                                        requireNotNull(optionalSearchMode.copy).activePlaceholder
+                                    } else {
+                                        "搜索图片或视频…"
+                                    },
+                                )
                             },
                             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                             trailingIcon = {
                                 if (query.isNotEmpty()) {
                                     IconButton(onClick = {
                                         query = ""
-                                        onClearSearch()
+                                        optionalSearchMode.onClear()
                                     }) {
                                         Icon(Icons.Default.Clear, contentDescription = "清除")
                                     }
@@ -274,7 +285,7 @@ fun SearchScreen(
                                     else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        val visibleCount = if (isSemanticMode) filteredResults.size else keywordItems.itemCount
+                        val visibleCount = if (optionalModeActive) filteredOptionalResults.size else keywordItems.itemCount
                         if (query.isNotEmpty() && visibleCount > 0) {
                             Text(
                                 text = "$visibleCount",
@@ -284,43 +295,49 @@ fun SearchScreen(
                         }
                     }
 
-                    // Semantic search mode toggle row
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                        tonalElevation = 1.dp,
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                    if (optionalSearchMode.enabled && optionalSearchMode.copy != null) {
+                        val copy = optionalSearchMode.copy
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            tonalElevation = 1.dp,
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.AutoAwesome,
-                                contentDescription = null,
-                                tint = if (isSemanticMode) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = "语义搜索",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (isSemanticMode) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = if (isSemanticMode) FontWeight.SemiBold else FontWeight.Normal,
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                text = if (isSemanticMode) "（英文自然语言匹配图片内容）" else "（关键词匹配）",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline,
-                            )
-                            Spacer(Modifier.weight(1f))
-                            Switch(
-                                checked = isSemanticMode,
-                                onCheckedChange = onSemanticModeChange,
-                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = if (optionalModeActive) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = copy.modeLabel,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (optionalModeActive) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = if (optionalModeActive) FontWeight.SemiBold else FontWeight.Normal,
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = if (optionalModeActive) {
+                                        copy.activeModeDescription
+                                    } else {
+                                        copy.inactiveModeDescription
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline,
+                                )
+                                Spacer(Modifier.weight(1f))
+                                Switch(
+                                    checked = optionalModeActive,
+                                    onCheckedChange = optionalSearchMode.onActiveChange,
+                                )
+                            }
                         }
                     }
 
@@ -465,30 +482,38 @@ fun SearchScreen(
             ) {
                 Spacer(Modifier.height(48.dp))
                 Icon(
-                    imageVector = if (isSemanticMode) Icons.Default.AutoAwesome else Icons.Default.Search,
+                    imageVector = if (optionalModeActive) Icons.Default.AutoAwesome else Icons.Default.Search,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.size(64.dp),
                 )
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    text = if (isSemanticMode) "输入英文描述搜索图片内容" else "输入关键词搜索媒体文件",
+                    text = if (optionalModeActive) {
+                        requireNotNull(optionalSearchMode.copy).emptyTitle
+                    } else {
+                        "输入关键词搜索媒体文件"
+                    },
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.outline,
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = if (isSemanticMode) "如 sunset, beach, food, night view 等（语义模型对中文支持较差，请使用英文）"
-                        else "支持搜索文件名、拍摄设备、日期等",
+                    text = if (optionalModeActive) {
+                        requireNotNull(optionalSearchMode.copy).emptyDescription
+                    } else {
+                        "支持搜索文件名、拍摄设备、日期等"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
 
-                // 快捷搜索词卡片，对齐谷歌相册搜索页的灵感词区
-                if (isSemanticMode) {
+                // 可选模式可由 edition 提供快捷搜索建议，Lite 不注册该入口。
+                if (optionalModeActive) {
+                    val copy = requireNotNull(optionalSearchMode.copy)
                     Spacer(Modifier.height(32.dp))
                     Text(
-                        text = "试试搜索",
+                        text = copy.suggestionsTitle,
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
@@ -499,11 +524,11 @@ fun SearchScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        listOf("sunset", "beach", "food", "night view", "pet", "selfie", "landscape", "document").forEach { word ->
+                        copy.suggestions.forEach { word ->
                             AssistChip(
                                 onClick = {
                                     query = word
-                                    onSearch(word)
+                                    optionalSearchMode.onSearch(word)
                                 },
                                 label = { Text(word) },
                                 leadingIcon = {
@@ -521,7 +546,7 @@ fun SearchScreen(
             return@Scaffold
         }
 
-        val noResults = if (isSemanticMode) filteredResults.isEmpty()
+        val noResults = if (optionalModeActive) filteredOptionalResults.isEmpty()
             else keywordItems.itemCount == 0 && keywordItems.loadState.refresh !is androidx.paging.LoadState.Loading
         if (noResults) {
             Box(
@@ -531,25 +556,32 @@ fun SearchScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    // 语义搜索中：显示加载指示器
-                    if (isSemanticMode && semanticSearchState == SemanticSearchState.SEARCHING) {
+                    if (
+                        optionalModeActive &&
+                        optionalSearchMode.status == OptionalSearchStatus.SEARCHING
+                    ) {
                         CircularProgressIndicator()
                         Spacer(Modifier.height(16.dp))
-                        Text("正在语义搜索…", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.outline)
+                        Text(
+                            requireNotNull(optionalSearchMode.copy).loadingTitle,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.outline,
+                        )
                         return@Column
                     }
 
-                    // 根据语义搜索状态显示不同的提示信息
-                    val (titleText, subText) = if (isSemanticMode) {
-                        when (semanticSearchState) {
-                            SemanticSearchState.MODEL_NOT_READY ->
-                                "语义搜索模型加载失败" to "CLIP 模型加载未成功，请稍后重试。如持续失败请检查设备可用内存（需约 500MB）"
-                            SemanticSearchState.NO_INDEX ->
-                                "尚未建立语义索引" to "请先在设置中扫描并分析图片，完成后再使用语义搜索"
-                            SemanticSearchState.NO_RESULTS ->
-                                "未找到与 \"$query\" 语义匹配的媒体" to "尝试更换英文关键词，如 sunset, beach, food, night view"
+                    val (titleText, subText) = if (optionalModeActive) {
+                        val copy = requireNotNull(optionalSearchMode.copy)
+                        when (optionalSearchMode.status) {
+                            OptionalSearchStatus.UNAVAILABLE ->
+                                copy.unavailableTitle to copy.unavailableDescription
+                            OptionalSearchStatus.NO_INDEX ->
+                                copy.noIndexTitle to copy.noIndexDescription
+                            OptionalSearchStatus.NO_RESULTS ->
+                                copy.noResultsTitleTemplate.replace("{query}", query) to copy.noResultsDescription
                             else ->
-                                "未找到与 \"$query\" 语义匹配的媒体" to "语义搜索需要先完成媒体分析，请确保已扫描并分析图片"
+                                copy.fallbackNoResultsTitleTemplate.replace("{query}", query) to
+                                    copy.fallbackNoResultsDescription
                         }
                     } else {
                         "未找到匹配 \"$query\" 的媒体" to
@@ -581,14 +613,18 @@ fun SearchScreen(
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            if (isSemanticMode) {
-                items(filteredResults, key = { it.mediaItem.id }) { result ->
+            if (optionalModeActive) {
+                items(filteredOptionalResults, key = { it.mediaItem.id }) { result ->
                     SearchMediaThumbnail(
                         item = result.mediaItem,
-                        similarity = result.similarity,
+                        relevance = result.relevance,
                         showScore = true,
                         onClick = {
-                            onMediaClick(result.mediaItem, null, filteredResults.map { it.mediaItem.filePath })
+                            onMediaClick(
+                                result.mediaItem,
+                                null,
+                                filteredOptionalResults.map { it.mediaItem.filePath },
+                            )
                         },
                     )
                 }
@@ -612,7 +648,7 @@ fun SearchScreen(
 @Composable
 private fun SearchMediaThumbnail(
     item: MediaItem,
-    similarity: Float = 0f,
+    relevance: Float = 0f,
     showScore: Boolean = false,
     onClick: () -> Unit,
 ) {
@@ -652,12 +688,12 @@ private fun SearchMediaThumbnail(
                 )
             }
         }
-        // Semantic similarity score badge (Phase 4.1)
-        if (showScore && similarity > 0f) {
-            val scorePercent = (similarity * 100).toInt()
+        // 可选搜索模式的相关度分数徽标。
+        if (showScore && relevance > 0f) {
+            val scorePercent = (relevance * 100).toInt()
             val scoreColor = when {
-                similarity >= 0.7f -> Color(0xFF4CAF50) // 绿色 - 高匹配
-                similarity >= 0.4f -> Color(0xFFFF9800) // 橙色 - 中匹配
+                relevance >= 0.7f -> Color(0xFF4CAF50) // 绿色 - 高匹配
+                relevance >= 0.4f -> Color(0xFFFF9800) // 橙色 - 中匹配
                 else -> Color(0xFF9E9E9E) // 灰色 - 低匹配
             }
             Box(

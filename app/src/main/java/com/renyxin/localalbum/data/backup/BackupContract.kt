@@ -23,7 +23,12 @@ object BackupContract {
     // core + space identity 是读取任何 v3 的最低能力；生产完整 profile 另由 manifest.requiredProfile
     // 强制 deletion intent 等完整表。Fake DAO 仅允许生成测试用 core profile，不用于 App UI。
     val requiredCapabilities = setOf(CAP_CORE, CAP_EMBEDDING_SPACES)
-    val knownCapabilities = requiredCapabilities + setOf(CAP_PLUGIN_STATE, CAP_FACE_CLUSTERS, CAP_SEMANTIC_CLUSTERS)
+    val knownCapabilities = requiredCapabilities + setOf(
+        CAP_PLUGIN_STATE,
+        CAP_FACE_CLUSTERS,
+        CAP_SEMANTIC_CLUSTERS,
+        CAP_DELETION_INTENT,
+    )
 
     data class Table(
         val entry: String,
@@ -56,7 +61,8 @@ object BackupContract {
 
     /** 明确写入 manifest，审计时不依赖代码中的隐式约定。 */
     val excludedTables = listOf(
-        "thumbnail_cache_entries", "thumbnail_tasks", "analysis_tasks", "scan_runs", "scan_staging",
+        "thumbnail_cache_entries", "thumbnail_tasks", "analysis_tasks", "enhancement_outbox", "scan_runs", "scan_staging",
+        "media_change_events", "media_store_references",
         "import_media_staging", "import_face_staging", "import_embedding_staging", "import_fts_staging",
         "semantic_maintenance_runs", "duplicate_hash_staging", "duplicate_groups", "duplicate_members",
         "maintenance_runs:DUPLICATE_EXACT",

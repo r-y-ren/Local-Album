@@ -21,6 +21,47 @@ abstract class DeletionTombstoneDao {
     @Query("SELECT * FROM deletion_tombstones WHERE pathKey = :pathKey LIMIT 1")
     abstract suspend fun getByKey(pathKey: String): DeletionTombstoneEntity?
 
+    @Query("DELETE FROM deletion_tombstones WHERE pathKey IN (:pathKeys)")
+    protected abstract suspend fun deleteByKeys(pathKeys: List<String>): Int
+
+    /** Moves a durable physical-deletion intent with a stable MediaStore rename/move. */
+    @Transaction
+    open suspend fun moveToPath(
+        oldPath: String,
+        newPath: String,
+        newPathKey: String,
+        sourceVersion: String,
+        now: Long,
+    ): Boolean {
+        if (oldPath == newPath) return false
+        val byPath = getByPaths(listOf(oldPath, newPath)).associateBy { it.filePath }
+        val source = byPath[oldPath] ?: return false
+        val target = byPath[newPath]
+        deleteByKeys(listOfNotNull(source.pathKey, target?.pathKey).distinct())
+        val retained = target ?: source
+        upsert(
+            retained.copy(
+                pathKey = newPathKey,
+                filePath = newPath,
+                state = DeletionTombstoneEntity.STATE_PENDING,
+                attemptCount = 0,
+                nextRetryAt = 0L,
+                leaseUntil = 0L,
+                leaseToken = null,
+                lastErrorType = null,
+                lastErrorCode = null,
+                lastErrorMessage = null,
+                sourceVersion = sourceVersion,
+                deletedAtMs = maxOf(source.deletedAtMs, target?.deletedAtMs ?: 0L),
+                firstAttemptAt = 0L,
+                lastAttemptAt = 0L,
+                createdAt = minOf(source.createdAt, target?.createdAt ?: source.createdAt),
+                updatedAt = now,
+            ),
+        )
+        return true
+    }
+
     @Query("DELETE FROM deletion_tombstones WHERE filePath IN (:paths)")
     abstract suspend fun clearForRestore(paths: List<String>): Int
 

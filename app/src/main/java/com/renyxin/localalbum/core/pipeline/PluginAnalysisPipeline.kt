@@ -3,12 +3,6 @@ package com.renyxin.localalbum.core.pipeline
 import android.os.Debug
 import android.util.Log
 import com.renyxin.localalbum.core.concurrent.InferenceMetrics
-import com.renyxin.localalbum.core.plugin.capability.CapabilityRegistryV2
-import com.renyxin.localalbum.core.plugin.capability.FaceProvider
-import com.renyxin.localalbum.core.plugin.capability.SceneProvider
-import com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider
-import com.renyxin.localalbum.core.plugin.capability.QualityProvider
-import com.renyxin.localalbum.core.plugin.capability.OcrProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -23,6 +17,19 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.ConcurrentHashMap
 import com.renyxin.localalbum.data.db.entity.AnalysisStateEntity
+
+/** Exact, order-independent identity used to retire one automatic policy's durable task scopes. */
+data class RetiredPolicyScopeSelector(
+    val pipelinePrefix: String,
+    val planName: String,
+    val policyIdentity: String,
+) {
+    init {
+        require(pipelinePrefix.isNotBlank()) { "pipelinePrefix must not be blank" }
+        require(planName.isNotBlank()) { "planName must not be blank" }
+        require(policyIdentity.isNotBlank()) { "policyIdentity must not be blank" }
+    }
+}
 
 /**
  * 分析管道核心编排器（Phase 2 重构）。
@@ -51,155 +58,116 @@ class PluginAnalysisPipeline(
     val progressManager: ProgressManager = ProgressManager(),
     private val analysisStateDao: com.renyxin.localalbum.data.db.dao.AnalysisStateDao? = null,
     private val pipelineScopeOverride: String? = null,
+    private val compatiblePipelineScopes: List<String> = emptyList(),
+    val retiredAutomaticScopeSelectors: List<RetiredPolicyScopeSelector> = emptyList(),
     private val releaseStageResources: suspend (String) -> Unit = {},
 ) {
-    /** 当前任务身份范围；包含阶段集合、阶段模型版本及工厂注入的 Provider 身份。 */
+    /** Current task identity; policy, plan, Provider and stage versions are included for factory plans. */
     val pipelineScope: String by lazy {
         pipelineScopeOverride ?: buildPipelineScope(
             stages.map { "${it.stageId}@${it.modelVersion}" },
         )
     }
 
-    /** Worker 用它验证所有预期阶段都返回了结果，防止部分 DAG 被误判为完成。 */
+    /** Ordered aggregate scopes retained for tasks created before per-stage task identities. */
+    val claimablePipelineScopes: List<String> by lazy {
+        (listOf(pipelineScope) + compatiblePipelineScopes).distinct()
+    }
+
+    /** Worker uses this to reject partial DAG results as task completion. */
     val requiredStageIds: Set<String> by lazy { stages.mapTo(linkedSetOf()) { it.stageId } }
+
+    /**
+     * Durable identity for each admitted Stage. The scope includes the complete policy/provider
+     * pipeline identity, so a policy or Provider change cannot make a stale Stage task claimable.
+     */
+    val stageTaskScopes: Map<String, String> by lazy {
+        sortedStages.associateTo(linkedMapOf()) { stage ->
+            stage.stageId to buildStageTaskScope(
+                pipelineScope = pipelineScope,
+                stageId = stage.stageId,
+                modelVersion = stage.modelVersion,
+            )
+        }
+    }
+
+    /**
+     * Legacy aggregate identities run first during an in-place upgrade; new Stage identities then
+     * follow topological order. Stage caches make overlapping upgrade work idempotent.
+     */
+    val claimableTaskScopes: List<String> by lazy {
+        (claimablePipelineScopes + stageTaskScopes.values).distinct()
+    }
+
+    /** Current outbox rows expand per Stage; legacy compatible rows preserve aggregate semantics. */
+    fun taskScopesForOutbox(sourcePipelineScope: String): List<String> = when {
+        sourcePipelineScope == pipelineScope -> stageTaskScopes.values.toList()
+        sourcePipelineScope in compatiblePipelineScopes -> listOf(sourcePipelineScope)
+        else -> emptyList()
+    }
+
+    /** Maps one durable task identity to exactly the Stage set that is allowed to satisfy it. */
+    fun requiredStageIdsForTaskScope(taskScope: String): Set<String> {
+        val stageId = stageTaskScopes.entries.firstOrNull { it.value == taskScope }?.key
+        return when {
+            stageId != null -> setOf(stageId)
+            taskScope in claimablePipelineScopes -> requiredStageIds
+            else -> emptySet()
+        }
+    }
+
     companion object {
         private const val TAG = "PluginPipeline"
         private const val PIPELINE_SCOPE_VERSION = 1
+        private const val STAGE_TASK_SCOPE_VERSION = 1
 
         internal fun buildPipelineScope(parts: List<String>): String =
             "pipeline:v$PIPELINE_SCOPE_VERSION|" + parts.sorted().joinToString("|")
 
-        /**
-         * 工厂方法（Phase 2 重构）：从 [CapabilityRegistry] 获取激活的 Provider，
-         * 组装核心分析阶段。
-         *
-         * Similarity 保持固定实现，不参与 Provider 槽位。
-         * 扩展插件（换脸、风格迁移等）不再纳入批处理管道。
-         *
-         * @param mediaDao 媒体 DAO
-         * @param faceDao 人脸 DAO
-         * @param embeddingDao 嵌入 DAO
-         * @param capabilityRegistry 能力注册表（获取各槽位的激活 Provider）
-         * @return 组装完成的 [PluginAnalysisPipeline]
-         */
+        internal fun buildStageTaskScope(
+            pipelineScope: String,
+            stageId: String,
+            modelVersion: Int,
+        ): String = "$pipelineScope|stage-task:v$STAGE_TASK_SCOPE_VERSION=$stageId@$modelVersion"
+
         fun create(
-            mediaDao: com.renyxin.localalbum.data.db.dao.MediaDao,
-            faceDao: com.renyxin.localalbum.data.db.dao.FaceDao,
-            faceClusterDao: com.renyxin.localalbum.data.db.dao.FaceClusterDao,
-            embeddingDao: com.renyxin.localalbum.data.db.dao.EmbeddingDao,
-            capabilityRegistry: CapabilityRegistryV2,
+            plan: AnalysisStagePlan,
             analysisStateDao: com.renyxin.localalbum.data.db.dao.AnalysisStateDao? = null,
-            semanticDao: com.renyxin.localalbum.data.db.dao.SemanticDao? = null,
+            retiredAutomaticScopeSelectors: List<RetiredPolicyScopeSelector> = emptyList(),
             releaseStageResources: suspend (String) -> Unit = {},
         ): PluginAnalysisPipeline {
-            val stages = mutableListOf<AnalysisStage>()
-
-            // 动态遍历已注册槽位，按 slotId 映射到对应 Stage 构造
-            for (metadata in capabilityRegistry.slotMetadataList.value) {
-                val stage = when (metadata.slotId) {
-                    "face" -> {
-                        val provider = capabilityRegistry.getActiveProvider<FaceProvider>("face")
-                        if (provider != null) {
-                            com.renyxin.localalbum.core.pipeline.stages.FaceStage(
-                                provider,
-                                mediaDao,
-                                faceDao,
-                                faceClusterDao,
-                            )
-                        } else {
-                            Log.w(TAG, "人脸检测 Provider 未就绪，跳过 FaceStage")
-                            null
-                        }
-                    }
-                    "scene" -> {
-                        val provider = capabilityRegistry.getActiveProvider<SceneProvider>("scene")
-                        if (provider != null) {
-                            com.renyxin.localalbum.core.pipeline.stages.SceneStage(provider, mediaDao)
-                        } else {
-                            Log.w(TAG, "场景分类 Provider 未就绪，跳过 SceneStage")
-                            null
-                        }
-                    }
-                    "semantic" -> {
-                        val provider = capabilityRegistry.getActiveProvider<SemanticEmbedProvider>("semantic")
-                        if (provider != null) {
-                            com.renyxin.localalbum.core.pipeline.stages.SemanticStage(
-                                provider,
-                                mediaDao,
-                                embeddingDao,
-                                semanticDao = semanticDao,
-                            )
-                        } else {
-                            Log.w(TAG, "语义嵌入 Provider 未就绪，跳过 SemanticStage")
-                            null
-                        }
-                    }
-                    "quality" -> {
-                        val provider = capabilityRegistry.getActiveProvider<QualityProvider>("quality")
-                        if (provider != null) {
-                            com.renyxin.localalbum.core.pipeline.stages.QualityStage(provider, mediaDao)
-                        } else {
-                            Log.w(TAG, "质量评估 Provider 未就绪，跳过 QualityStage")
-                            null
-                        }
-                    }
-                    "ocr" -> {
-                        val provider = capabilityRegistry.getActiveProvider<OcrProvider>("ocr")
-                        if (provider != null) {
-                            com.renyxin.localalbum.core.pipeline.stages.OcrStage(provider, mediaDao)
-                        } else {
-                            Log.w(TAG, "OCR Provider 未就绪，跳过 OcrStage")
-                            null
-                        }
-                    }
-                    else -> {
-                        Log.d(TAG, "跳过未知槽位: ${metadata.slotId}")
-                        null
-                    }
-                }
-                if (stage != null) stages.add(stage)
+            val compatibilityScopes = if (plan.claimLegacyFullAnalysisTasks) {
+                listOf(
+                    buildPipelineScope(plan.legacyScopeParts),
+                    com.renyxin.localalbum.data.db.entity.AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE,
+                )
+            } else {
+                emptyList()
             }
-
-            val activeProviders = capabilityRegistry.slotMetadataList.value
-                .filter { metadata -> stages.any { it.stageId.substringAfter(':') == metadata.slotId } }
-                .map { metadata -> "${metadata.slotId}=${metadata.activeProviderId}" }
-            val stageVersions = stages.map { stage -> "${stage.stageId}@${stage.modelVersion}" }
             return PluginAnalysisPipeline(
-                stages = stages,
+                stages = plan.stages,
                 analysisStateDao = analysisStateDao,
-                pipelineScopeOverride = buildPipelineScope(activeProviders + stageVersions),
+                pipelineScopeOverride = buildPipelineScope(plan.scopeParts),
+                compatiblePipelineScopes = compatibilityScopes,
+                retiredAutomaticScopeSelectors = retiredAutomaticScopeSelectors.distinct(),
                 releaseStageResources = releaseStageResources,
             )
         }
 
         /**
-         * @deprecated 使用带 FaceClusterDao 的 create 工厂替代。
-         * 保留用于向后兼容，扩展插件不再参与批处理管道。
+         * Selects aggregate and per-Stage tasks from one retired policy without assuming where
+         * sorted scope parts occur. DAO matching treats plan and policy as delimiter-bounded tokens,
+         * preventing a Lite retirement from touching Full, manual, or another policy version.
          */
-        @Deprecated(
-            message = "使用 create(MediaDao, FaceDao, EmbeddingDao, CapabilityRegistry) 替代",
-            replaceWith = ReplaceWith("create(mediaDao, faceDao, embeddingDao, capabilityRegistry)"),
+        fun retiredPolicyScopeSelector(
+            planType: AnalysisPlanType,
+            policyId: String,
+            policyVersion: Int,
+        ): RetiredPolicyScopeSelector = RetiredPolicyScopeSelector(
+            pipelinePrefix = "pipeline:v$PIPELINE_SCOPE_VERSION|",
+            planName = planType.persistedName,
+            policyIdentity = "$policyId@$policyVersion",
         )
-        @Suppress("UNUSED_PARAMETER")
-        fun create(
-            context: android.content.Context,
-            mediaDao: com.renyxin.localalbum.data.db.dao.MediaDao,
-            faceDao: com.renyxin.localalbum.data.db.dao.FaceDao,
-            faceClusterDao: com.renyxin.localalbum.data.db.dao.FaceClusterDao,
-            embeddingDao: com.renyxin.localalbum.data.db.dao.EmbeddingDao,
-            featureStoreDao: com.renyxin.localalbum.data.db.dao.FeatureStoreDao,
-            pluginRegistry: com.renyxin.localalbum.core.plugin.PluginRegistry,
-        ): PluginAnalysisPipeline {
-            // 降级：使用硬编码内置分析器（兼容旧代码路径）
-            val builtinStages: List<AnalysisStage> = listOf(
-                com.renyxin.localalbum.core.pipeline.stages.BuiltinFaceStage(context, mediaDao, faceDao, faceClusterDao),
-                com.renyxin.localalbum.core.pipeline.stages.BuiltinQualityStage(mediaDao),
-                com.renyxin.localalbum.core.pipeline.stages.BuiltinSceneStage(mediaDao),
-                com.renyxin.localalbum.core.pipeline.stages.BuiltinSemanticStage(mediaDao, embeddingDao),
-                com.renyxin.localalbum.core.pipeline.stages.BuiltinOcrStage(context, mediaDao),
-            )
-            return PluginAnalysisPipeline(stages = builtinStages)
-        }
     }
 
     /** 管道整体状态枚举 */
@@ -460,6 +428,31 @@ class PluginAnalysisPipeline(
     suspend fun runIncremental(
         incrementalPaths: List<String>,
         allPaths: List<String>,
+    ): Map<String, StageResult> = runIncrementalStages(
+        incrementalPaths = incrementalPaths,
+        allPaths = allPaths,
+        executionStages = sortedStages,
+    )
+
+    /** Executes only the Stage represented by a new task scope, or all stages for a legacy scope. */
+    suspend fun runIncrementalForTaskScope(
+        taskScope: String,
+        incrementalPaths: List<String>,
+        allPaths: List<String>,
+    ): Map<String, StageResult> {
+        val requiredStageIds = requiredStageIdsForTaskScope(taskScope)
+        require(requiredStageIds.isNotEmpty()) { "Unknown analysis task scope: $taskScope" }
+        return runIncrementalStages(
+            incrementalPaths = incrementalPaths,
+            allPaths = allPaths,
+            executionStages = sortedStages.filter { it.stageId in requiredStageIds },
+        )
+    }
+
+    private suspend fun runIncrementalStages(
+        incrementalPaths: List<String>,
+        allPaths: List<String>,
+        executionStages: List<AnalysisStage>,
     ): Map<String, StageResult> {
         if (incrementalPaths.isEmpty()) {
             Log.i(TAG, "增量文件列表为空，跳过扫描")
@@ -472,16 +465,21 @@ class PluginAnalysisPipeline(
         val results = ConcurrentHashMap<String, StageResult>()
 
         // 初始化 ProgressManager（使用可能的最大总文件数来保证进度平滑）
-        val stageIds = sortedStages.map { it.stageId }
+        val stageIds = executionStages.map { it.stageId }
         val maxTotalFiles = maxOf(incrementalPaths.size, allPaths.size)
         progressManager.beginPipeline(totalFiles = maxTotalFiles, stageIds = stageIds)
 
         Log.i(
             TAG,
-            "增量扫描开始：增量=${incrementalPaths.size}，全量=${allPaths.size}，阶段=${sortedStages.size}",
+            "增量扫描开始：增量=${incrementalPaths.size}，全量=${allPaths.size}，阶段=${executionStages.size}",
         )
 
-        runStagesWithSafeParallelism(incrementalPaths, allPaths, results)
+        runStagesWithSafeParallelism(
+            incrementalPaths = incrementalPaths,
+            allPaths = allPaths,
+            results = results,
+            executionStages = executionStages,
+        )
 
         // 通知 ProgressManager 管道完成
         progressManager.onPipelineComplete()
@@ -502,8 +500,9 @@ class PluginAnalysisPipeline(
         incrementalPaths: List<String>,
         allPaths: List<String>,
         results: MutableMap<String, StageResult>,
+        executionStages: List<AnalysisStage> = sortedStages,
     ) = coroutineScope {
-        val indexedStages = sortedStages.withIndex().associateBy { it.value.stageId }
+        val indexedStages = executionStages.withIndex().associateBy { it.value.stageId }
         val face = indexedStages[AnalysisStage.STAGE_FACE]
         val quality = indexedStages[AnalysisStage.STAGE_QUALITY]
         val safelyPairedIds = if (
@@ -517,20 +516,20 @@ class PluginAnalysisPipeline(
         }
 
         var safePairExecuted = false
-        sortedStages.forEachIndexed { stageIdx, stage ->
+        executionStages.forEachIndexed { stageIdx, stage ->
             if (stage.stageId in safelyPairedIds) {
                 if (!safePairExecuted) {
                     safePairExecuted = true
                     listOf(requireNotNull(face), requireNotNull(quality)).map { indexed ->
                         async {
                             val targetPaths = if (indexed.value.isCacheable) incrementalPaths else allPaths
-                            runStage(indexed.value, indexed.index, sortedStages.size, targetPaths, results)
+                            runStage(indexed.value, indexed.index, executionStages.size, targetPaths, results)
                         }
                     }.awaitAll()
                 }
             } else {
                 val targetPaths = if (stage.isCacheable) incrementalPaths else allPaths
-                runStage(stage, stageIdx, sortedStages.size, targetPaths, results)
+                runStage(stage, stageIdx, executionStages.size, targetPaths, results)
             }
         }
     }

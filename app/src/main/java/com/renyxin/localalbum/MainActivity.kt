@@ -32,6 +32,7 @@ import com.renyxin.localalbum.ui.LocalAlbumApp
 import com.renyxin.localalbum.ui.theme.LocalAlbumTheme
 import com.renyxin.localalbum.ui.theme.ThemeMode
 import com.renyxin.localalbum.ui.vm.AlbumViewModel
+import com.renyxin.localalbum.ui.vm.FaceSwapViewModel
 import com.renyxin.localalbum.ui.vm.PluginViewModel
 import com.renyxin.localalbum.ui.vm.SettingsViewModel
 
@@ -74,6 +75,13 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private val faceSwapViewModel: FaceSwapViewModel by viewModels {
+        FaceSwapViewModel.Factory(
+            capabilityRegistry = container.capabilityRegistry,
+            extensionRegistry = container.extensionPluginRegistry,
+        )
+    }
+
     private var hasPermission = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -99,9 +107,13 @@ class MainActivity : ComponentActivity() {
                         LocalAlbumApp(
                             albumViewModel = albumViewModel,
                             settingsViewModel = settingsViewModel,
-                            pluginViewModel = pluginViewModel,
-                            // 修复：pluginAnalysisPipeline 已为非空单例，去除多余的 ?.；
-                            // 此处与 HybridIndexer、AlbumViewModel 共用同一管线的 progressManager。
+                            pluginViewModel = if (container.editionFeatures.showPluginManager) {
+                                pluginViewModel
+                            } else {
+                                null
+                            },
+                            faceSwapViewModel = faceSwapViewModel,
+                            editionFeatures = container.editionFeatures,
                             progressManager = container.pluginAnalysisPipeline.progressManager,
                         )
                     }

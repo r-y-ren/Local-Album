@@ -1,0 +1,31 @@
+{
+  "configVersion": "lite-v1-baseline-v1",
+  "sampleCount": 5,
+  "datasets": [
+    { "id": "full-1000", "mediaCount": 1000 },
+    { "id": "full-10000", "mediaCount": 10000 }
+  ],
+  "scenarios": [
+    "full_cold",
+    "full_warm",
+    "incremental_no_change",
+    "incremental_single_add",
+    "incremental_single_modify",
+    "incremental_single_delete",
+    "incremental_batch_add_100",
+    "incremental_rename_move",
+    "observer_event_storm",
+    "process_restart_resume"
+  ],
+  "thresholdsMs": {
+    "full1kTtiP95": 3000,
+    "full1kCoreP95": 30000,
+    "full10kTtiP95": 5000,
+    "full10kCoreP95": 240000,
+    "noChangeIncrementalCoreP95": 1000,
+    "singleAddCoreP95": 2000,
+    "singleDeleteCoreP95": 1500,
+    "batch100CoreP95": 10000
+  },
+  "status": "provisional_until_device_measurement"
+}

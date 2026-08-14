@@ -33,6 +33,7 @@ object InferenceMetrics {
         val averageMs: Double,
         val p50Ms: Long,
         val p95Ms: Long,
+        val p99Ms: Long,
     )
 
     private class Aggregate {
@@ -68,8 +69,9 @@ object InferenceMetrics {
                 minMs = if (samples == 0L) 0L else minMs.get(),
                 maxMs = maxMs.get(),
                 averageMs = if (samples == 0L) 0.0 else total.toDouble() / samples,
-                p50Ms = percentile(sortedSamples, 0.50),
-                p95Ms = percentile(sortedSamples, 0.95),
+                p50Ms = percentile(sortedSamples, 50),
+                p95Ms = percentile(sortedSamples, 95),
+                p99Ms = percentile(sortedSamples, 99),
             )
         }
     }
@@ -121,7 +123,8 @@ object InferenceMetrics {
                 TAG,
                 "[$reason] operation=${item.operation} backend=${item.backend} " +
                     "count=${item.count} failures=${item.failures} avgMs=${"%.2f".format(item.averageMs)} " +
-                    "p50Ms=${item.p50Ms} p95Ms=${item.p95Ms} minMs=${item.minMs} maxMs=${item.maxMs}",
+                    "p50Ms=${item.p50Ms} p95Ms=${item.p95Ms} p99Ms=${item.p99Ms} " +
+                    "minMs=${item.minMs} maxMs=${item.maxMs}",
             )
         }
     }
@@ -129,10 +132,13 @@ object InferenceMetrics {
     private fun elapsedMsSince(startedAtNanos: Long): Long =
         (SystemClock.elapsedRealtimeNanos() - startedAtNanos) / NANOS_PER_MILLISECOND
 
-    private fun percentile(sortedSamples: List<Long>, fraction: Double): Long {
+    /** Nearest-rank percentile, shared with the scan benchmark report convention. */
+    private fun percentile(sortedSamples: List<Long>, percentile: Int): Long {
         if (sortedSamples.isEmpty()) return 0L
-        val index = kotlin.math.ceil((sortedSamples.size - 1) * fraction).toInt()
-        return sortedSamples[index]
+        val rank = kotlin.math.ceil(percentile / 100.0 * sortedSamples.size)
+            .toInt()
+            .coerceAtLeast(1)
+        return sortedSamples[rank - 1]
     }
 
     private const val MAX_PERCENTILE_SAMPLES = 512

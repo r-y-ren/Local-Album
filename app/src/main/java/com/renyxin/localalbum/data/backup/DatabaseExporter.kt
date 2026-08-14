@@ -438,6 +438,7 @@ class DatabaseExporter(
             val obj = JSONObject()
             obj.put("filePath", fts.filePath)
             obj.put("fileName", fts.fileName)
+            obj.put("parentPath", fts.parentPath)
             obj.putOpt("ocrText", fts.ocrText)
             obj.putOpt("make", fts.make)
             obj.putOpt("model", fts.model)

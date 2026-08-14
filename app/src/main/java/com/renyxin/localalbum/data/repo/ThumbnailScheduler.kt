@@ -52,6 +52,8 @@ class ThumbnailScheduler(
                     updatedAt = timestamp,
                 ),
             )
+            // UI-visible work is explicitly unowned by an automatic scan and uses the
+            // interactive lane; background pre-generation is scheduled only by handoff.
             ThumbnailWorker.enqueue(context)
             if (recentRequests.size > MAX_RECENT_KEYS) {
                 recentRequests.entries.removeIf { timestamp - it.value >= REQUEST_COOLDOWN_MS }

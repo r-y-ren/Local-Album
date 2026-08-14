@@ -598,7 +598,7 @@ class PluginViewModel(
      * - 人脸聚类：取 `face` 槽位激活 Provider 的 [ModelReadiness]
      * - 地图聚类：纯 DBSCAN 算法，恒为 [ModelReadiness.ALWAYS_READY]
      * - 语义识别：取 `semantic` 槽位激活 Provider（EVA02-CLIP，内置即用）的状态
-     * - 换脸：InSwapper 插件就绪 且 `face` 槽位就绪 时为 [ModelReadiness.READY]
+     * - 换脸：`READY` 表示 descriptor 与兼容 FaceProvider 可调用；模型仍在点击后按需加载
      */
     val coreFeatureStatuses: StateFlow<List<CoreFeatureStatus>> =
         combine(slotMetadataList, extPluginStates) { slots, extStates ->
@@ -620,14 +620,20 @@ class PluginViewModel(
             ?.firstOrNull { it.providerId == semanticSlot.activeProviderId }
         val semanticReadiness = semanticActive?.modelStatus ?: ModelReadiness.NOT_DOWNLOADED
 
-        // 换脸：InSwapper 内置扩展插件就绪 + 人脸能力就绪
+        // Descriptor availability is independent from model residency. Bundled face/InSwapper
+        // models may still be NOT_DOWNLOADED here because application startup intentionally does
+        // not copy them; the admitted interactive request prepares only those model IDs.
         val inswapperReady = extStates.any {
             it.pluginId == "plugin.inswapper" && it.isReady
         }
+        val activeFaceProvider = capabilityRegistry.getActiveProvider<
+            com.renyxin.localalbum.core.plugin.capability.FaceProvider
+        >("face")
         val faceSwapReadiness = when {
-            inswapperReady && faceReadiness == ModelReadiness.READY -> ModelReadiness.READY
-            faceReadiness == ModelReadiness.ERROR -> ModelReadiness.ERROR
-            else -> ModelReadiness.NOT_DOWNLOADED
+            inswapperReady &&
+                activeFaceProvider?.embeddingDim == 512 &&
+                activeFaceProvider.supportsFivePointLandmarks -> ModelReadiness.READY
+            else -> ModelReadiness.ERROR
         }
 
         return listOf(
@@ -654,9 +660,9 @@ class PluginViewModel(
                 featureId = "face_swap",
                 displayName = "换脸功能",
                 icon = "🔄",
-                description = "InSwapper 换脸，需人脸检测与换脸模型均就绪",
+                description = "InSwapper 交互换脸；点击后按需加载，操作结束即释放",
                 readiness = faceSwapReadiness,
-                modelDetail = "inswapper_128.onnx",
+                modelDetail = "inswapper_128.onnx（按需，不常驻）",
                 actionable = true,
             ),
         )
@@ -695,7 +701,7 @@ class PluginViewModel(
             try {
                 val plugin = extensionRegistry.getPlugin("plugin.inswapper")
                 if (plugin == null || !plugin.isReady()) {
-                    _faceSwapState.value = FaceSwapUiState.Error("换脸插件未就绪，请确认模型已加载")
+                    _faceSwapState.value = FaceSwapUiState.Error("换脸插件描述符尚未注册，请稍后重试")
                     return@launch
                 }
                 // N4: 换脸硬性依赖 5 关键点做仿射对齐。若当前激活的人脸 Provider 不支持关键点
@@ -708,7 +714,13 @@ class PluginViewModel(
                 }
                 if (activeFace.embeddingDim != 512) {
                     _faceSwapState.value = FaceSwapUiState.Error(
-                        "换脸失败：当前人脸 Provider「${activeFace.displayName}」嵌入维度 ${activeFace.embeddingDim}≠512，请切换为 InsightFace/ArcFace 系 Provider"
+                        "换脸失败：当前人脸 Provider「${activeFace.displayName}」嵌入维度 ${activeFace.embeddingDim}≠512，请切换为 InsightFace Provider"
+                    )
+                    return@launch
+                }
+                if (!activeFace.supportsFivePointLandmarks) {
+                    _faceSwapState.value = FaceSwapUiState.Error(
+                        "换脸失败：当前人脸 Provider「${activeFace.displayName}」不提供五点关键点，请切换为 InsightFace Provider"
                     )
                     return@launch
                 }

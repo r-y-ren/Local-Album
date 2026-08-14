@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.renyxin.localalbum.LocalAlbumApplication
 import com.renyxin.localalbum.core.analysis.BoundedDuplicateBatchProcessor
+import com.renyxin.localalbum.core.concurrent.EnhancementResourceGate
 import com.renyxin.localalbum.core.analysis.ExactFileHasher
 import com.renyxin.localalbum.data.db.entity.DuplicateHashStagingEntity
 import com.renyxin.localalbum.data.db.entity.MaintenanceRunEntity
@@ -27,70 +28,115 @@ class DuplicateMaintenanceWorker(context: Context, params: WorkerParameters) : C
         val mediaDao = db.mediaDao()
         val dao = db.duplicateMaintenanceDao()
         val taskType = MaintenanceRunEntity.TASK_DUPLICATE_EXACT
-        val run = dao.resumableRun(taskType) ?: createRun(db, taskType)
-        val generation = run.generation
 
         return try {
-            // 若进程在结果物化前后中断，FINALIZING 可幂等重建本 generation 并原子发布。
-            if (run.status == MaintenanceRunEntity.STATUS_FINALIZING) {
-                return if (dao.finalizeAndPublish(taskType, generation, System.currentTimeMillis())) {
-                    Result.success()
-                } else {
-                    Result.retry()
-                }
-            }
-            var cursor = run.cursorPath
             var batches = 0
             while (batches < MAX_BATCHES_PER_WORK && !isStopped) {
-                val candidates = mediaDao.getDuplicateCandidatesAfter(cursor, BATCH_SIZE)
-                if (candidates.isEmpty()) {
-                    dao.markFinalizing(taskType, generation, System.currentTimeMillis())
-                    val published = dao.finalizeAndPublish(taskType, generation, System.currentTimeMillis())
-                    return if (published) Result.success() else Result.retry()
+                if (
+                    app.container.albumRepository.isCoreScanActive() ||
+                    EnhancementResourceGate.isAutomaticWorkBlocked
+                ) {
+                    return Result.retry()
                 }
-                val output = BoundedDuplicateBatchProcessor.process(
-                    input = candidates.map { BoundedDuplicateBatchProcessor.Input(it.filePath, it.fileSize) },
-                    maxBatchSize = BATCH_SIZE,
-                    hash = { ExactFileHasher.sha256(File(it)) },
-                )
-                val byPath = candidates.associateBy { it.filePath }
-                val hashes = output.map { hashed ->
-                    val source = requireNotNull(byPath[hashed.path])
-                    DuplicateHashStagingEntity(
-                        generation = generation,
-                        filePath = hashed.path,
-                        fileSize = hashed.fileSize,
-                        exactHash = hashed.exactHash,
-                        qualityScore = source.qualityScore,
-                        modifiedAtMs = source.modifiedAtMs,
-                    )
+                val completed = EnhancementResourceGate.tryWithAutomaticEnhancement {
+                    // Run recovery/creation is inside the same lane as hashing and state commits;
+                    // backup maintenance can never replace these tables between lifecycle steps.
+                    val run = dao.resumableRun(taskType) ?: createRun(db, taskType)
+                    val generation = run.generation
+                    try {
+                        // 若进程在结果物化前后中断，FINALIZING 可幂等重建本 generation 并原子发布。
+                        if (run.status == MaintenanceRunEntity.STATUS_FINALIZING) {
+                            val published = dao.finalizeAndPublish(
+                                taskType,
+                                generation,
+                                System.currentTimeMillis(),
+                            )
+                            return@tryWithAutomaticEnhancement if (published) {
+                                BatchResult.DONE
+                            } else {
+                                BatchResult.RETRY
+                            }
+                        }
+
+                        val candidates = mediaDao.getDuplicateCandidatesAfter(
+                            run.cursorPath,
+                            BATCH_SIZE,
+                        )
+                        if (candidates.isEmpty()) {
+                            dao.markFinalizing(taskType, generation, System.currentTimeMillis())
+                            val published = dao.finalizeAndPublish(
+                                taskType,
+                                generation,
+                                System.currentTimeMillis(),
+                            )
+                            return@tryWithAutomaticEnhancement if (published) {
+                                BatchResult.DONE
+                            } else {
+                                BatchResult.RETRY
+                            }
+                        }
+                        val output = BoundedDuplicateBatchProcessor.process(
+                            input = candidates.map {
+                                BoundedDuplicateBatchProcessor.Input(it.filePath, it.fileSize)
+                            },
+                            maxBatchSize = BATCH_SIZE,
+                            hash = { ExactFileHasher.sha256(File(it)) },
+                        )
+                        val byPath = candidates.associateBy { it.filePath }
+                        val hashes = output.map { hashed ->
+                            val source = requireNotNull(byPath[hashed.path])
+                            DuplicateHashStagingEntity(
+                                generation = generation,
+                                filePath = hashed.path,
+                                fileSize = hashed.fileSize,
+                                exactHash = hashed.exactHash,
+                                qualityScore = source.qualityScore,
+                                modifiedAtMs = source.modifiedAtMs,
+                            )
+                        }
+                        val nextCursor = candidates.last().filePath
+                        db.withTransaction {
+                            if (hashes.isNotEmpty()) dao.insertHashes(hashes)
+                            check(
+                                dao.advanceCursor(
+                                    taskType = taskType,
+                                    generation = generation,
+                                    cursorPath = nextCursor,
+                                    scanned = candidates.size,
+                                    eligible = hashes.size,
+                                    failed = candidates.size - hashes.size,
+                                    now = System.currentTimeMillis(),
+                                ) == 1,
+                            ) { "维护任务状态已改变" }
+                        }
+                        BatchResult.CONTINUE
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (error: Throwable) {
+                        dao.markFailed(
+                            taskType,
+                            generation,
+                            error.message?.take(240) ?: error.javaClass.simpleName,
+                            System.currentTimeMillis(),
+                        )
+                        throw error
+                    }
                 }
-                val nextCursor = candidates.last().filePath
-                db.withTransaction {
-                    if (hashes.isNotEmpty()) dao.insertHashes(hashes)
-                    check(
-                        dao.advanceCursor(
-                            taskType = taskType,
-                            generation = generation,
-                            cursorPath = nextCursor,
-                            scanned = candidates.size,
-                            eligible = hashes.size,
-                            failed = candidates.size - hashes.size,
-                            now = System.currentTimeMillis(),
-                        ) == 1,
-                    ) { "维护任务状态已改变" }
+                when (completed) {
+                    BatchResult.DONE -> return Result.success()
+                    BatchResult.CONTINUE -> batches++
+                    BatchResult.RETRY, null -> return Result.retry()
                 }
-                cursor = nextCursor
-                batches++
             }
             Result.retry()
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
-        } catch (error: Throwable) {
-            dao.markFailed(taskType, generation, error.message?.take(240) ?: error.javaClass.simpleName, System.currentTimeMillis())
+        } catch (_: Throwable) {
             Result.retry()
         }
     }
+
+    private enum class BatchResult { CONTINUE, DONE, RETRY }
 
     private suspend fun createRun(
         db: com.renyxin.localalbum.data.db.AppDatabase,

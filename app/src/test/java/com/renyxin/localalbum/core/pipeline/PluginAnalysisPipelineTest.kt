@@ -290,6 +290,58 @@ class PluginAnalysisPipelineTest {
         assertEquals(3, results["cluster"]?.successCount)
     }
 
+    @Test
+    fun `post-core outbox expands to independent stage task identities`() = runBlocking {
+        val executed = mutableListOf<String>()
+        val scene = LambdaStage(AnalysisStage.STAGE_SCENE, "Scene") { _, _ ->
+            executed += AnalysisStage.STAGE_SCENE
+            StageResult(1, 0)
+        }
+        val quality = LambdaStage(AnalysisStage.STAGE_QUALITY, "Quality") { _, _ ->
+            executed += AnalysisStage.STAGE_QUALITY
+            StageResult(1, 0)
+        }
+        val pipeline = PluginAnalysisPipeline(stages = listOf(scene, quality))
+
+        val taskScopes = pipeline.taskScopesForOutbox(pipeline.pipelineScope)
+        assertEquals(2, taskScopes.size)
+        assertEquals(2, taskScopes.toSet().size)
+        assertTrue(taskScopes.all { "stage-task:v1=" in it })
+
+        val sceneScope = pipeline.stageTaskScopes.getValue(AnalysisStage.STAGE_SCENE)
+        val results = pipeline.runIncrementalForTaskScope(
+            taskScope = sceneScope,
+            incrementalPaths = listOf("/scene.jpg"),
+            allPaths = emptyList(),
+        )
+
+        assertEquals(setOf(AnalysisStage.STAGE_SCENE), results.keys)
+        assertEquals(listOf(AnalysisStage.STAGE_SCENE), executed)
+        assertEquals(setOf(AnalysisStage.STAGE_SCENE), pipeline.requiredStageIdsForTaskScope(sceneScope))
+    }
+
+    @Test
+    fun `legacy aggregate task identity still executes all admitted stages`() = runBlocking {
+        val executed = mutableListOf<String>()
+        val stages = listOf("scene", "quality").map { stageId ->
+            LambdaStage(stageId, stageId) { _, _ ->
+                executed += stageId
+                StageResult(1, 0)
+            }
+        }
+        val pipeline = PluginAnalysisPipeline(stages = stages)
+
+        val results = pipeline.runIncrementalForTaskScope(
+            taskScope = pipeline.pipelineScope,
+            incrementalPaths = listOf("/legacy.jpg"),
+            allPaths = emptyList(),
+        )
+
+        assertEquals(setOf("scene", "quality"), results.keys)
+        assertEquals(setOf("scene", "quality"), executed.toSet())
+        assertEquals(setOf("scene", "quality"), pipeline.requiredStageIdsForTaskScope(pipeline.pipelineScope))
+    }
+
     // ---- 辅助工具 ----
 
     private fun mockStage(

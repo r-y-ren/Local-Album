@@ -10,6 +10,7 @@ import com.renyxin.localalbum.core.concurrent.AccelerationBackend
 import com.renyxin.localalbum.core.concurrent.AccelerationPolicyRegistry
 import com.renyxin.localalbum.core.concurrent.InferenceMetrics
 import com.renyxin.localalbum.core.plugin.PluginManifest
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -62,6 +63,8 @@ class ModelManagerImpl(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
+    /** Serializes consumer admission with exact eviction so a new consumer cannot race a close. */
+    private val consumerLifecycle = ModelConsumerLifecycle()
 
     // ---- 内部存储 ----
 
@@ -139,7 +142,7 @@ class ModelManagerImpl(
 
     // ---- ONNX 环境 ----
 
-    private val ortEnv: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
+    private val ortEnv: OrtEnvironment by lazy { NativeAiRuntime.getOrtEnvironment() }
 
     /**
      * 创建配置好的 ONNX SessionOptions：intra/inter op 线程设为 1（配合文件级并行，
@@ -217,13 +220,18 @@ class ModelManagerImpl(
         }
     }
 
-    private fun createTfliteInterpreter(buffer: MappedByteBuffer, modelId: String): Interpreter = try {
-        Interpreter(buffer, createTfliteOptions(modelId))
-    } catch (error: Throwable) {
-        if (tflitePolicy(modelId).effectiveBackend != AccelerationBackend.TFLITE_NNAPI) throw error
-        Log.w(TAG, "TFLite NNAPI 初始化失败，熔断并回退 XNNPACK: $modelId", error)
-        AccelerationPolicyRegistry.disableTfliteNnapi(context, modelId)
-        Interpreter(buffer, createTfliteOptions(modelId))
+    private fun createTfliteInterpreter(buffer: MappedByteBuffer, modelId: String): Interpreter {
+        // Keep the native prerequisite outside the backend fallback. A shim failure is not an NNAPI
+        // failure and must never be followed by an unguarded Interpreter construction.
+        NativeAiRuntime.ensureNativePrerequisite()
+        return try {
+            Interpreter(buffer, createTfliteOptions(modelId))
+        } catch (error: Throwable) {
+            if (tflitePolicy(modelId).effectiveBackend != AccelerationBackend.TFLITE_NNAPI) throw error
+            Log.w(TAG, "TFLite NNAPI 初始化失败，熔断并回退 XNNPACK: $modelId", error)
+            AccelerationPolicyRegistry.disableTfliteNnapi(context, modelId)
+            Interpreter(buffer, createTfliteOptions(modelId))
+        }
     }
 
     // ---- 下载管理 ----
@@ -528,7 +536,7 @@ class ModelManagerImpl(
                     val session = onnxSessions[modelId]
                         ?: throw IllegalStateException("ONNX 模型未加载: $modelId")
 
-                    val env = OrtEnvironment.getEnvironment()
+                    val env = NativeAiRuntime.getOrtEnvironment()
                     val inputTensors = mutableMapOf<String, OnnxTensor>()
                     try {
                         // 构建输入张量
@@ -616,81 +624,74 @@ class ModelManagerImpl(
         Log.i(TAG, "模型已卸载: $modelId")
     }
 
+    override fun evictModelIfUnused(modelId: String): Boolean = consumerLifecycle.evictIfUnused(
+        modelId = modelId,
+        isLoaded = {
+            interpreters.containsKey(modelId) || onnxSessions.containsKey(modelId)
+        },
+        evict = { evictModel(modelId) },
+    )
+
     override fun evictUnusedModels() {
-        val tfliteToEvict = interpreters.keys.filter { modelId ->
-            val state = stateFlows[modelId]?.value
-            state != null && state.consumerIds.isEmpty()
+        val candidates = (interpreters.keys + onnxSessions.keys).distinct()
+        val evicted = candidates.filter { evictModelIfUnused(it) }
+        if (evicted.isNotEmpty()) {
+            val freedBytes = evicted.sumOf { descriptors[it]?.memoryFootprintBytes ?: 0L }
+            Log.i(TAG, "淘汰未使用模型: ${evicted.joinToString()}, 释放约 ${freedBytes / 1024 / 1024}MB")
         }
-        val onnxToEvict = onnxSessions.keys.filter { modelId ->
-            val state = stateFlows[modelId]?.value
-            state != null && state.consumerIds.isEmpty()
-        }
-        val toEvict = tfliteToEvict + onnxToEvict
-        if (toEvict.isNotEmpty()) {
-            val freedBytes = toEvict.sumOf { descriptors[it]?.memoryFootprintBytes ?: 0L }
-            Log.i(TAG, "淘汰未使用模型: ${toEvict.joinToString()}, 释放约 ${freedBytes / 1024 / 1024}MB")
-        }
-        toEvict.forEach { evictModel(it) }
     }
 
-    fun getConsumerCount(modelId: String): Int {
-        return stateFlows[modelId]?.value?.consumerIds?.size ?: 0
-    }
+    fun getConsumerCount(modelId: String): Int = consumerLifecycle.consumerIds(modelId).size
 
     override fun getTotalMemoryFootprint(): Long = totalMemoryBytes
 
     // ===================== 消费者管理 =====================
 
     override fun registerConsumer(modelId: String, consumerId: String) {
-        stateFlows[modelId]?.update { state ->
-            state.copy(consumerIds = state.consumerIds + consumerId)
+        val consumerIds = consumerLifecycle.register(modelId, consumerId) { updated ->
+            stateFlows[modelId]?.update { state -> state.copy(consumerIds = updated) }
         }
-        Log.d(TAG, "消费者注册: $consumerId → $modelId (count=${getConsumerCount(modelId)})")
+        Log.d(TAG, "消费者注册: $consumerId → $modelId (count=${consumerIds.size})")
     }
 
     override fun unregisterConsumer(modelId: String, consumerId: String) {
-        stateFlows[modelId]?.update { state ->
-            state.copy(consumerIds = state.consumerIds - consumerId)
+        val consumerIds = consumerLifecycle.unregister(modelId, consumerId) { updated ->
+            stateFlows[modelId]?.update { state -> state.copy(consumerIds = updated) }
         }
-        Log.d(TAG, "消费者注销: $consumerId → $modelId (count=${getConsumerCount(modelId)})")
+        Log.d(TAG, "消费者注销: $consumerId → $modelId (count=${consumerIds.size})")
     }
 
     // ===================== 内置模型管理 =====================
 
     override fun getRegisteredModelIds(): List<String> = descriptors.keys.toList()
 
-    /**
-     * 准备内置模型：遍历所有带 [ModelManager.ModelDescriptor.assetFileName] 的已注册模型，
-     * 调用 [resolveAssetFile]（幂等）确认文件就位，然后将状态从 `NOT_DOWNLOADED` 标记为 `DOWNLOADED`。
-     *
-     * 每次启动调用，幂等。不加载到内存，首次推理时由 [ensureModelReady] 真正加载。
-     */
-    override suspend fun prepareBundledModels(): Int = withContext(Dispatchers.IO) {
-        var prepared = 0
-        for ((modelId, descriptor) in descriptors) {
-            // 仅处理带 assetFileName 的内置模型
-            if (descriptor.assetFileName.isNullOrEmpty()) continue
-            // 已 LOADED 的跳过（如 InSwapper 在 initialize 中已加载）
-            val current = stateFlows[modelId]?.value?.status
-            if (current == ModelManager.ModelStatus.LOADED) continue
+    /** Resolves only explicitly requested bundled model files; it never loads a native runtime. */
+    override suspend fun prepareBundledModels(modelIds: Collection<String>): Int =
+        withContext(Dispatchers.IO) {
+            var prepared = 0
+            for (modelId in modelIds.distinct()) {
+                val descriptor = descriptors[modelId] ?: continue
+                if (descriptor.assetFileName.isNullOrEmpty()) continue
+                val current = stateFlows[modelId]?.value?.status
+                if (current == ModelManager.ModelStatus.LOADED) continue
 
-            try {
-                resolveAssetFile(modelId, descriptor)
-                val modelFile = getModelFile(modelId, descriptor)
-                if (modelFile.exists() && modelFile.length() > 0) {
-                    updateState(modelId, ModelManager.ModelStatus.DOWNLOADED, progress = 1f)
-                    prepared++
-                    Log.i(TAG, "内置模型已就绪: $modelId (${modelFile.name})")
-                } else {
-                    Log.w(TAG, "内置模型文件未就位: $modelId (asset=${descriptor.assetFileName})")
+                try {
+                    resolveAssetFile(modelId, descriptor)
+                    val modelFile = getModelFile(modelId, descriptor)
+                    if (modelFile.exists() && modelFile.length() > 0) {
+                        updateState(modelId, ModelManager.ModelStatus.DOWNLOADED, progress = 1f)
+                        prepared++
+                        Log.i(TAG, "内置模型已就绪: $modelId (${modelFile.name})")
+                    } else {
+                        Log.w(TAG, "内置模型文件未就位: $modelId (asset=${descriptor.assetFileName})")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "准备内置模型失败: $modelId", e)
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "准备内置模型失败: $modelId", e)
             }
+            Log.i(TAG, "目标内置模型准备完成: $prepared/${modelIds.distinct().size}")
+            prepared
         }
-        Log.i(TAG, "内置模型准备完成: $prepared 个已标记为 DOWNLOADED")
-        prepared
-    }
 
     override suspend fun copyBundledModels(): Int = withContext(Dispatchers.IO) {
         if (prefs.getBoolean(bundledCopiedKey, false)) {

@@ -5,6 +5,7 @@ import android.util.Log
 import com.renyxin.localalbum.core.plugin.PluginManifest.ModelFormat
 import com.renyxin.localalbum.core.plugin.PluginManifest.TensorDataType
 import com.renyxin.localalbum.core.plugin.PluginManifest.TensorSpec
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.DataType as TfDataType
 import java.io.File
@@ -105,6 +106,7 @@ object TensorMetadataParser {
             val tfliteBuffer = FileInputStream(modelFile).channel.map(
                 FileChannel.MapMode.READ_ONLY, 0, modelFile.length()
             )
+            NativeAiRuntime.ensureNativePrerequisite()
             interpreter = Interpreter(tfliteBuffer)
 
             val inputTensors = (0 until interpreter.inputTensorCount).map { i ->
@@ -183,7 +185,7 @@ object TensorMetadataParser {
      * 当前通过反射安全地尝试提取，失败时使用默认值。
      */
     private fun parseOnnxWithRuntime(modelFile: File): ParseResult {
-        val env = ai.onnxruntime.OrtEnvironment.getEnvironment()
+        val env = NativeAiRuntime.getOrtEnvironment()
         val session = env.createSession(modelFile.absolutePath)
 
         try {
@@ -312,6 +314,7 @@ object TensorMetadataParser {
     private fun parsePyTorchWithModule(modelFile: File): ParseResult {
         // 仅加载验证，PyTorch 模块不直接暴露图结构
         try {
+            NativeAiRuntime.ensureNativePrerequisite()
             val loadedModule = org.pytorch.Module.load(modelFile.absolutePath)
             // PyTorch 不直接暴露输入/输出张量元数据，返回降级信息
             // 但验证了模型文件是可加载的有效 PyTorch 模型

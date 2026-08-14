@@ -1,0 +1,217 @@
+{
+  "schemaVersion": 1,
+  "reportId": "lite-phase9-host-release-evidence-2026-08-14",
+  "evidenceState": "HOST_ENGINEERING_AND_ARTIFACT_GUARDS_PASSED",
+  "approvalStatus": "RELEASE_BLOCKED",
+  "generatedAtUtc": "2026-08-14T09:57:49.0781068Z",
+  "sourceState": {
+    "gitCommit": "bd82227feba889b0a92516a42a4a36f9b15e2bac",
+    "gitDirty": true,
+    "frozenReleaseCandidate": false
+  },
+  "sourceEvidence": {
+    "path": "build/reports/lite-release/release-evidence.json",
+    "sha256": "ab9f075bbe31d8766c963edba278a17ec25eca9a02dabab378b0d3e9d50a9478",
+    "tracked": false,
+    "reproductionCommand": "./scripts/Generate-LiteReleaseEvidence.ps1 -RequireArtifacts -ReleaseOnly"
+  },
+  "policy": {
+    "path": "scripts/lite-artifact-purpose-policy.json",
+    "version": "lite-release-policy-v3",
+    "sha256": "1fb1a9a6bf6cf28a34683febcca3f7ab8933dfe808ee806a70968322b6ff88f8"
+  },
+  "schemas": [
+    {
+      "path": "app/schemas/com.renyxin.localalbum.data.db.AppDatabase/31.json",
+      "sha256": "d001e72306dd4d5adfd4e61ab907dddaf55c585a52ba5b340b8ac70abc1dd581"
+    },
+    {
+      "path": "app/schemas/com.renyxin.localalbum.data.db.AppDatabase/32.json",
+      "sha256": "0b4e43f5e2a36a537c9cf2c268296cc1ecd06e9fe7a51502039ae247bd6bf491"
+    }
+  ],
+  "artifacts": [
+    {
+      "edition": "full",
+      "kind": "apk",
+      "variant": "fullRelease",
+      "path": "app/build/outputs/apk/full/release/LocalAlbum-v0.1.0-c1-fullRelease.apk",
+      "bytes": 1615651400,
+      "sha256": "142f82ed0311282bdca48bf9af47c1a785585ce71152bd8b3dd469b4adde829d",
+      "applicationId": "com.renyxin.localalbum",
+      "versionCode": 1,
+      "versionName": "0.1.0"
+    },
+    {
+      "edition": "lite",
+      "kind": "apk",
+      "variant": "liteRelease",
+      "path": "app/build/outputs/apk/lite/release/LocalAlbum-v0.1.0-lite-c1-liteRelease.apk",
+      "bytes": 1130187192,
+      "sha256": "2081bcb846054fdba995ffee3dcf3403dfe783a0948e4a8dfc00f64ad2180421",
+      "applicationId": "com.renyxin.localalbum.lite",
+      "versionCode": 1,
+      "versionName": "0.1.0-lite"
+    },
+    {
+      "edition": "full",
+      "kind": "aab",
+      "variant": "fullRelease",
+      "path": "app/build/outputs/bundle/fullRelease/app-full-release.aab",
+      "bytes": 1257528749,
+      "sha256": "b1fa1259c7f5905714f10f0dc912e6594041f91211f7adeb3b4e488c3a022892",
+      "applicationId": "com.renyxin.localalbum",
+      "versionCode": 1,
+      "versionName": "0.1.0"
+    },
+    {
+      "edition": "lite",
+      "kind": "aab",
+      "variant": "liteRelease",
+      "path": "app/build/outputs/bundle/liteRelease/app-lite-release.aab",
+      "bytes": 942491607,
+      "sha256": "d85a779084f89a1e3d87c98420342a00227d6216da87566e9c258d57659bffae",
+      "applicationId": "com.renyxin.localalbum.lite",
+      "versionCode": 1,
+      "versionName": "0.1.0-lite"
+    }
+  ],
+  "r8Mappings": [
+    {
+      "edition": "full",
+      "path": "app/build/outputs/mapping/fullRelease/mapping.txt",
+      "sha256": "db6d1998772267b628be42c00aebc56d2c2b3e12dc2866bbb5e0027015489289"
+    },
+    {
+      "edition": "lite",
+      "path": "app/build/outputs/mapping/liteRelease/mapping.txt",
+      "sha256": "3a7fbe7040f043fe0e94d0c42f996b3c8cf13c6803fdcc674ed2511f36a9514c"
+    }
+  ],
+  "signatures": {
+    "currentArtifactsVerified": true,
+    "currentCertificateSha256": "ca3f1f2439dbe0242dbab8a14c1571042ca599227327b5fc9a22861f06ccc1de",
+    "fullHistoricalUpgradeChainStatus": "blocked_missing_historical_release_baseline",
+    "liteSigningDecisionStatus": "pending_security_operations_decision",
+    "note": "Current-artifact signature verification is not evidence that the historical Full upgrade certificate chain or the final Lite signing policy is approved."
+  },
+  "artifactPurposeGuard": {
+    "status": "passed",
+    "violationCount": 0,
+    "sharedFaceSwapRuntimeAndAssetsRetained": true,
+    "fullOnlySemanticAndOcrAssetsExcludedFromLite": true
+  },
+  "liteDexDescriptorGuard": {
+    "status": "passed",
+    "artifactSha256": "2081bcb846054fdba995ffee3dcf3403dfe783a0948e4a8dfc00f64ad2180421",
+    "mappingSha256": "3a7fbe7040f043fe0e94d0c42f996b3c8cf13c6803fdcc674ed2511f36a9514c",
+    "forbiddenClassRootCount": 14,
+    "mappingMatchesForForbiddenRoots": 0,
+    "descriptorCount": 30955,
+    "forbiddenHitCount": 0,
+    "dexFiles": [
+      {
+        "name": "classes.dex",
+        "descriptorCount": 19050,
+        "status": "passed"
+      },
+      {
+        "name": "classes2.dex",
+        "descriptorCount": 1,
+        "status": "passed"
+      },
+      {
+        "name": "classes3.dex",
+        "descriptorCount": 10252,
+        "status": "passed"
+      },
+      {
+        "name": "classes4.dex",
+        "descriptorCount": 1652,
+        "status": "passed"
+      }
+    ]
+  },
+  "dexNegativeControl": {
+    "purpose": "Prove that the guard detects real final-DEX violations instead of reporting a vacuous pass.",
+    "candidateRole": "historical_pre_refactor_non_release_negative_control",
+    "artifactSha256": "5328da6081ad962a7f884e195aec0e0a99a057851d040d0da4f332301c0e3f0e",
+    "expectedStatus": "failed",
+    "observedStatus": "failed",
+    "descriptorCount": 31158,
+    "dexFileCount": 4,
+    "forbiddenHitCount": 100,
+    "violatedRoots": [
+      {
+        "classRoot": "com.renyxin.localalbum.data.worker.FaceClusterMaintenanceWorker",
+        "descriptorCount": 7
+      },
+      {
+        "classRoot": "com.renyxin.localalbum.data.worker.SemanticClusterMaintenanceWorker",
+        "descriptorCount": 9
+      },
+      {
+        "classRoot": "com.renyxin.localalbum.data.worker.SemanticMaintenanceWorker",
+        "descriptorCount": 7
+      },
+      {
+        "classRoot": "com.renyxin.localalbum.core.pipeline.stages.FaceStage",
+        "descriptorCount": 3
+      },
+      {
+        "classRoot": "com.renyxin.localalbum.core.pipeline.stages.OcrStage",
+        "descriptorCount": 4
+      },
+      {
+        "classRoot": "com.renyxin.localalbum.core.pipeline.stages.SemanticStage",
+        "descriptorCount": 5
+      },
+      {
+        "classRoot": "com.renyxin.localalbum.ui.screens.AiAnalysisPreferencesScreenKt",
+        "descriptorCount": 31
+      },
+      {
+        "classRoot": "com.renyxin.localalbum.ui.screens.FacesScreenKt",
+        "descriptorCount": 34
+      }
+    ]
+  },
+  "hostVerification": {
+    "powershell51AstParse": "passed",
+    "purposePolicyJsonParse": "passed",
+    "fullJvmTests": "passed",
+    "liteJvmTests": "passed",
+    "fullAndroidTestKotlinCompile": "passed_not_device_execution",
+    "liteAndroidTestKotlinCompile": "passed_not_device_execution",
+    "fullDebugLint": "passed",
+    "liteDebugLint": "passed",
+    "fullReleaseApkAabR8": "passed",
+    "liteReleaseApkAabR8": "passed",
+    "runtimeClasspathReports": "generated",
+    "cycloneDxSbom": "generated",
+    "noticeInventory": "generated",
+    "gitDiffCheck": "passed",
+    "githubActionsLinuxRunner": "not_run"
+  },
+  "compliance": {
+    "inventoryGenerated": true,
+    "releaseApproved": false,
+    "licenseReviewStatus": "pending_manual_license_and_model_terms_review"
+  },
+  "releaseReadiness": {
+    "status": "blocked",
+    "blockers": [
+      "blocked_missing_historical_release_baseline",
+      "blocked_no_connected_device_instrumentation_performance_stability_evidence",
+      "compliance_manual_review_pending:pending_manual_license_and_model_terms_review",
+      "dirty_workspace_not_frozen_release_candidate",
+      "lite_signing_security_operations_decision_pending"
+    ]
+  },
+  "notes": [
+    "AndroidTest source compilation is not instrumentation execution and is not device, SQLite, migration, backup, performance, stability, or face-swap evidence.",
+    "The current artifact-purpose and final-DEX guards passed, but this snapshot is not a release approval.",
+    "The historical Full signing baseline, final Lite signing/coexistence decision, manual dependency/model-terms approval, frozen workspace, connected-device matrix, and real Linux CI run remain required.",
+    "The complete generated evidence remains under build/reports/lite-release and is intentionally ignored; this tracked file is a compact review snapshot with hashes and explicit limitations."
+  ]
+}

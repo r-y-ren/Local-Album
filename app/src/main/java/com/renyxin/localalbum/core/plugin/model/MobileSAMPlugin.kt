@@ -11,6 +11,7 @@ import com.renyxin.localalbum.core.plugin.PluginInput
 import com.renyxin.localalbum.core.plugin.PluginJsonCodec
 import com.renyxin.localalbum.core.plugin.PluginManifest
 import com.renyxin.localalbum.core.plugin.PluginOutput
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -125,6 +126,7 @@ class MobileSAMPlugin(
                 // 回退到静态下载管理器
                 val modelFile = ModelDownloadManager.ensureModel(appContext, MODEL_FILE, MODEL_URL)
                 if (modelFile != null) {
+                    NativeAiRuntime.ensureNativePrerequisite()
                     interpreter = Interpreter(modelFile, Interpreter.Options().apply { setNumThreads(4) })
                     ready = true
                     Log.i(TAG, "MobileSAM 模型加载成功（静态下载）")

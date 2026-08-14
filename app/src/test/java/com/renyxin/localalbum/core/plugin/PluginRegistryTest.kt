@@ -273,7 +273,7 @@ class PluginRegistryTest {
         assertEquals(1, output.boxes.size)
         assertEquals("person", output.boxes[0].label)
         assertEquals(0.95f, output.boxes[0].confidence, 0.001f)
-        assertEquals("/photos/test.jpg", output.imagePath)
+        assertEquals(input.file.absolutePath, output.imagePath)
 
         plugin.release()
     }

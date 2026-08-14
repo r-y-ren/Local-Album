@@ -127,6 +127,9 @@ import com.renyxin.localalbum.core.model.Album
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaQueryContext
 import com.renyxin.localalbum.core.recommendation.Recommendation
+import com.renyxin.localalbum.edition.EditionFeatures
+import com.renyxin.localalbum.edition.EditionSearchContribution
+import com.renyxin.localalbum.edition.EditionUiContribution
 import com.renyxin.localalbum.data.repo.AlbumSyncState
 import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.ui.components.AlbumSyncStatusBanner
@@ -135,12 +138,10 @@ import com.renyxin.localalbum.ui.screens.AlbumDetailScreen
 import com.renyxin.localalbum.ui.screens.MediaFilter
 import com.renyxin.localalbum.ui.screens.SortMode
 import com.renyxin.localalbum.ui.screens.ViewMode
-import com.renyxin.localalbum.ui.screens.AiAnalysisPreferencesScreen
 import com.renyxin.localalbum.ui.screens.AnalysisPerformanceScreen
 import com.renyxin.localalbum.ui.screens.MediaViewerScreen
 import com.renyxin.localalbum.ui.screens.OnboardingScreen
 import com.renyxin.localalbum.ui.screens.SearchScreen
-import com.renyxin.localalbum.ui.screens.FacesScreen
 import com.renyxin.localalbum.ui.screens.DuplicatePhotosScreen
 import com.renyxin.localalbum.ui.screens.TrashScreen
 import com.renyxin.localalbum.ui.screens.ModelImportWizardScreen
@@ -152,10 +153,10 @@ import com.renyxin.localalbum.ui.theme.ThemeMode
 import com.renyxin.localalbum.core.pipeline.ProgressManager
 import com.renyxin.localalbum.ui.components.GlobalProgressIndicator
 import com.renyxin.localalbum.ui.vm.AlbumViewModel
+import com.renyxin.localalbum.ui.vm.FaceSwapViewModel
 import com.renyxin.localalbum.ui.vm.PluginViewModel
 import com.renyxin.localalbum.ui.vm.SettingsViewModel
 import java.time.Instant
-import kotlinx.coroutines.delay
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
@@ -194,16 +195,24 @@ sealed interface Screen {
     data object Timeline : Screen
     data object Trash : Screen
     data object DuplicatePhotos : Screen
-    data object Faces : Screen
     data object Favorites : Screen
     data object Recommendations : Screen
     data object PluginManager : Screen
     data object AnalysisPerformance : Screen
-    data object AiAnalysisPreferences : Screen
     data object FaceSwap : Screen
+    data class Edition(val destinationId: String) : Screen
     data object ModelImportWizard : Screen
     data class ModelJsonEditor(val pluginId: String) : Screen
     data class RecommendationDetail(val recommendation: Recommendation) : Screen
+}
+
+internal fun resolveEditionScreen(screen: Screen, features: EditionFeatures): Screen = when (screen) {
+    Screen.PluginManager,
+    Screen.ModelImportWizard,
+    is Screen.ModelJsonEditor -> if (features.showPluginManager) screen else Screen.Main
+    Screen.FaceSwap -> if (features.showFaceSwap) screen else Screen.Main
+    is Screen.Edition -> if (EditionUiContribution.acceptsDestination(screen.destinationId)) screen else Screen.Main
+    else -> screen
 }
 
 /* ---- 主要应用入口 ---- */
@@ -213,7 +222,9 @@ sealed interface Screen {
 fun LocalAlbumApp(
     albumViewModel: AlbumViewModel,
     settingsViewModel: SettingsViewModel,
-    pluginViewModel: PluginViewModel,
+    pluginViewModel: PluginViewModel?,
+    faceSwapViewModel: FaceSwapViewModel,
+    editionFeatures: EditionFeatures,
     progressManager: ProgressManager? = null,
 ) {
     val settingsState by settingsViewModel.state.collectAsStateWithLifecycle()
@@ -238,9 +249,15 @@ fun LocalAlbumApp(
     val albumViewModes = remember { mutableStateMapOf<String, ViewMode>() }
     // 使用 back stack 管理导航历史，支持正确的返回行为
     var backStack by remember { mutableStateOf(listOf<Screen>(Screen.Main)) }
-    val screen by remember { derivedStateOf { backStack.lastOrNull() ?: Screen.Main } }
+    val screen by remember(editionFeatures) {
+        derivedStateOf {
+            resolveEditionScreen(backStack.lastOrNull() ?: Screen.Main, editionFeatures)
+        }
+    }
     val navigationStateHolder = rememberSaveableStateHolder()
     val scanState by albumViewModel.scanState.collectAsStateWithLifecycle()
+    val coreScanState by albumViewModel.coreScanState.collectAsStateWithLifecycle()
+    val coreScanActive = isCoreScanActive(scanState, coreScanState)
 
     // 手势引导：仅首次安装后展示一次，之后持久化不再弹出
     val gestureGuideShown by settingsViewModel.gestureGuideShown.collectAsStateWithLifecycle()
@@ -277,7 +294,12 @@ fun LocalAlbumApp(
     }
 
     fun navigateTo(target: Screen) {
-        backStack = backStack + target
+        val resolved = resolveEditionScreen(target, editionFeatures)
+        backStack = if (resolved == Screen.Main && target != Screen.Main) {
+            listOf(Screen.Main)
+        } else {
+            backStack + resolved
+        }
     }
 
     fun goBack() {
@@ -287,8 +309,9 @@ fun LocalAlbumApp(
     }
 
     fun goBackTo(target: Screen) {
+        val resolved = resolveEditionScreen(target, editionFeatures)
         // 回到指定的来源页面（弹出到该页面）
-        val idx = backStack.indexOfLast { it.javaClass == target.javaClass }
+        val idx = backStack.indexOfLast { it.javaClass == resolved.javaClass }
         if (idx >= 0) {
             backStack = backStack.take(idx + 1)
         } else {
@@ -492,71 +515,36 @@ fun LocalAlbumApp(
             )
         }
 
-        is Screen.Faces -> {
-            val faceClusters by albumViewModel.faceClusters.collectAsStateWithLifecycle()
-            val faceStats by albumViewModel.faceStats.collectAsStateWithLifecycle()
-            val faceProgress by albumViewModel.faceFileProgress.collectAsStateWithLifecycle()
-            val isPipelineRunning by albumViewModel.isPipelineRunning.collectAsStateWithLifecycle()
-            // 修复：扫描完成后自动刷新人脸聚类，无需退出重进页面
-            var wasScanning by remember { mutableStateOf(false) }
-            LaunchedEffect(scanState) {
-                val isScanning = scanState is ScanState.Scanning
-                if (wasScanning && !isScanning) {
-                    // 扫描刚结束（含人脸聚类），重新加载聚类数据
-                    albumViewModel.loadFaceClusters()
-                }
-                wasScanning = isScanning
-            }
-            // 人脸阶段每批写库后即可显示新聚类，不必等待全量扫描完成。
-            // 适度轮询避免为每张人脸建立 UI 查询，同时保证进度中的新结果可见。
-            LaunchedEffect(isPipelineRunning) {
-                while (isPipelineRunning) {
-                    albumViewModel.loadFaceClusters()
-                    delay(1_500L)
-                }
-                albumViewModel.loadFaceClusters()
-            }
-            FacesScreen(
-                faceClusters = faceClusters,
-                faceStats = faceStats,
-                pagedMediaForCluster = albumViewModel::pagedMediaForFaceCluster,
-                isLoading = false,
-                onBack = { goBack() },
-                onMediaClick = { item, clusterId ->
-                    navigateTo(Screen.MediaViewer(
-                        initialPath = item.filePath,
-                        queryContext = MediaQueryContext.Face(clusterId),
-                        returnTo = s,
-                    ))
-                },
-                onSetName = { clusterId, name ->
-                    albumViewModel.setPersonName(clusterId, name)
-                },
-                // 人物页刷新是用户要求的“重新开始全量 AI 扫描”，而非仅读取数据库或维护原型。
-                onRefresh = { albumViewModel.forceReanalyzeAll() },
-                stageFileProgress = faceProgress,
-                isPipelineRunning = isPipelineRunning,
-                showAnalysisProgressUi = settingsState.showAnalysisProgressUi,
-            )
+        is Screen.Edition -> {
+            check(
+                EditionUiContribution.renderDestination(
+                    destinationId = s.destinationId,
+                    albumViewModel = albumViewModel,
+                    settingsViewModel = settingsViewModel,
+                    scanState = scanState,
+                    showAnalysisProgressUi = settingsState.showAnalysisProgressUi,
+                    onBack = { goBack() },
+                    onMediaClick = { item, queryContext ->
+                        navigateTo(
+                            Screen.MediaViewer(
+                                initialPath = item.filePath,
+                                queryContext = queryContext,
+                                returnTo = s,
+                            ),
+                        )
+                    },
+                ),
+            ) { "Unregistered edition destination reached: ${s.destinationId}" }
         }
 
         is Screen.Search -> {
-            val semanticResults by albumViewModel.semanticSearchResults.collectAsStateWithLifecycle()
-            val isSemanticMode by albumViewModel.isSemanticMode.collectAsStateWithLifecycle()
-            val semanticSearchState by albumViewModel.semanticSearchState.collectAsStateWithLifecycle()
+            val optionalSearchMode = EditionSearchContribution.state(albumViewModel)
             var cameraModels by remember { mutableStateOf(emptyList<String>()) }
             LaunchedEffect(Unit) { cameraModels = albumViewModel.getSearchModels() }
             SearchScreen(
                 pagedSearch = albumViewModel::pagedSearch,
                 cameraModels = cameraModels,
-                semanticSearchResults = semanticResults,
-                isSemanticMode = isSemanticMode,
-                semanticSearchState = semanticSearchState,
-                onSemanticModeChange = { albumViewModel.setSemanticMode(it) },
-                onSearch = { query ->
-                    if (isSemanticMode) albumViewModel.semanticSearch(query)
-                },
-                onClearSearch = albumViewModel::clearSemanticSearch,
+                optionalSearchMode = optionalSearchMode,
                 onBack = { goBack() },
                 onMediaClick = { item, query, stablePaths ->
                     navigateTo(Screen.MediaViewer(
@@ -571,7 +559,7 @@ fun LocalAlbumApp(
 
         is Screen.PluginManager -> {
             PluginManagerScreen(
-                viewModel = pluginViewModel,
+                viewModel = requireNotNull(pluginViewModel) { "Plugin manager is disabled for this edition" },
                 onNavigateToFaceSwap = { navigateTo(Screen.FaceSwap) },
                 onBack = { goBack() },
             )
@@ -585,31 +573,23 @@ fun LocalAlbumApp(
             )
         }
 
-        is Screen.AiAnalysisPreferences -> {
-            AiAnalysisPreferencesScreen(
-                savedPreferences = settingsState.aiAnalysisPreferences,
-                onSave = settingsViewModel::setAiAnalysisPreferences,
-                onBack = { goBack() },
-            )
-        }
-
         is Screen.FaceSwap -> {
             FaceSwapScreen(
-                viewModel = pluginViewModel,
+                viewModel = faceSwapViewModel,
                 onBack = { goBack() },
             )
         }
 
         is Screen.ModelImportWizard -> {
             ModelImportWizardScreen(
-                viewModel = pluginViewModel,
+                viewModel = requireNotNull(pluginViewModel) { "Plugin manager is disabled for this edition" },
                 onNavigateBack = { goBack() },
             )
         }
 
         is Screen.ModelJsonEditor -> {
             ModelJsonEditorScreen(
-                viewModel = pluginViewModel,
+                viewModel = requireNotNull(pluginViewModel) { "Plugin manager is disabled for this edition" },
                 onNavigateBack = { goBack() },
             )
         }
@@ -634,7 +614,7 @@ fun LocalAlbumApp(
                             },
                             actions = {
                                 // 扫描状态快捷入口（仅在非设置页显示，避免冗余）
-                                if (currentTab != 3 && scanState is ScanState.Scanning) {
+                                if (currentTab != 3 && coreScanActive) {
                                     IconButton(onClick = { currentTab = 3 }) {
                                         Icon(Icons.Default.Refresh, contentDescription = "扫描中")
                                     }
@@ -646,7 +626,7 @@ fun LocalAlbumApp(
                         )
                         // 预留固定高度避免扫描开始/结束时布局跳动
                         Box(modifier = Modifier.fillMaxWidth().height(4.dp)) {
-                            if (scanState is ScanState.Scanning) {
+                            if (coreScanActive) {
                                 LinearProgressIndicator(
                                     modifier = Modifier.fillMaxSize(),
                                     color = MaterialTheme.colorScheme.primary,
@@ -709,6 +689,7 @@ fun LocalAlbumApp(
                             currentTab = currentTab,
                             albumViewModel = albumViewModel,
                             settingsViewModel = settingsViewModel,
+                            editionFeatures = editionFeatures,
                             navigateTo = ::navigateTo,
                             onSwitchTab = { currentTab = it },
                         )
@@ -731,6 +712,7 @@ fun LocalAlbumApp(
                         currentTab = currentTab,
                         albumViewModel = albumViewModel,
                         settingsViewModel = settingsViewModel,
+                        editionFeatures = editionFeatures,
                         navigateTo = ::navigateTo,
                         onSwitchTab = { currentTab = it },
                     )
@@ -762,15 +744,14 @@ internal fun navigationStateKey(screen: Screen): String = when (screen) {
     Screen.Timeline -> "timeline"
     Screen.Trash -> "trash"
     Screen.DuplicatePhotos -> "duplicates"
-    Screen.Faces -> "faces"
     Screen.Favorites -> "favorites"
     Screen.Recommendations -> "recommendations"
     Screen.PluginManager -> "plugins"
     Screen.AnalysisPerformance -> "analysis-performance"
-    Screen.AiAnalysisPreferences -> "ai-preferences"
     Screen.FaceSwap -> "face-swap"
     Screen.ModelImportWizard -> "model-import"
     is Screen.ModelJsonEditor -> "model-editor:${screen.pluginId}"
+    is Screen.Edition -> "edition:${screen.destinationId}"
     is Screen.RecommendationDetail ->
         "recommendation:${screen.recommendation.albumId}:${screen.recommendation.windowStart}"
 }
@@ -785,6 +766,7 @@ private fun currentTabContent(
     currentTab: Int,
     albumViewModel: AlbumViewModel,
     settingsViewModel: SettingsViewModel,
+    editionFeatures: EditionFeatures,
     navigateTo: (Screen) -> Unit,
     onSwitchTab: (Int) -> Unit,
 ) {
@@ -811,9 +793,8 @@ private fun currentTabContent(
                 albumViewModel.loadDuplicateGroups()
                 navigateTo(Screen.DuplicatePhotos)
             },
-            onNavigateToFaces = {
-                albumViewModel.loadFaceClusters()
-                navigateTo(Screen.Faces)
+            onNavigateToEditionDestination = { destinationId ->
+                navigateTo(Screen.Edition(destinationId))
             },
             onNavigateToRecommendations = {
                 navigateTo(Screen.Recommendations)
@@ -822,22 +803,13 @@ private fun currentTabContent(
 
         // Tab 1: 搜索
         1 -> {
-            val semanticResults by albumViewModel.semanticSearchResults.collectAsStateWithLifecycle()
-            val isSemanticMode by albumViewModel.isSemanticMode.collectAsStateWithLifecycle()
-            val semanticSearchState by albumViewModel.semanticSearchState.collectAsStateWithLifecycle()
+            val optionalSearchMode = EditionSearchContribution.state(albumViewModel)
             var cameraModels by remember { mutableStateOf(emptyList<String>()) }
             LaunchedEffect(Unit) { cameraModels = albumViewModel.getSearchModels() }
             SearchScreen(
                 pagedSearch = albumViewModel::pagedSearch,
                 cameraModels = cameraModels,
-                semanticSearchResults = semanticResults,
-                isSemanticMode = isSemanticMode,
-                semanticSearchState = semanticSearchState,
-                onSemanticModeChange = { albumViewModel.setSemanticMode(it) },
-                onSearch = { query ->
-                    if (isSemanticMode) albumViewModel.semanticSearch(query)
-                },
-                onClearSearch = albumViewModel::clearSemanticSearch,
+                optionalSearchMode = optionalSearchMode,
                 onBack = { onSwitchTab(0) },
                 onMediaClick = { item, query, stablePaths ->
                     navigateTo(Screen.MediaViewer(
@@ -863,10 +835,14 @@ private fun currentTabContent(
         else -> SettingsTab(
             viewModel = settingsViewModel,
             albumViewModel = albumViewModel,
+            editionFeatures = editionFeatures,
             onNavigateToTrash = { navigateTo(Screen.Trash) },
             onNavigateToPluginManager = { navigateTo(Screen.PluginManager) },
+            onNavigateToFaceSwap = { navigateTo(Screen.FaceSwap) },
             onNavigateToAnalysisPerformance = { navigateTo(Screen.AnalysisPerformance) },
-            onNavigateToAiAnalysisPreferences = { navigateTo(Screen.AiAnalysisPreferences) },
+            onNavigateToEditionDestination = { destinationId ->
+                navigateTo(Screen.Edition(destinationId))
+            },
         )
     }
 }
@@ -1863,7 +1839,7 @@ private fun AlbumCover(
 /* ---- 设置 Tab ---- */
 
 @Composable
-private fun MoreFeatureListItem(
+internal fun MoreFeatureListItem(
     title: String,
     description: String,
     imageVector: androidx.compose.ui.graphics.vector.ImageVector,
@@ -1919,14 +1895,20 @@ private fun MoreFeatureListItem(
 private fun SettingsTab(
     viewModel: SettingsViewModel,
     albumViewModel: AlbumViewModel,
+    editionFeatures: EditionFeatures,
     onNavigateToTrash: () -> Unit = {},
     onNavigateToPluginManager: () -> Unit = {},
+    onNavigateToFaceSwap: () -> Unit = {},
     onNavigateToAnalysisPerformance: () -> Unit = {},
-    onNavigateToAiAnalysisPreferences: () -> Unit = {},
+    onNavigateToEditionDestination: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val scanState by albumViewModel.scanState.collectAsStateWithLifecycle()
+    val indexAvailability by albumViewModel.indexAvailability.collectAsStateWithLifecycle()
+    val coreScanState by albumViewModel.coreScanState.collectAsStateWithLifecycle()
+    val enhancementState by albumViewModel.enhancementState.collectAsStateWithLifecycle()
+    val coreScanActive = isCoreScanActive(scanState, coreScanState)
     val trashedCount by albumViewModel.trashedCount.collectAsStateWithLifecycle()
 
     var showPicker by remember { mutableStateOf(false) }
@@ -1963,16 +1945,29 @@ private fun SettingsTab(
                         fontWeight = FontWeight.Bold,
                     )
                     Spacer(Modifier.height(8.dp))
-                    MoreFeatureListItem(
-                        title = "AI 插件管理",
-                        description = "导入和管理 AI 模型插件",
-                        imageVector = Icons.Filled.PlayArrow,
-                        iconTint = MaterialTheme.colorScheme.primary,
-                        onClick = onNavigateToPluginManager,
-                    )
-                    HorizontalDivider(
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                    )
+                    if (editionFeatures.showPluginManager) {
+                        MoreFeatureListItem(
+                            title = "AI 插件管理",
+                            description = "导入和管理 AI 模型插件",
+                            imageVector = Icons.Filled.PlayArrow,
+                            iconTint = MaterialTheme.colorScheme.primary,
+                            onClick = onNavigateToPluginManager,
+                        )
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        )
+                    } else if (editionFeatures.showFaceSwap) {
+                        MoreFeatureListItem(
+                            title = "换脸",
+                            description = "选择源人脸与目标照片进行换脸",
+                            imageVector = Icons.Filled.Face,
+                            iconTint = MaterialTheme.colorScheme.primary,
+                            onClick = onNavigateToFaceSwap,
+                        )
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        )
+                    }
                     MoreFeatureListItem(
                         title = "扫描与分析性能",
                         description = "按设备能力选择稳定、均衡或性能调度",
@@ -1983,15 +1978,8 @@ private fun SettingsTab(
                     HorizontalDivider(
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                     )
-                    MoreFeatureListItem(
-                        title = "AI 识别与结果偏好",
-                        description = "调整人物归并、OCR、语义搜索和精选推荐",
-                        imageVector = Icons.Default.AutoAwesome,
-                        iconTint = MaterialTheme.colorScheme.primary,
-                        onClick = onNavigateToAiAnalysisPreferences,
-                    )
-                    HorizontalDivider(
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    EditionUiContribution.settingsFeatureEntries(
+                        onNavigate = onNavigateToEditionDestination,
                     )
                     MoreFeatureListItem(
                         title = "回收站",
@@ -2334,7 +2322,7 @@ private fun SettingsTab(
 
                     Button(
                         onClick = { albumViewModel.rescan() },
-                        enabled = scanState !is ScanState.Scanning && state.scanRoots.isNotEmpty(),
+                        enabled = !coreScanActive && state.scanRoots.isNotEmpty(),
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
                     ) {
@@ -2344,10 +2332,21 @@ private fun SettingsTab(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            if (scanState is ScanState.Scanning) "全量扫描中…"
+                            if (coreScanActive) "扫描中…"
                             else "开始扫描媒体文件"
                         )
                     }
+
+                    Text(
+                        text = coreScanStatusText(indexAvailability, coreScanState),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        text = enhancementStatusText(enhancementState),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                    )
 
                     when (val s = scanState) {
                         is ScanState.Scanning -> {
@@ -2366,15 +2365,7 @@ private fun SettingsTab(
                             )
                         }
 
-                        ScanState.Done -> {
-                            Text(
-                                text = "扫描完成！可切换至\"相册树\"或\"精选推荐\"页浏览。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.tertiary,
-                            )
-                        }
-
-                        else -> {}
+                        ScanState.Done, ScanState.Idle -> Unit
                     }
                 }
             }
@@ -2581,7 +2572,7 @@ private fun PhotosTab(
     onNavigateToSearch: () -> Unit,
     onNavigateToFavorites: () -> Unit,
     onNavigateToDuplicate: () -> Unit,
-    onNavigateToFaces: () -> Unit,
+    onNavigateToEditionDestination: (String) -> Unit,
     onNavigateToRecommendations: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -2629,7 +2620,7 @@ private fun PhotosTab(
                 onNavigateToSearch = onNavigateToSearch,
                 onNavigateToFavorites = onNavigateToFavorites,
                 onNavigateToDuplicate = onNavigateToDuplicate,
-                onNavigateToFaces = onNavigateToFaces,
+                onNavigateToEditionDestination = onNavigateToEditionDestination,
                 onNavigateToRecommendations = onNavigateToRecommendations,
             )
         },
@@ -2645,7 +2636,7 @@ private fun QuickAccessRow(
     onNavigateToSearch: () -> Unit,
     onNavigateToFavorites: () -> Unit,
     onNavigateToDuplicate: () -> Unit,
-    onNavigateToFaces: () -> Unit,
+    onNavigateToEditionDestination: (String) -> Unit,
     onNavigateToRecommendations: () -> Unit,
 ) {
     val scrollState = androidx.compose.foundation.lazy.rememberLazyListState()
@@ -2681,19 +2672,16 @@ private fun QuickAccessRow(
                 onClick = onNavigateToDuplicate,
             )
         }
-        item(key = "faces") {
-            QuickAccessCard(
-                icon = Icons.Filled.Face,
-                title = "人物",
-                subtitle = "按人脸分组",
-                onClick = onNavigateToFaces,
+        item(key = "edition-primary") {
+            EditionUiContribution.primaryQuickAccessEntry(
+                onNavigate = onNavigateToEditionDestination,
             )
         }
         item(key = "search") {
             QuickAccessCard(
                 icon = Icons.Filled.Search,
                 title = "搜索",
-                subtitle = "关键词/语义",
+                subtitle = EditionSearchContribution.quickAccessSubtitle,
                 onClick = onNavigateToSearch,
             )
         }
@@ -2704,7 +2692,7 @@ private fun QuickAccessRow(
  * 单个快捷入口卡片。
  */
 @Composable
-private fun QuickAccessCard(
+internal fun QuickAccessCard(
     icon: ImageVector,
     title: String,
     subtitle: String,

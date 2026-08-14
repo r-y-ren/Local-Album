@@ -50,13 +50,13 @@ class ScanForegroundService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 ServiceCompat.startForeground(
                     this,
-                    ScanServiceController.NOTIFICATION_ID,
+                    ScanServiceController.CORE_NOTIFICATION_ID,
                     notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
                 )
             } else {
                 @Suppress("DEPRECATION")
-                startForeground(ScanServiceController.NOTIFICATION_ID, notification)
+                startForeground(ScanServiceController.CORE_NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
             // Android 12+ 后台启动 FGS 被拒（ForegroundServiceStartNotAllowedException），
@@ -74,7 +74,7 @@ class ScanForegroundService : Service() {
      */
     fun updateNotification(text: String) {
         val mgr = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
-        mgr.notify(ScanServiceController.NOTIFICATION_ID, buildNotification(text))
+        mgr.notify(ScanServiceController.CORE_NOTIFICATION_ID, buildNotification(text))
     }
 
     private fun buildNotification(text: String): Notification {
@@ -84,7 +84,7 @@ class ScanForegroundService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE,
         )
-        return NotificationCompat.Builder(this, ScanServiceController.CHANNEL_ID)
+        return NotificationCompat.Builder(this, ScanServiceController.CORE_CHANNEL_ID)
             .setContentTitle(getString(R.string.scan_notif_title))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_notify_sync)

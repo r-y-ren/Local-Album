@@ -2,8 +2,15 @@ package com.renyxin.localalbum
 
 import android.content.Context
 import com.renyxin.localalbum.core.album.AlbumBuilder
+import com.renyxin.localalbum.core.concurrent.EnhancementResourceGate
 import com.renyxin.localalbum.core.index.HybridIndexer
+import com.renyxin.localalbum.core.pipeline.AnalysisPlanType
+import com.renyxin.localalbum.core.pipeline.AnalysisStageFactory
 import com.renyxin.localalbum.core.pipeline.PluginAnalysisPipeline
+import com.renyxin.localalbum.core.pipeline.ScanFeaturePolicy
+import com.renyxin.localalbum.core.pipeline.StageInclusionPolicy
+import com.renyxin.localalbum.edition.EditionConfiguration
+import com.renyxin.localalbum.edition.EditionFeatures
 import com.renyxin.localalbum.core.plugin.PluginConfigException
 import com.renyxin.localalbum.core.plugin.PluginContext
 import com.renyxin.localalbum.core.plugin.ProgressReporter
@@ -21,9 +28,7 @@ import com.renyxin.localalbum.core.plugin.capability.builtin.HeuristicQualityPro
 import com.renyxin.localalbum.core.plugin.capability.builtin.HeuristicSceneProvider
 import com.renyxin.localalbum.core.plugin.capability.builtin.MlKitFaceDetector
 import com.renyxin.localalbum.core.plugin.model.ArcFaceProvider
-import com.renyxin.localalbum.core.plugin.model.GLMOcrProvider
 import com.renyxin.localalbum.core.plugin.capability.builtin.InsightFaceProvider
-import com.renyxin.localalbum.core.plugin.capability.builtin.PaddleOCRProvider
 import com.renyxin.localalbum.core.plugin.extension.InSwapperPlugin
 import com.renyxin.localalbum.core.plugin.capability.builtin.Eva02ClipProvider
 import com.renyxin.localalbum.core.plugin.model.CompositeModelCatalog
@@ -35,7 +40,6 @@ import com.renyxin.localalbum.core.plugin.model.MobileNetSceneProvider
 import com.renyxin.localalbum.core.plugin.model.ModelManagerImpl
 import com.renyxin.localalbum.core.plugin.model.ModelStorageManager
 import com.renyxin.localalbum.core.plugin.capability.builtin.MlKitFaceProvider
-import com.renyxin.localalbum.core.plugin.capability.builtin.MlKitOcrProvider
 import com.renyxin.localalbum.core.plugin.demo.DemoPluginsInitializer
 import com.renyxin.localalbum.core.plugin.extension.ExtensionPluginRegistry
 import com.renyxin.localalbum.core.recommendation.RecommendationEngine
@@ -61,7 +65,9 @@ private const val FOREGROUND_RESCAN_THROTTLE_MS = 30_000L
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
+    private val processStartedAtMs = System.currentTimeMillis()
 
+    val editionFeatures: EditionFeatures = EditionConfiguration.features
     val database = AppDatabase.getDatabase(context)
 
     private val settingsStore = SettingsStore(context.applicationContext)
@@ -109,104 +115,82 @@ class AppContainer(context: Context) {
      * 模型类 Provider 注入 [modelManager] 以统一管理模型生命周期。
      */
     val capabilityRegistry = CapabilityRegistryV2().apply {
-        // ---- 注册 5 个槽位 ----
+        if (editionFeatures.allowsCapabilitySlot("face")) {
+            registerSlot(CapabilitySlot(
+                slotId = "face", displayName = "人脸检测与聚类",
+                description = "检测图像中的人脸并提取特征向量用于聚类",
+                interfaceClass = FaceProvider::class, defaultProviderId = "model:insightface",
+                icon = "🧑", required = true,
+            ))
+            registerProvider("face", "model:insightface",
+                InsightFaceProvider(modelManager, appContext), isDefault = true,
+                providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
+            registerProvider("face", "model:arcface",
+                ComposedFaceProvider(
+                    detector = MlKitFaceDetector(appContext),
+                    embedder = ArcFaceProvider(modelManager, appContext),
+                ), isDefault = false, providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
+            registerProvider("face", "builtin:mlkit",
+                MlKitFaceProvider(appContext), isDefault = false,
+                providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
+            registerProviderModelIds("face", "model:insightface",
+                listOf("model:insightface_det", "model:insightface_rec"))
+            registerProviderModelIds("face", "model:arcface", listOf("model:arcface"))
+        }
 
-        registerSlot(CapabilitySlot(
-            slotId = "face", displayName = "人脸检测与聚类",
-            description = "检测图像中的人脸并提取特征向量用于聚类",
-            interfaceClass = FaceProvider::class, defaultProviderId = "model:insightface",
-            icon = "🧑", required = true,
-        ))
-        registerSlot(CapabilitySlot(
-            slotId = "scene", displayName = "场景分类",
-            description = "识别图像的场景类别（自然、城市、美食等）",
-            interfaceClass = SceneProvider::class, defaultProviderId = "model:mobilenet_v2",
-            icon = "🏷️", required = false,
-        ))
-        registerSlot(CapabilitySlot(
-            slotId = "semantic", displayName = "语义嵌入",
-            description = "提取图像的跨模态语义向量用于自然语言搜索",
-            interfaceClass = SemanticEmbedProvider::class, defaultProviderId = "builtin:eva02_clip",
-            icon = "🔍", required = false,
-        ))
-        registerSlot(CapabilitySlot(
-            slotId = "quality", displayName = "质量评估",
-            description = "评估图像的清晰度、曝光度、色彩等质量指标",
-            interfaceClass = QualityProvider::class, defaultProviderId = "builtin:heuristic",
-            icon = "⭐", required = false,
-        ))
-        registerSlot(CapabilitySlot(
-            slotId = "ocr", displayName = "文字识别 (OCR)",
-            description = "识别图像中的文字内容",
-            interfaceClass = OcrProvider::class, defaultProviderId = "model:paddleocr",
-            icon = "📝", required = false,
-        ))
+        if (editionFeatures.allowsCapabilitySlot("scene")) {
+            registerSlot(CapabilitySlot(
+                slotId = "scene", displayName = "场景分类",
+                description = "识别图像的场景类别（自然、城市、美食等）",
+                interfaceClass = SceneProvider::class, defaultProviderId = "model:mobilenet_v2",
+                icon = "🏷️", required = false,
+            ))
+            registerProvider("scene", "model:mobilenet_v2",
+                MobileNetSceneProvider(modelManager, appContext), isDefault = true,
+                providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
+            registerProvider("scene", "builtin:heuristic",
+                HeuristicSceneProvider(), isDefault = false,
+                providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
+            registerProviderModelIds("scene", "model:mobilenet_v2", listOf("model:mobilenet_v2"))
+        }
 
-        // ---- 注册 Provider 到槽位 ----
+        if (editionFeatures.allowsCapabilitySlot("semantic")) {
+            registerSlot(CapabilitySlot(
+                slotId = "semantic", displayName = "语义嵌入",
+                description = "提取图像的跨模态语义向量用于自然语言搜索",
+                interfaceClass = SemanticEmbedProvider::class, defaultProviderId = "builtin:eva02_clip",
+                icon = "🔍", required = false,
+            ))
+            registerProvider("semantic", "builtin:eva02_clip",
+                Eva02ClipProvider(appContext), isDefault = true,
+                providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
+            registerProvider("semantic", "model:mobileclip",
+                MobileCLIPProvider(modelManager, appContext), isDefault = false,
+                providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
+            registerProvider("semantic", "builtin:concept",
+                ConceptEmbedProvider(), isDefault = false,
+                providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
+            registerProviderModelIds("semantic", "model:mobileclip",
+                listOf("model:mobileclip_image", "model:mobileclip_text"))
+        }
 
-        // 人脸 — InsightFace 为默认方案；ArcFace + ML Kit 为备用
-        registerProvider("face", "model:insightface",
-            InsightFaceProvider(modelManager, context.applicationContext), isDefault = true,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
-        registerProvider("face", "model:arcface",
-            ComposedFaceProvider(
-                detector = MlKitFaceDetector(context.applicationContext),
-                embedder = ArcFaceProvider(modelManager, context.applicationContext),
-            ), isDefault = false, providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
-        registerProvider("face", "builtin:mlkit",
-            MlKitFaceProvider(context.applicationContext), isDefault = false,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
+        if (editionFeatures.allowsCapabilitySlot("quality")) {
+            registerSlot(CapabilitySlot(
+                slotId = "quality", displayName = "质量评估",
+                description = "评估图像的清晰度、曝光度、色彩等质量指标",
+                interfaceClass = QualityProvider::class, defaultProviderId = "builtin:heuristic",
+                icon = "⭐", required = false,
+            ))
+            registerProvider("quality", "builtin:heuristic",
+                HeuristicQualityProvider(), isDefault = true,
+                providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
+        }
 
-        // 场景 — MobileNetV2 为主, 启发式为备用
-        registerProvider("scene", "model:mobilenet_v2",
-            MobileNetSceneProvider(modelManager, context.applicationContext), isDefault = true,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
-        registerProvider("scene", "builtin:heuristic",
-            HeuristicSceneProvider(), isDefault = false,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
-
-        // 语义 — EVA02-CLIP-L-14 为内置默认（随包打包，安装即用）, MobileCLIP/概念向量为可选备用
-        registerProvider("semantic", "builtin:eva02_clip",
-            Eva02ClipProvider(context.applicationContext), isDefault = true,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
-        registerProvider("semantic", "model:mobileclip",
-            MobileCLIPProvider(modelManager, context.applicationContext), isDefault = false,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
-        registerProvider("semantic", "builtin:concept",
-            ConceptEmbedProvider(), isDefault = false,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
-
-        // 质量 — 启发式 (暂无 NIMA TFLite 模型)
-        registerProvider("quality", "builtin:heuristic",
-            HeuristicQualityProvider(), isDefault = true,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
-
-        // OCR — PaddleOCR 为主, GLM-OCR + ML Kit 为备用
-        registerProvider("ocr", "model:paddleocr",
-            PaddleOCRProvider(modelManager, context.applicationContext), isDefault = true,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
-        registerProvider("ocr", "model:glm_ocr",
-            GLMOcrProvider(modelManager, context.applicationContext), isDefault = false,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL)
-        registerProvider("ocr", "builtin:mlkit_ocr",
-            MlKitOcrProvider(context.applicationContext), isDefault = false,
-            providerType = com.renyxin.localalbum.core.plugin.capability.ProviderType.BUILTIN)
-
-        // ---- 注册 Provider → modelId 映射（用于多模型 Provider 的状态聚合） ----
-        // 单模型 Provider：providerId == modelId，无需额外注册
-        // 多模型 Provider：需要注册所有关联的底层 modelId
-        registerProviderModelIds("face", "model:insightface",
-            listOf("model:insightface_det", "model:insightface_rec"))
-        registerProviderModelIds("face", "model:arcface",
-            listOf("model:arcface"))
-        registerProviderModelIds("scene", "model:mobilenet_v2",
-            listOf("model:mobilenet_v2"))
-        registerProviderModelIds("semantic", "model:mobileclip",
-            listOf("model:mobileclip_image", "model:mobileclip_text"))
-        registerProviderModelIds("ocr", "model:paddleocr",
-            listOf("model:paddleocr_det", "model:paddleocr_rec"))
-        registerProviderModelIds("ocr", "model:glm_ocr",
-            listOf("model:glm_ocr_encoder", "model:glm_ocr_decoder"))
+        EditionConfiguration.registerEditionCapabilityProviders(
+            registry = this,
+            modelManager = modelManager,
+            appContext = appContext,
+        )
     }
 
     // ---- Phase 3: 扩展插件系统 ----
@@ -226,6 +210,19 @@ class AppContainer(context: Context) {
      * 协程作用域，用于后台任务（ContentObserver、插件加载等）。
      */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    val scanFeaturePolicy: ScanFeaturePolicy = editionFeatures.scanFeaturePolicy
+
+    private val analysisStageFactory: AnalysisStageFactory by lazy {
+        AnalysisStageFactory(
+            mediaDao = database.mediaDao(),
+            faceDao = database.faceDao(),
+            faceClusterDao = database.faceClusterDao(),
+            embeddingDao = database.embeddingDao(),
+            capabilityRegistry = capabilityRegistry,
+            semanticDao = database.semanticDao(),
+        )
+    }
 
     /**
      * 核心分析管道（Phase 2 重构 + 修复：单例化，保证进度 UI 与运行管线共用同一 ProgressManager）。
@@ -247,14 +244,24 @@ class AppContainer(context: Context) {
      * 通过 appScope.launch 异步访问此属性，若委托在 init 之后声明则可能为 null。
      */
     val pluginAnalysisPipeline: PluginAnalysisPipeline by lazy {
+        val plan = analysisStageFactory.createPlan(
+            inclusionPolicy = StageInclusionPolicy(scanFeaturePolicy),
+            planType = AnalysisPlanType.ENHANCEMENT,
+        )
         PluginAnalysisPipeline.create(
-            mediaDao = database.mediaDao(),
-            faceDao = database.faceDao(),
-            faceClusterDao = database.faceClusterDao(),
-            embeddingDao = database.embeddingDao(),
-            capabilityRegistry = capabilityRegistry,
-            semanticDao = database.semanticDao(),
+            plan = plan,
             analysisStateDao = database.analysisStateDao(),
+            retiredAutomaticScopeSelectors = if (scanFeaturePolicy.policyId == "lite") {
+                listOf(
+                    PluginAnalysisPipeline.retiredPolicyScopeSelector(
+                        planType = AnalysisPlanType.ENHANCEMENT,
+                        policyId = "lite",
+                        policyVersion = 1,
+                    ),
+                )
+            } else {
+                emptyList()
+            },
             releaseStageResources = { stageId ->
                 // 每个模型阶段结束后立即卸载其 session，避免上一阶段权重/工作区与下一阶段
                 // 峰值叠加。搜索或下一批分析会按需懒加载；启发式阶段无需释放。
@@ -278,29 +285,26 @@ class AppContainer(context: Context) {
     init {
         // 启动时刷新存储统计
         modelStorageManager.refresh()
-        DemoPluginsInitializer.initialize(
-            context = context.applicationContext,
-            capabilityRegistry = capabilityRegistry,
-            extensionRegistry = extensionPluginRegistry,
-            pluginManifestDao = database.pluginManifestDao(),
-        )
+        if (editionFeatures.showPluginManager) {
+            DemoPluginsInitializer.initialize(
+                context = appContext,
+                capabilityRegistry = capabilityRegistry,
+                extensionRegistry = extensionPluginRegistry,
+                pluginManifestDao = database.pluginManifestDao(),
+            )
+        }
 
-        // 同步 ModelManager 模型状态到 CapabilityRegistryV2
+        // 同步 ModelManager 模型状态到 CapabilityRegistryV2。启动期只观察 descriptor 状态，
+        // 不复制 assets/models，也不创建任何 native runtime/session。
         startModelStatusSync()
 
-        // 首次启动时从 assets/models/ 复制内置模型到 filesDir/models/
-        copyBundledModelsOnFirstLaunch()
+        // 换脸是独立交互能力，不依赖通用插件管理入口。初始化仅注册 descriptor；模型文件、
+        // emutls/OpenCV/ORT 与 emap 均在用户执行且取得交互 AI lane 后按需准备。
+        if (editionFeatures.showFaceSwap) {
+            registerBuiltinExtensions()
+        }
 
-        // 注册内置扩展插件 (InSwapper 换脸，作为拓展功能)
-        registerBuiltinExtensions()
-
-        // 每次启动准备内置模型：确认文件就位并将状态标记为 DOWNLOADED，
-        // 使 UI 显示「已就绪」（首次推理时由 ensureModelReady 真正加载进内存）。
-        // 修复：原实现仅 copyBundledModels 复制文件但不更新状态，导致内置 MODEL 类型
-        // Provider 启动时状态恒为 NOT_DOWNLOADED，UI 误显示「未就绪」。
-        prepareBundledModels()
-
-        // Phase 0: 订阅分析管道阶段进度，更新前台服务通知文案
+        // Phase 1: 分析属于核心扫描之后的独立增强生命周期，使用独立通知。
         startScanProgressNotification()
         // Phase 1: 订阅管道整体状态，维护「中断待续跑」标志
         startAnalysisResumeFlagTracking()
@@ -333,23 +337,15 @@ class AppContainer(context: Context) {
     fun maybeResumeAnalysis() {
         appScope.launch {
             try {
+                // Only runs created by an earlier process are stale. This avoids racing a
+                // WorkManager-triggered scan that starts during Application initialization.
+                database.scanRunDao().abortStaleRunning(
+                    now = System.currentTimeMillis(),
+                    startedBefore = processStartedAtMs,
+                )
                 albumRepository.resumeAnalysisIfNeeded()
             } catch (e: Exception) {
                 android.util.Log.e("AppContainer", "续跑分析失败", e)
-            }
-        }
-    }
-
-    /**
-     * 准备内置模型：将所有带 assetFileName 的已注册内置模型从 assets 解析到 filesDir，
-     * 并将状态从 NOT_DOWNLOADED 标记为 DOWNLOADED。
-     */
-    private fun prepareBundledModels() {
-        appScope.launch {
-            try {
-                modelManager.prepareBundledModels()
-            } catch (e: Exception) {
-                android.util.Log.e("AppContainer", "准备内置模型失败", e)
             }
         }
     }
@@ -436,25 +432,6 @@ class AppContainer(context: Context) {
         }
     }
 
-    /**
-     * 首次启动时从 assets/models/ 复制内置模型到 filesDir/models/。
-     *
-     * 通过 [ModelManager.copyBundledModels] 在后台复制，完成后
-     * [startModelStatusSync] 会自动将模型状态同步到 UI。
-     */
-    private fun copyBundledModelsOnFirstLaunch() {
-        appScope.launch {
-            // 修复：移除原先的 delay(1000L) hack。模型按需复制由 ModelManager.resolveAssetFile
-            // 保证正确性，此处仅负责首次批量复制并置位标记，无需人为延迟。
-            val copied = modelManager.copyBundledModels()
-            if (copied > 0) {
-                android.util.Log.i("AppContainer", "内置模型复制完成: $copied 个文件")
-            } else {
-                android.util.Log.d("AppContainer", "无需复制内置模型（已存在或未打包）")
-            }
-        }
-    }
-
     private fun registerBuiltinExtensions() {
         appScope.launch {
             try {
@@ -469,9 +446,17 @@ class AppContainer(context: Context) {
                     pluginId = "builtin",
                 )
 
-                val inSwapper = InSwapperPlugin(modelManager) {
-                    capabilityRegistry.getActiveProvider<FaceProvider>("face")
-                }
+                val inSwapper = InSwapperPlugin(
+                    modelManager = modelManager,
+                    faceProviderFactory = {
+                        capabilityRegistry.getActiveProvider<FaceProvider>("face")
+                    },
+                    faceModelIdsFactory = {
+                        capabilityRegistry.getActiveProviderId("face")
+                            ?.let(capabilityRegistry::getProviderModelIds)
+                            .orEmpty()
+                    },
+                )
                 inSwapper.initialize(ctx, pluginContext)
                 extensionPluginRegistry.registerBuiltin(inSwapper, inSwapper.getManifest())
 
@@ -510,7 +495,10 @@ class AppContainer(context: Context) {
         cacheDao = database.thumbnailCacheDao(),
     )
 
-    val mediaDeletionCoordinator = com.renyxin.localalbum.data.repo.MediaDeletionCoordinator(database)
+    val mediaDeletionCoordinator = com.renyxin.localalbum.data.repo.MediaDeletionCoordinator(
+        database = database,
+        profileId = editionFeatures.editionId,
+    )
     val deletionService = com.renyxin.localalbum.data.repo.PersistentDeletionService(
         database.deletionTombstoneDao(),
         mediaDeletionCoordinator,
@@ -518,6 +506,7 @@ class AppContainer(context: Context) {
 
     private val hybridIndexer = HybridIndexer(
         context = context.applicationContext,
+        profileId = editionFeatures.editionId,
         mediaDao = database.mediaDao(),
         database = database,
         faceDao = database.faceDao(),
@@ -527,9 +516,10 @@ class AppContainer(context: Context) {
         analysisStateDao = database.analysisStateDao(),
         analysisTaskDao = database.analysisTaskDao(),
         featureStoreDao = database.featureStoreDao(),
-        thumbnailTaskDao = database.thumbnailTaskDao(),
+        enhancementOutboxDao = database.enhancementOutboxDao(),
         scanRunDao = database.scanRunDao(),
         scanStagingDao = database.scanStagingDao(),
+        mediaChangeDao = database.mediaChangeDao(),
         deletionTombstoneDao = database.deletionTombstoneDao(),
         mediaDeletionCoordinator = mediaDeletionCoordinator,
     )
@@ -542,31 +532,41 @@ class AppContainer(context: Context) {
         embeddingDao = database.embeddingDao(),
         mediaSource = mediaSource,
         albumBuilder = AlbumBuilder(),
-        // Phase 5: 注入 SemanticClusterRecommender，启用语义聚类推荐
         recommendationEngine = RecommendationEngine(
-            semanticClusterRecommender = com.renyxin.localalbum.core.recommendation.SemanticClusterRecommender(
-                embeddingDao = database.embeddingDao(),
-                mediaDao = database.mediaDao(),
-                semanticDao = database.semanticDao(),
-            ),
+            semanticClusterRecommender = if (editionFeatures.enableSemanticSearch) {
+                com.renyxin.localalbum.core.recommendation.SemanticClusterRecommender(
+                    embeddingDao = database.embeddingDao(),
+                    mediaDao = database.mediaDao(),
+                    semanticDao = database.semanticDao(),
+                )
+            } else {
+                null
+            },
         ),
         hybridIndexer = hybridIndexer,
         thumbnailScheduler = thumbnailScheduler,
         deletionService = deletionService,
         mediaDeletionCoordinator = mediaDeletionCoordinator,
-        // 语义搜索使用当前激活的 SemanticEmbedProvider（CLIP / 概念向量…），
-        // 保证搜索侧与索引侧向量空间一致
-        semanticProviderFactory = {
-            capabilityRegistry.getActiveProvider<SemanticEmbedProvider>("semantic")
+        keywordSearchProfile = editionFeatures.keywordSearchProfile,
+        semanticSearchEnabled = editionFeatures.enableSemanticSearch,
+        semanticProviderFactory = if (editionFeatures.enableSemanticSearch) {
+            { capabilityRegistry.getActiveProvider<SemanticEmbedProvider>("semantic") }
+        } else {
+            null
         },
-        context = context.applicationContext,
+        postRestoreTaskPolicy = com.renyxin.localalbum.data.backup.PostRestoreTaskPolicy(
+            profileId = editionFeatures.editionId,
+            pipelineScope = pluginAnalysisPipeline.pipelineScope,
+            enqueueAutomaticAnalysis = pluginAnalysisPipeline.requiredStageIds.isNotEmpty(),
+        ),
+        allowFaceClusterMaintenance = editionFeatures.allowFaceClusterMaintenance,
+        context = appContext,
     )
 
     /**
-     * Phase 0: 订阅分析管道阶段进度，更新前台服务通知文案。
+     * Phase 1: 订阅分析管道阶段进度，更新独立的增强通知。
      *
-     * 仅在 FGS 活跃时生效（[ScanServiceController.updateProgress] 对未运行服务静默忽略），
-     * 故无需关心订阅与扫描生命周期的精确对齐。
+     * 分析不得覆盖核心扫描通知；通知本身不持有核心扫描 FGS 引用。
      */
     private fun startScanProgressNotification() {
         appScope.launch {
@@ -581,21 +581,71 @@ class AppContainer(context: Context) {
                         progress.processedFiles,
                         progress.totalFiles,
                     )
-                    com.renyxin.localalbum.data.worker.ScanServiceController.updateProgress(text)
+                    com.renyxin.localalbum.data.worker.ScanServiceController.updateEnhancementProgress(
+                        appContext,
+                        text,
+                    )
                 }
             }
         }
     }
 
     fun registerContentObserver() {
-        hybridIndexer.registerContentObserver(onChanged = {
-            // 在协程中触发增量扫描，避免阻塞主线程
+        hybridIndexer.registerContentObserver(onChanges = { changes ->
             appScope.launch {
-                // Repository 内部使用 tryLock 原子合并竞态触发；不能只在锁外读取 scanState，
-                // 否则 Observer 与回前台回调可能同时看到空闲并串行执行两次完整遍历。
-                albumRepository.rescanIfIdle()
+                // Persist first: a busy scan lock or process death must not discard the changed set.
+                hybridIndexer.recordMediaChanges(changes)
+                com.renyxin.localalbum.data.worker.ScanWorker.schedule(appContext)
+                albumRepository.incrementalRescanIfIdle()
             }
         })
+    }
+
+    fun maybeResumePendingScanChanges() {
+        appScope.launch {
+            if (hybridIndexer.hasPendingReconciliation() || hybridIndexer.hasOutstandingMediaChanges()) {
+                com.renyxin.localalbum.data.worker.ScanWorker.schedule(appContext)
+            }
+            // A process can die after core preemption was persisted but before that core attempt
+            // reaches its cleanup path. PREEMPTED is transient; user PAUSED is intentionally not
+            // touched here.
+            database.scanRunDao().resumePreemptedEnhancements()
+            // Policy v2 disables unapproved Lite automatic Scene/Quality. Converge v1 tasks before
+            // deciding whether an AnalysisWorker is still needed; otherwise an unclaimable old
+            // scope would remain PENDING forever and keep EnhancementState non-terminal.
+            if (pluginAnalysisPipeline.retiredAutomaticScopeSelectors.isNotEmpty()) {
+                val unsettledScanIds = database.scanRunDao().getUnsettledEnhancementScanIds().toSet()
+                val settled = EnhancementResourceGate.tryWithAutomaticEnhancement {
+                    val now = System.currentTimeMillis()
+                    pluginAnalysisPipeline.retiredAutomaticScopeSelectors.forEach { selector ->
+                        database.analysisTaskDao().supersedeRetiredPolicyScopes(
+                            pipelinePrefix = selector.pipelinePrefix,
+                            planName = selector.planName,
+                            policyIdentity = selector.policyIdentity,
+                            reason = "retired_automatic_policy",
+                            now = now,
+                        )
+                    }
+                    com.renyxin.localalbum.data.worker.EnhancementHandoffWorker
+                        .settleEnhancementScans(database, unsettledScanIds, now)
+                }
+                if (settled == null) return@launch
+            }
+            // Restore each durable enhancement queue independently. A process may die after
+            // handoff has drained the outbox but before analysis or thumbnail work finishes.
+            if (database.enhancementOutboxDao().hasRunnableEntries()) {
+                com.renyxin.localalbum.data.worker.EnhancementHandoffWorker.enqueue(appContext)
+            }
+            if (database.analysisTaskDao().countActiveEnhancementTasks() > 0) {
+                com.renyxin.localalbum.data.worker.AnalysisWorker.enqueue(appContext)
+            }
+            if (database.thumbnailTaskDao().countAutomaticRunnable() > 0) {
+                com.renyxin.localalbum.data.worker.ThumbnailWorker.enqueueBackground(appContext)
+            }
+            if (database.thumbnailTaskDao().countInteractiveActive() > 0) {
+                com.renyxin.localalbum.data.worker.ThumbnailWorker.enqueue(appContext)
+            }
+        }
     }
 
     /**
@@ -627,7 +677,7 @@ class AppContainer(context: Context) {
                 albumRepository.restoreFromDbIfNeeded()
                 startupRestoreCompleted = true
             }
-            albumRepository.rescanIfIdle()
+            albumRepository.reconcileIfIdle()
         }
     }
 
@@ -638,6 +688,7 @@ class AppContainer(context: Context) {
      * 包含重试机制：最多重试 2 次，间隔 1 秒。
      */
     fun loadPlugins() {
+        if (!editionFeatures.showPluginManager) return
         appScope.launch {
             var attempts = 0
             val maxRetries = 2

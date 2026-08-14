@@ -9,6 +9,7 @@ import com.renyxin.localalbum.core.pipeline.ParallelFileProcessor
 import com.renyxin.localalbum.core.pipeline.StageResult
 import com.renyxin.localalbum.core.pipeline.StageType
 import com.renyxin.localalbum.data.db.dao.MediaDao
+import com.renyxin.localalbum.data.db.dao.SceneTypeUpdate
 import java.io.File
 
 /**
@@ -43,12 +44,21 @@ class BuiltinSceneStage(
     ): StageResult {
         val labelCounts = mutableMapOf<String, Int>()
 
-        // 文件级并行分类
-        val results = ParallelFileProcessor.mapParallel(filePaths, enhancedCallback) { path ->
-            val result = classifier.classify(File(path))
-            val labelName = result.label.name.lowercase()
-            mediaDao.setSceneType(path, labelName)
-            labelName
+        // Legacy adapter remains batch-safe even though the policy-aware factory no longer uses it.
+        val results = ParallelFileProcessor.mapParallel(
+            filePaths,
+            enhancedCallback,
+            metricOperation = "pipeline:file:$stageId",
+        ) { path ->
+            classifier.classify(File(path)).label.name.lowercase()
+        }
+        val updates = results.mapNotNull { result ->
+            result.value?.takeIf { result.success }?.let { label ->
+                SceneTypeUpdate(result.path, label)
+            }
+        }
+        updates.chunked(MediaDao.ENHANCEMENT_WRITE_BATCH_SIZE).forEach { batch ->
+            mediaDao.setSceneTypes(batch)
         }
         val success = results.count { it.success }
         val failed = results.count { !it.success }
@@ -63,7 +73,9 @@ class BuiltinSceneStage(
         return StageResult(
             successCount = success,
             failedCount = failed,
-            extra = labelCounts.mapValues { it.value.toString() },
+            extra = labelCounts.mapValues { it.value.toString() } +
+                ("databaseTransactions" to
+                    updates.chunked(MediaDao.ENHANCEMENT_WRITE_BATCH_SIZE).size.toString()),
             failedPaths = results.filterNot { it.success }.mapTo(linkedSetOf()) { it.path },
         )
     }

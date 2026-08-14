@@ -158,6 +158,10 @@ interface ModelManager {
     // ---- 内存管理 ----
 
     fun evictModel(modelId: String)
+
+    /** Evicts exactly one model only when no registered consumer can still be using its runtime. */
+    fun evictModelIfUnused(modelId: String): Boolean
+
     fun evictUnusedModels()
     fun getTotalMemoryFootprint(): Long
 
@@ -185,16 +189,14 @@ interface ModelManager {
     suspend fun copyBundledModels(): Int
 
     /**
-     * 准备内置模型：将所有带 [ModelDescriptor.assetFileName] 的已注册内置模型
-     * 从 assets 解析到 filesDir，并将其状态从 `NOT_DOWNLOADED` 标记为 `DOWNLOADED`。
+     * Prepares only the requested bundled models without loading their native runtimes.
      *
-     * 与 [copyBundledModels] 的区别：
-     * - [copyBundledModels] 仅首次启动批量复制文件，不更新状态；
-     * - 本方法**每次启动**调用，幂等地确认文件就位并更新状态，确保 UI 显示「已就绪」。
-     *
-     * 不加载模型到内存（避免 OOM），首次推理时由 [ensureModelReady] 真正加载。
-     *
-     * @return 成功标记为 DOWNLOADED 的内置模型数量
+     * Feature entry points use this targeted API after resource admission. Application startup must
+     * not call the all-model compatibility overload because copying the complete assets/models tree
+     * would defeat on-demand loading.
      */
-    suspend fun prepareBundledModels(): Int
+    suspend fun prepareBundledModels(modelIds: Collection<String>): Int
+
+    /** Compatibility helper for explicit maintenance tools; never used by application startup. */
+    suspend fun prepareBundledModels(): Int = prepareBundledModels(getRegisteredModelIds())
 }

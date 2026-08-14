@@ -8,6 +8,7 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import com.renyxin.localalbum.core.plugin.PluginManifest
 import com.renyxin.localalbum.core.plugin.capability.FaceEmbedder
+import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -72,7 +73,7 @@ class ArcFaceProvider(
 
             // 通过 session 池获取独立 session（独立 intra-op 线程池），实现多核并行
             modelManager.withOnnxSession(MODEL_ID) { session ->
-                val env = OrtEnvironment.getEnvironment()
+                val env = NativeAiRuntime.getOrtEnvironment()
                 val tensor = OnnxTensor.createTensor(
                     env, buf, longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong())
                 )

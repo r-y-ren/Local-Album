@@ -5,10 +5,15 @@ import androidx.test.core.app.ApplicationProvider
 import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.data.backup.DatabaseExporter
 import com.renyxin.localalbum.data.backup.DatabaseImporter
+import com.renyxin.localalbum.data.backup.PostRestoreTaskPolicy
+import com.renyxin.localalbum.data.backup.PostRestoreTaskSeeder
+import com.renyxin.localalbum.data.db.entity.EnhancementState
 import com.renyxin.localalbum.data.db.entity.FaceEntity
+import com.renyxin.localalbum.data.db.entity.MediaChangeEventEntity
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
 import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.db.entity.MediaFts
+import com.renyxin.localalbum.data.db.entity.MediaStoreReferenceEntity
 import com.renyxin.localalbum.data.db.entity.toImportStaging
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -31,7 +36,19 @@ class DatabaseImporterStagingTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java,
         ).allowMainThreadQueries().build()
-        importer = DatabaseImporter(database.mediaDao(), database.faceDao(), database.embeddingDao(), database)
+        importer = DatabaseImporter(
+            mediaDao = database.mediaDao(),
+            faceDao = database.faceDao(),
+            embeddingDao = database.embeddingDao(),
+            database = database,
+            postRestoreTaskSeeder = PostRestoreTaskSeeder(
+                PostRestoreTaskPolicy(
+                    profileId = LOCAL_PROFILE,
+                    pipelineScope = RESTORED_PIPELINE_SCOPE,
+                    enqueueAutomaticAnalysis = true,
+                ),
+            ),
+        )
     }
 
     @After
@@ -40,6 +57,7 @@ class DatabaseImporterStagingTest {
     @Test
     fun stagingWriteFailureDoesNotChangeProductionTables() = runBlocking {
         seedProduction("/old.jpg")
+        seedLocalMediaChangeState()
         val duplicate = mediaJson("/new.jpg")
         val root = backupJson(JSONArray().put(duplicate).put(duplicate), JSONArray(), JSONArray(), JSONArray())
 
@@ -50,12 +68,15 @@ class DatabaseImporterStagingTest {
         assertEquals(1, database.faceDao().getCount())
         assertEquals(1, database.embeddingDao().getCount())
         assertEquals(1, database.mediaDao().getFtsCount())
+        assertTrue(database.mediaChangeDao().hasOutstandingMediaChanges(LOCAL_PROFILE))
+        assertEquals(1, tableCount("media_store_references"))
         assertEquals(0, database.importStagingDao().mediaCount("unused"))
     }
 
     @Test
     fun successfulImportAtomicallySwitchesAllFourProductionTables() = runBlocking {
         seedProduction("/old.jpg")
+        seedLocalMediaChangeState()
         val path = "/new.jpg"
         val root = backupJson(
             JSONArray().put(mediaJson(path)),
@@ -78,6 +99,45 @@ class DatabaseImporterStagingTest {
         assertEquals(listOf(path), database.faceDao().getPaged(100, 0).map { it.filePath })
         assertEquals(listOf(path), database.embeddingDao().getPaged(100, 0).map { it.filePath })
         assertEquals(listOf(path), database.mediaDao().getAllFtsEntries().map { it.filePath })
+        assertEquals(0, tableCount("analysis_tasks"))
+        assertEquals(0, tableCount("thumbnail_tasks"))
+        database.openHelper.writableDatabase.query(
+            "SELECT pipelineScope, profileId, enqueueAnalysis, enqueueThumbnail FROM enhancement_outbox",
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(RESTORED_PIPELINE_SCOPE, cursor.getString(0))
+            assertEquals(LOCAL_PROFILE, cursor.getString(1))
+            assertEquals(1, cursor.getInt(2))
+            assertEquals(1, cursor.getInt(3))
+            assertFalse(cursor.moveToNext())
+        }
+        assertEquals(1, tableCount("scan_runs"))
+        database.openHelper.writableDatabase.query(
+            "SELECT enhancementState, enhancementStartedAt, enhancementCompletedAt FROM scan_runs",
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(EnhancementState.WAITING_FOR_CORE.name, cursor.getString(0))
+            assertEquals(0L, cursor.getLong(1))
+            assertEquals(0L, cursor.getLong(2))
+        }
+        assertTrue(database.mediaChangeDao().hasOutstandingMediaChanges(LOCAL_PROFILE))
+        assertEquals(1, tableCount("media_change_events"))
+        database.openHelper.writableDatabase.query(
+            "SELECT profileId, eventType, status FROM media_change_events",
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(LOCAL_PROFILE, cursor.getString(0))
+            assertEquals(MediaChangeEventEntity.TYPE_RECONCILIATION, cursor.getString(1))
+            assertEquals(MediaChangeEventEntity.STATUS_PENDING, cursor.getString(2))
+            assertFalse(cursor.moveToNext())
+        }
+        assertFalse(database.enhancementOutboxDao().hasRunnableEntries())
+        assertTrue(
+            database.enhancementOutboxDao()
+                .claimBatch(10L, 10, "before-reconciliation", 100L)
+                .isEmpty(),
+        )
+        assertEquals(0, tableCount("media_store_references"))
     }
 
     @Test
@@ -97,8 +157,56 @@ class DatabaseImporterStagingTest {
         database.mediaDao().insertAll(listOf(media(path)))
         database.faceDao().insertFaces(listOf(FaceEntity(filePath = path, embedding = "old", boxLeft = 0f, boxTop = 0f, boxRight = 1f, boxBottom = 1f)))
         database.embeddingDao().insertEmbedding(MediaEmbedding(path, "old", 1))
-        database.mediaDao().insertFtsAll(listOf(MediaFts(path, path.substringAfterLast('/'), "old", null, null)))
+        database.mediaDao().insertFtsAll(
+            listOf(
+                MediaFts(
+                    filePath = path,
+                    fileName = path.substringAfterLast('/'),
+                    parentPath = path.substringBeforeLast('/', ""),
+                    ocrText = "old",
+                    make = null,
+                    model = null,
+                ),
+            ),
+        )
     }
+
+    private suspend fun seedLocalMediaChangeState() {
+        database.mediaChangeDao().record(
+            MediaChangeEventEntity(
+                eventKey = "$LOCAL_PROFILE:external:IMAGE:9",
+                profileId = LOCAL_PROFILE,
+                eventType = MediaChangeEventEntity.TYPE_MEDIA,
+                volumeName = "external",
+                mediaType = MediaType.IMAGE.name,
+                mediaStoreId = 9L,
+                contentUri = "content://media/external/images/media/9",
+                firstObservedAtMs = 1L,
+                observedAtMs = 2L,
+            ),
+        )
+        database.mediaChangeDao().upsertReferences(
+            listOf(
+                MediaStoreReferenceEntity(
+                    stableKey = "$LOCAL_PROFILE:external:IMAGE:9",
+                    profileId = LOCAL_PROFILE,
+                    volumeName = "external",
+                    mediaType = MediaType.IMAGE.name,
+                    mediaStoreId = 9L,
+                    contentUri = "content://media/external/images/media/9",
+                    filePath = "/device-only.jpg",
+                    sourceVersion = "1:1",
+                    observedAtMs = 2L,
+                ),
+            ),
+        )
+    }
+
+    private fun tableCount(table: String): Int =
+        database.openHelper.writableDatabase.query("SELECT COUNT(*) FROM $table").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            cursor.getInt(0)
+        }
 
     private fun media(path: String) = MediaEntity(
         filePath = path, fileName = path.substringAfterLast('/'), mediaType = MediaType.IMAGE,
@@ -115,4 +223,9 @@ class DatabaseImporterStagingTest {
             put("version", DatabaseExporter.EXPORT_FORMAT_VERSION)
             put("mediaItems", media); put("faces", faces); put("embeddings", embeddings); put("ftsEntries", fts)
         }
+
+    private companion object {
+        const val RESTORED_PIPELINE_SCOPE = "pipeline:v1|plan=enhancement|policy=lite@1"
+        const val LOCAL_PROFILE = "lite"
+    }
 }
