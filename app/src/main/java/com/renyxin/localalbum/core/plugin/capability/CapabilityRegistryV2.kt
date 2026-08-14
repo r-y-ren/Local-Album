@@ -12,7 +12,7 @@ import kotlin.reflect.KClass
 /**
  * 泛型化核心分析能力注册表（Phase 2 改进计划）。
  *
- * 取代原有的 [CapabilityRegistry]，使用泛型 [SlotEntry] 统一管理任意类型的能力槽位。
+ * 使用泛型 [SlotEntry] 统一管理任意类型的能力槽位。
  * 新增槽位只需调用 [registerSlot] + [registerProvider]，无需修改注册表内部结构。
  *
  * ## 核心设计
@@ -48,7 +48,6 @@ import kotlin.reflect.KClass
  * ```
  *
  * @see CapabilitySlot 槽位元数据定义
- * @see CapabilityRegistry 旧版（保留兼容）
  */
 
 /**
@@ -514,4 +513,33 @@ data class ProviderInfo(
     val providerType: ProviderType = ProviderType.BUILTIN,
     val modelStatus: ModelReadiness = ModelReadiness.ALWAYS_READY,
     val modelProgress: Float = 0f,
+)
+
+/**
+ * 单个能力槽位的状态快照。
+ *
+ * @param T Provider 类型
+ * @property slotId 槽位标识
+ * @property slotName 槽位显示名称
+ * @property activeProviderId 当前激活的 Provider ID
+ * @property providers 所有已注册的 Provider 列表
+ */
+data class CapabilitySlotState<T>(
+    val slotId: String = "",
+    val slotName: String = "",
+    val activeProviderId: String = "",
+    val providers: List<T> = emptyList(),
+)
+
+/**
+ * Provider 元信息（用于 UI 列表展示）。
+ *
+ * @property providerId Provider 标识
+ * @property displayName 显示名称
+ * @property isActive 是否为当前激活项
+ */
+data class ProviderMeta(
+    val providerId: String,
+    val displayName: String,
+    val isActive: Boolean,
 )

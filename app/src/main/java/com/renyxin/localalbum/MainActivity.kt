@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
             extensionRegistry = container.extensionPluginRegistry,
             modelManager = container.modelManager,
             modelStorageManager = container.modelStorageManager,
-            modelDownloadManager = com.renyxin.localalbum.core.plugin.model.ModelDownloadManagerV2(application),
+            modelDownloadManager = container.modelDownloadManager,
             modelCatalog = container.modelCatalog,
         )
     }

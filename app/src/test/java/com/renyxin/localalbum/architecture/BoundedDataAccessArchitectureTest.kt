@@ -63,7 +63,7 @@ class BoundedDataAccessArchitectureTest {
         ).forEach { forbidden ->
             assertFalse("常规人物分配器调用 FaceDao 全量/维护接口: $forbidden", assigner.contains(forbidden))
         }
-        val stages = listOf("FaceStage.kt", "BuiltinFaceStage.kt").map {
+        val stages = listOf("FaceStage.kt").map {
             File(fullSourceRoot, "com/renyxin/localalbum/core/pipeline/stages/$it").readText()
         }
         assertTrue("常规 FaceStage 不得触发人物维护", stages.none { it.contains("FaceClusterMaintenanceWorker") })
@@ -456,7 +456,6 @@ class BoundedDataAccessArchitectureTest {
         val concreteImplementations = listOf(
             "com/renyxin/localalbum/core/analysis/OcrProvider.kt",
             "com/renyxin/localalbum/core/plugin/capability/builtin/MlKitOcrProvider.kt",
-            "com/renyxin/localalbum/core/pipeline/stages/BuiltinOcrStage.kt",
             "com/renyxin/localalbum/core/pipeline/stages/OcrStage.kt",
         )
         concreteImplementations.forEach { relativePath ->
@@ -523,8 +522,6 @@ class BoundedDataAccessArchitectureTest {
             "com/renyxin/localalbum/core/pipeline/stages/FaceStage.kt",
             "com/renyxin/localalbum/core/pipeline/stages/SemanticStage.kt",
             "com/renyxin/localalbum/core/pipeline/stages/OcrStage.kt",
-            "com/renyxin/localalbum/core/pipeline/stages/BuiltinFaceStage.kt",
-            "com/renyxin/localalbum/core/pipeline/stages/BuiltinSemanticStage.kt",
             "com/renyxin/localalbum/data/worker/FaceClusterMaintenanceWorker.kt",
             "com/renyxin/localalbum/data/worker/SemanticMaintenanceWorker.kt",
             "com/renyxin/localalbum/data/worker/SemanticClusterMaintenanceWorker.kt",

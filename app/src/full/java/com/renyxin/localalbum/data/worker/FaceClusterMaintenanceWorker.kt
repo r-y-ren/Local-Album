@@ -11,7 +11,6 @@ import com.renyxin.localalbum.LocalAlbumApplication
 import com.renyxin.localalbum.core.analysis.FaceClusterer
 import com.renyxin.localalbum.core.analysis.FacePrototypePolicy
 import com.renyxin.localalbum.core.concurrent.EnhancementResourceGate
-import com.renyxin.localalbum.core.pipeline.stages.BuiltinFaceStage
 import com.renyxin.localalbum.core.plugin.capability.FaceProvider
 import com.renyxin.localalbum.data.db.AppDatabase
 import com.renyxin.localalbum.data.db.entity.FaceClusterMetaEntity
@@ -171,13 +170,19 @@ class FaceClusterMaintenanceWorker(context: Context, params: WorkerParameters) :
     private fun resolveScope(app: LocalAlbumApplication): Pair<String, String> {
         val provider = app.container.capabilityRegistry.getActiveProvider<FaceProvider>("face")
         return if (provider == null) {
-            BuiltinFaceStage.BUILTIN_PROVIDER_SCOPE to BuiltinFaceStage.BUILTIN_MODEL_SCOPE
+            BUILTIN_PROVIDER_SCOPE to BUILTIN_MODEL_SCOPE
         } else {
             provider.providerId to "dim:${provider.embeddingDim}"
         }
     }
 
     companion object {
+        /** 无插件 Provider 生效时，内置人脸检测器使用的 providerScope 标识。 */
+        internal const val BUILTIN_PROVIDER_SCOPE = "builtin:face-detector"
+
+        /** 无插件 Provider 生效时，内置人脸嵌入模型使用的 modelScope 标识。 */
+        internal const val BUILTIN_MODEL_SCOPE = "builtin:face-embedding-v1"
+
         internal const val BATCH_SIZE = 128
         internal const val MAX_BATCHES_PER_WORK = 8
         private const val WORK_NAME = "face_cluster_prototype_maintenance"

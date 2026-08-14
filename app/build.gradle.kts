@@ -246,7 +246,6 @@ dependencies {
 
     // Core Library Desugaring
     add("coreLibraryDesugaring", "com.android.tools:desugar_jdk_libs:2.0.4")
-    add("implementation", "androidx.compose.runtime:runtime-livedata:1.7.1")
 
     add("testImplementation", "junit:junit:4.13.2")
     add("testImplementation", "org.jetbrains.kotlin:kotlin-test:1.9.24")
@@ -254,9 +253,6 @@ dependencies {
     add("testImplementation", "org.mockito:mockito-core:5.5.0")
 
     add("androidTestImplementation", "androidx.test.ext:junit:1.2.1")
-    add("androidTestImplementation", "androidx.test.espresso:espresso-core:3.6.1")
-    add("androidTestImplementation", "androidx.compose.ui:ui-test-junit4")
 
     add("debugImplementation", "androidx.compose.ui:ui-tooling")
-    add("debugImplementation", "androidx.compose.ui:ui-test-manifest")
 }

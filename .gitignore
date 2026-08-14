@@ -29,6 +29,7 @@ gradle-app.setting
 Thumbs.db
 .directory
 *~
+*.bak
 
 # ── Build outputs ──
 app/build/

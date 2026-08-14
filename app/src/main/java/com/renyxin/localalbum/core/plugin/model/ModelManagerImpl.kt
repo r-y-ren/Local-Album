@@ -42,13 +42,14 @@ import java.util.zip.ZipInputStream
  * - ONNX: 通过 [OrtSession] 推理
  *
  * 内部组件：
- * - [ModelDownloadManagerV2] — 下载与缓存
+ * - [downloadManager]（注入的 [ModelDownloadManagerV2]）— 下载与缓存
  * - TFLite [Interpreter] 池 — 加载/卸载
  * - ONNX [OrtSession] 池 — 加载/卸载
  * - 状态追踪 — [StateFlow] 驱动
  */
 class ModelManagerImpl(
     private val context: Context,
+    private val downloadManager: ModelDownloadManagerV2,
 ) : ModelManager {
 
     companion object {
@@ -233,10 +234,6 @@ class ModelManagerImpl(
             Interpreter(buffer, createTfliteOptions(modelId))
         }
     }
-
-    // ---- 下载管理 ----
-
-    private val downloadManager = ModelDownloadManagerV2(context)
 
     // ---- 已加载模型的总内存估算 ----
 

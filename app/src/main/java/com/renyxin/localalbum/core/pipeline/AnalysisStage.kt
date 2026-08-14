@@ -25,8 +25,7 @@ typealias EnhancedProgressCallback = suspend (
  *
  * ## 使用方式
  *
- * - 内置分析器：创建具体实现类（如 [BuiltinQualityStage]），在构造时注入其所需依赖
- * - 外部插件：由 [PluginAnalysisStage] 包裹，通过 [com.renyxin.localalbum.core.plugin.PluginRegistry] 获取
+ * - 内置分析器：创建具体实现类（如 [QualityStage]），在构造时注入其所需依赖
  *
  * @see StageDagSorter DAG 拓扑排序器，用于根据 dependencies 计算执行顺序
  * @see PluginAnalysisPipeline 核心管道编排器

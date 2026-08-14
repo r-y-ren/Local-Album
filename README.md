@@ -12,15 +12,14 @@
 
 > Android 10+ 的本地智能相册。媒体索引、AI 分析、搜索和特征数据均在设备端完成。
 
-[English](#english) · [中文](#中文) · [开发贡献](CONTRIBUTING.md) · [变更记录](CHANGELOG.md) · [安全策略](SECURITY.md)
+[English](#english) · [中文](#中文) · [开发贡献](CONTRIBUTING.md) · [架构文档](ARCHITECTURE.md) · [变更记录](CHANGELOG.md) · [安全策略](SECURITY.md)
 
 ## 效果预览 / Screenshots
 
-
-|                                    照片主页                                    |                                     精选推荐                                     |                                       重复照片检测                                       |                                 人脸聚类                                 |
+|                                    照片主页                                     |                                     精选推荐                                      |                                       重复照片检测                                        |                                 人脸聚类                                  |
 | :-----------------------------------------------------------------------------: | :-------------------------------------------------------------------------------: | :---------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------: |
-|      <img src="Renderings/Photo%20Page.jpg" alt="照片主页" width="220" />      | <img src="Renderings/Curated%20Recommendations.jpg" alt="精选推荐" width="220" /> | <img src="Renderings/Duplicate%20photo%20detection.jpg" alt="重复照片检测" width="220" /> | <img src="Renderings/Face%20clustering.jpg" alt="人脸聚类" width="220" /> |
-|                              **语义搜索（结果）**                              |                               **语义搜索（输入）**                               |                                    **换脸（实验性）**                                    |                               **设置页面**                               |
+|      <img src="Renderings/Photo%20Page.jpg" alt="照片主页" width="220" />       | <img src="Renderings/Curated%20Recommendations.jpg" alt="精选推荐" width="220" /> | <img src="Renderings/Duplicate%20photo%20detection.jpg" alt="重复照片检测" width="220" /> | <img src="Renderings/Face%20clustering.jpg" alt="人脸聚类" width="220" /> |
+|                              **语义搜索（结果）**                               |                               **语义搜索（输入）**                                |                                    **换脸（实验性）**                                     |                               **设置页面**                                |
 | <img src="Renderings/Semantic%20search_1.jpg" alt="语义搜索结果" width="220" /> |  <img src="Renderings/Semantic%20search_2.jpg" alt="语义搜索输入" width="220" />  |           <img src="Renderings/Face-swapping.jpg" alt="换脸功能" width="220" />           |  <img src="Renderings/Settings%20Page.jpg" alt="设置页面" width="220" />  |
 
 ---
@@ -40,20 +39,19 @@
 
 项目通过同一应用模块中的 `full` / `lite` product flavor 维护两个编译期版本：
 
-- **Full**：保留人物相册、语义搜索、语义聚类维护、自动人脸/语义/OCR 分析及对应设置入口。
-- **Lite**：以媒体索引和扫描完成时延为优先，只提供关键词/文件名/目录/基础元数据搜索；不编译人物相册、语义搜索、AI 识别偏好页、人物/语义维护 Worker 或自动 Face/Semantic/OCR Stage。
-- **两者共享**：基础相册、时间线、查看器、收藏、回收站、备份恢复、场景/质量增强，以及实验性的真实换脸。Lite 的换脸仍保留 FaceProvider、InSwapper、ONNX Runtime、OpenCV、emutls shim 和必需模型，但仅在用户交互时按需加载，不会创建人脸批处理任务。
+- **Full**：保留人物相册、语义搜索、语义聚类维护、自动人脸/场景/质量/语义/OCR 五阶段增强分析及对应设置入口。
+- **Lite**：以媒体索引和扫描完成时延为优先，只提供关键词/文件名/目录/基础元数据搜索；不编译人物相册、语义搜索、AI 识别偏好页、人物/语义维护 Worker 与 Face/Semantic/OCR Stage。Lite 的自动分析增强计划为空（fail-closed，策略见 [`ScanFeaturePolicy.kt`](app/src/main/java/com/renyxin/localalbum/core/pipeline/ScanFeaturePolicy.kt)），场景/质量分析只能通过用户手动增强计划触发。
+- **两者共享**：基础相册、时间线、查看器、收藏、回收站、备份恢复、手动场景/质量增强，以及实验性的真实换脸。Lite 的换脸仍保留 FaceProvider、InSwapper、ONNX Runtime、OpenCV、emutls shim 和必需模型，但仅在用户交互时按需加载，不会创建人脸批处理任务。
 
 ### 页面结构
 
 应用底部为 4 个主 Tab（平板为侧边导航栏）。下表描述 Full 版本；Lite 会隐藏人物、语义搜索和 AI 识别偏好入口：
 
-
-| Tab  | 内容                                                                                               |
-| ---- | -------------------------------------------------------------------------------------------------- |
-| 照片 | 分页时间线 + 快捷入口（收藏、精选推荐、重复照片、人物、搜索）                                      |
-| 搜索 | 关键词搜索与语义搜索模式切换                                                                       |
-| 相册 | 目录相册网格，进入相册详情（Room Paging 分页加载）                                                 |
+| Tab  | 内容                                                                                             |
+| ---- | ------------------------------------------------------------------------------------------------ |
+| 照片 | 分页时间线 + 快捷入口（收藏、精选推荐、重复照片、人物、搜索）                                    |
+| 搜索 | 关键词搜索与语义搜索模式切换                                                                     |
+| 相册 | 目录相册网格，进入相册详情（Room Paging 分页加载）                                               |
 | 设置 | 扫描目录、忽略规则、主题、AI 偏好等；含“更多功能”入口（插件管理、分析性能、AI 识别偏好、回收站） |
 
 二级页面还包括：媒体查看器、人物详情、换脸（实验性）、模型导入向导等。
@@ -70,14 +68,13 @@
 
 ### 系统要求与权限
 
-
-| 项目     | 要求                                                                                                                              |
-| -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Android  | Android 10（API 29）及以上（compileSdk/targetSdk 35）                                                                             |
-| ABI      | `arm64-v8a` 真机；`x86_64` 模拟器                                                                                                 |
+| 项目     | 要求                                                                                                                         |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Android  | Android 10（API 29）及以上（compileSdk/targetSdk 35）                                                                        |
+| ABI      | `arm64-v8a` 真机；`x86_64` 模拟器                                                                                            |
 | 媒体权限 | Android 13+ 需要“照片和视频”权限（READ_MEDIA_IMAGES/VIDEO）；Android 10–12 使用“所有文件访问权限”（MANAGE_EXTERNAL_STORAGE） |
-| 通知权限 | 可选；用于显示长时间扫描/分析的前台服务通知                                                                                       |
-| 网络     | 仅模型下载和远程模型目录使用；本地扫描与 AI 推理不需要网络                                                                        |
+| 通知权限 | 可选；用于显示长时间扫描/分析的前台服务通知                                                                                  |
+| 网络     | 仅模型下载和远程模型目录使用；本地扫描与 AI 推理不需要网络                                                                   |
 
 ### 快速开始
 
@@ -92,6 +89,7 @@
 #### 前置条件
 
 - JDK 17 或更高版本
+- Gradle 8.13（由 wrapper 自动下载）
 - Android SDK 35
 - Android NDK `27.0.12077973`
 - CMake `3.22.1`
@@ -113,15 +111,18 @@ chmod +x scripts/download_models.sh
 
 脚本从项目 Release（v0.1.0）下载以下模型，已存在的非空文件会被跳过：
 
-
-| 模型                  | 文件                                                                                  | Source set | 用途                  |
-| --------------------- | ------------------------------------------------------------------------------------- | ---------- | --------------------- |
-| EVA02-CLIP（int8）    | `eva02_clip/eva02_text_int8.onnx`、`eva02_visual_336_int8.onnx`                       | Full-only  | 语义搜索文本/图片编码 |
+| 模型                  | 文件                                                                                  | Source set | 用途                   |
+| --------------------- | ------------------------------------------------------------------------------------- | ---------- | ---------------------- |
+| EVA02-CLIP（int8）    | `eva02_clip/eva02_text_int8.onnx`、`eva02_visual_336_int8.onnx`                       | Full-only  | 语义搜索文本/图片编码  |
 | InsightFace buffalo_l | `buffalo_l.zip`（内含 SCRFD `det_10g` + ArcFace `w600k_r50`）                         | 共享       | 默认人脸检测与换脸特征 |
-| inswapper_128         | `inswapper_128.onnx` + `emap_512.bin`                                                 | 共享       | 换脸（实验性）        |
-| PaddleOCR             | `PP-OCRv5_mobile_rec_infer/inference.onnx`、`PP-OCRv6_small_det_infer/inference.onnx` | Full-only  | 文字识别/检测         |
+| inswapper_128         | `inswapper_128.onnx` + `emap_512.bin`                                                 | 共享       | 换脸（实验性）         |
+| PaddleOCR             | `PP-OCRv5_mobile_rec_infer/inference.onnx`、`PP-OCRv6_small_det_infer/inference.onnx` | Full-only  | 文字识别/检测          |
 
 模型下载失败时可重新执行脚本；emap 矩阵也可通过 `python scripts/extract_emap.py` 从 `inswapper_128.onnx` 重新提取。请不要将大型二进制模型提交到 Git。
+
+#### 持续集成
+
+[`.github/workflows/android.yml`](.github/workflows/android.yml) 提供 Full/Lite 双矩阵 CI：JVM 单测、AndroidTest 编译、Debug APK、Lint，以及 release-evidence 任务（Release APK/AAB 构建、Room schema 漂移守卫、SBOM/NOTICE 清单与发布证据生成，脚本见 [`scripts/`](scripts/)）。
 
 #### Debug 构建、测试与安装
 
@@ -135,6 +136,8 @@ chmod +x scripts/download_models.sh
 
 ### 架构概览
 
+> 更完整的模块/包级架构、核心子系统与数据流说明见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
 ```text
 Compose UI / ViewModels
         ↓
@@ -144,7 +147,6 @@ HybridIndexer ─── PluginAnalysisPipeline ─── CapabilityRegistryV2
         ↓                    ↓
 Room / DataStore       Provider + ModelManager
 ```
-
 
 | 模块                                                                                          | 责任                                                                   |
 | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
@@ -156,13 +158,12 @@ Room / DataStore       Provider + ModelManager
 | [`core/analysis/`](app/src/main/java/com/renyxin/localalbum/core/analysis/)                   | 人脸聚类、完全重复检测（SHA-256）、AI 偏好                             |
 | [`data/db/`](app/src/main/java/com/renyxin/localalbum/data/db/)                               | Room 实体、DAO 与非破坏数据库迁移（当前 v32，迁移链 8→32）             |
 | [`data/worker/`](app/src/main/java/com/renyxin/localalbum/data/worker/)                       | 共享扫描、分析、缩略图、重复检测、删除重试等 WorkManager 任务          |
-| [`full/`](app/src/full/)                                                                       | Full-only Stage、人物/语义维护 Worker、人物/语义 UI 与模型资产          |
-| [`lite/`](app/src/lite/)                                                                       | Lite policy、禁用的可选搜索模式及空 UI/Stage/Worker contribution       |
+| [`full/`](app/src/full/)                                                                      | Full-only Stage、人物/语义维护 Worker、人物/语义 UI 与模型资产         |
+| [`lite/`](app/src/lite/)                                                                      | Lite policy、禁用的可选搜索模式及空 UI/Stage/Worker contribution       |
 | [`data/backup/`](app/src/main/java/com/renyxin/localalbum/data/backup/)                       | JSON 索引导入与导出（staging + 单事务提交）                            |
 | [`ui/`](app/src/main/java/com/renyxin/localalbum/ui/)                                         | Compose 页面、组件、主题与自管理返回栈导航                             |
 
 ### AI 能力与默认实现
-
 
 | 能力 | 默认实现                                                          | 结果                            |
 | ---- | ----------------------------------------------------------------- | ------------------------------- |
@@ -211,7 +212,7 @@ LocalAlbum is an Android 10+ local media manager. It indexes user-selected folde
 
 ### Editions and build
 
-The same app module provides compile-time `full` and `lite` product flavors. Full includes people albums, semantic search, and automatic face/semantic/OCR analysis. Lite excludes those batch stages, maintenance workers, and UI entries while retaining keyword/metadata search and interactive face swap with its shared ONNX/OpenCV runtime and models.
+The same app module provides compile-time `full` and `lite` product flavors. Full includes people albums, semantic search, and the automatic five-stage (face/scene/quality/semantic/OCR) enhancement pipeline. Lite excludes those batch stages, maintenance workers, and UI entries while retaining keyword/metadata search, manual scene/quality enhancement, and interactive face swap with its shared ONNX/OpenCV runtime and models; Lite's automatic enhancement plan is deliberately fail-closed.
 
 Requirements: JDK 17+, Android SDK 35, NDK `27.0.12077973`, and CMake `3.22.1`.
 

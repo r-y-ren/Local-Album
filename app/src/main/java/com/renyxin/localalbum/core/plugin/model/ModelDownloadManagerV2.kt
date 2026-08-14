@@ -3,7 +3,10 @@ package com.renyxin.localalbum.core.plugin.model
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -23,6 +26,16 @@ class ModelDownloadManagerV2(
         private const val BUFFER_SIZE = 8192
     }
 
+    /**
+     * 按目标模型文件名的互斥锁：同一模型并发 `ensureModel` 时串行化，
+     * 防止两个调用方写同一个 `.tmp` 临时文件互相覆写（Phase 4 并发加固）。
+     * 单例收敛后实例内已唯一，此锁同时防御未来出现的新调用路径。
+     */
+    private val fileLocks = ConcurrentHashMap<String, Mutex>()
+
+    private fun lockFor(modelFileName: String): Mutex =
+        fileLocks.computeIfAbsent(modelFileName) { Mutex() }
+
     fun getModelDir(): File {
         val dir = File(context.filesDir, "models")
         if (!dir.exists()) dir.mkdirs()
@@ -38,6 +51,17 @@ class ModelDownloadManagerV2(
         url: String,
         expectedSha256: String? = null,
         progress: ProgressCallback? = null,
+    ): File? = lockFor(modelFileName).withLock {
+        withContext(Dispatchers.IO) {
+            downloadLocked(modelFileName, url, expectedSha256, progress)
+        }
+    }
+
+    private suspend fun downloadLocked(
+        modelFileName: String,
+        url: String,
+        expectedSha256: String?,
+        progress: ProgressCallback?,
     ): File? = withContext(Dispatchers.IO) {
         val modelFile = File(getModelDir(), modelFileName)
 

@@ -285,16 +285,6 @@ class PluginRegistry(
     }
 
     /**
-     * 获取所有已加载且就绪的 AI 插件列表。
-     *
-     * 供 [PluginAnalysisPipeline.create] 工厂方法使用，
-     * 将外部插件包裹为 [PluginAnalysisStage] 嵌入管道编排。
-     */
-    fun getLoadedPlugins(): List<AiPlugin> {
-        return plugins.values.filter { it.isReady() }
-    }
-
-    /**
      * 列出所有已加载的插件。
      */
     fun listAll(): List<AiPlugin> = plugins.values.toList()

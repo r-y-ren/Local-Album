@@ -25,7 +25,7 @@ import kotlinx.coroutines.sync.withLock
  * 扩展插件注册表（Phase 3-4 重构）。
  *
  * 独立管理交互式调用的扩展 AI 插件（换脸、风格迁移、自定义检测等），
- * 与核心管道的 [com.renyxin.localalbum.core.plugin.capability.CapabilityRegistry] 完全分离。
+ * 与核心管道的能力注册表 [CapabilityRegistryV2] 完全分离。
  *
  * ## 三通道注册（Phase 4）
  *

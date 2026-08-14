@@ -37,6 +37,7 @@ import com.renyxin.localalbum.core.plugin.model.LocalModelCatalog
 import com.renyxin.localalbum.core.plugin.model.ModelCatalog
 import com.renyxin.localalbum.core.plugin.model.MobileCLIPProvider
 import com.renyxin.localalbum.core.plugin.model.MobileNetSceneProvider
+import com.renyxin.localalbum.core.plugin.model.ModelDownloadManagerV2
 import com.renyxin.localalbum.core.plugin.model.ModelManagerImpl
 import com.renyxin.localalbum.core.plugin.model.ModelStorageManager
 import com.renyxin.localalbum.core.plugin.capability.builtin.MlKitFaceProvider
@@ -78,13 +79,21 @@ class AppContainer(context: Context) {
     // ---- Phase 1 改进: 统一模型管理器 ----
 
     /**
+     * 全进程唯一的模型下载器（Phase 4 单例收敛）。
+     *
+     * `MainActivity` 的 `PluginViewModel`（市场下载）与 [modelManager]（管线模型下载）
+     * 共用此实例，避免双实例并发下载同一模型时 `.tmp` 临时文件互写。
+     */
+    val modelDownloadManager by lazy { ModelDownloadManagerV2(context.applicationContext) }
+
+    /**
      * 统一的模型管理器单例（Phase 1 改进计划）。
      *
      * 集中管理所有需要下载的 AI 模型的生命周期：
      * 注册 → 下载 → 加载到内存 → 推理 → 卸载。
      * 所有模型类 Provider 通过此实例获取底层 TFLite [org.tensorflow.lite.Interpreter]。
      */
-    val modelManager = ModelManagerImpl(context.applicationContext)
+    val modelManager = ModelManagerImpl(context.applicationContext, modelDownloadManager)
 
     /**
      * 模型存储管理器（Phase 4 新增）。

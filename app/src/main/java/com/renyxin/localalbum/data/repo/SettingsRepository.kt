@@ -26,55 +26,100 @@ data class SettingsState(
     val albumSortMode: Int = 0,
 )
 
+/** [SettingsRepository.state] 的中间层之一：扫描与基础显示设置（命名解构，字段与流一一对应）。 */
+private data class ScanAndBasicSettings(
+    val scanRoots: List<String>,
+    val ignoreDirNames: List<String>,
+    val themeMode: Int,
+    val analysisSchedulingMode: AnalysisSchedulingMode,
+    val onboardingCompleted: Boolean,
+)
+
+/** [SettingsRepository.state] 的中间层之一：AI 分析偏好的原始持久化值（推荐偏好单独在 [MiscSettings]）。 */
+private data class AiRawSettings(
+    val faceGroupingStrictness: Int,
+    val faceMinimumGroupSize: Int,
+    val ocrAnalysisScope: Int,
+    val semanticSearchStrictness: Int,
+    val semanticSearchResultCount: Int,
+)
+
+/** [SettingsRepository.state] 的中间层之一：推荐偏好与显示开关。 */
+private data class MiscSettings(
+    val recommendationPreference: Int,
+    val showNomediaDirectories: Boolean,
+    val showAnalysisProgressUi: Boolean,
+    val albumSortMode: Int,
+)
+
 /**
  * 设置仓库：封装 [SettingsStore]，对外提供合并后的 [SettingsState] 流与增删操作。
  */
 class SettingsRepository(private val store: SettingsStore) {
 
     val state: Flow<SettingsState> = combine(
-        store.scanRoots,
-        store.ignoreDirNames,
-        store.themeMode,
-        store.analysisSchedulingMode,
-        store.faceGroupingStrictness,
-        store.faceMinimumGroupSize,
-        store.ocrAnalysisScope,
-        store.semanticSearchStrictness,
-        store.semanticSearchResultCount,
-        store.recommendationPreference,
-        store.onboardingCompleted,
-        store.showNomediaDirectories,
-        store.showAnalysisProgressUi,
-        store.albumSortMode,
-    ) { values ->
-        @Suppress("UNCHECKED_CAST")
-        val roots = values[0] as List<String>
-        @Suppress("UNCHECKED_CAST")
-        val ignores = values[1] as List<String>
-        val theme = values[2] as Int
-        val schedulingMode = AnalysisSchedulingMode.fromPersistedValue(values[3] as Int)
+        combine(
+            store.scanRoots,
+            store.ignoreDirNames,
+            store.themeMode,
+            store.analysisSchedulingMode,
+            store.onboardingCompleted,
+        ) { scanRoots, ignoreDirNames, themeMode, analysisSchedulingMode, onboardingCompleted ->
+            ScanAndBasicSettings(
+                scanRoots = scanRoots,
+                ignoreDirNames = ignoreDirNames,
+                themeMode = themeMode,
+                analysisSchedulingMode = AnalysisSchedulingMode.fromPersistedValue(analysisSchedulingMode),
+                onboardingCompleted = onboardingCompleted,
+            )
+        },
+        combine(
+            store.faceGroupingStrictness,
+            store.faceMinimumGroupSize,
+            store.ocrAnalysisScope,
+            store.semanticSearchStrictness,
+            store.semanticSearchResultCount,
+        ) { faceGroupingStrictness, faceMinimumGroupSize, ocrAnalysisScope, semanticSearchStrictness, semanticSearchResultCount ->
+            AiRawSettings(
+                faceGroupingStrictness = faceGroupingStrictness,
+                faceMinimumGroupSize = faceMinimumGroupSize,
+                ocrAnalysisScope = ocrAnalysisScope,
+                semanticSearchStrictness = semanticSearchStrictness,
+                semanticSearchResultCount = semanticSearchResultCount,
+            )
+        },
+        combine(
+            store.recommendationPreference,
+            store.showNomediaDirectories,
+            store.showAnalysisProgressUi,
+            store.albumSortMode,
+        ) { recommendationPreference, showNomediaDirectories, showAnalysisProgressUi, albumSortMode ->
+            MiscSettings(
+                recommendationPreference = recommendationPreference,
+                showNomediaDirectories = showNomediaDirectories,
+                showAnalysisProgressUi = showAnalysisProgressUi,
+                albumSortMode = albumSortMode,
+            )
+        },
+    ) { basic, ai, misc ->
         val aiPreferences = AiAnalysisPreferences(
-            faceGroupingStrictness = FaceGroupingStrictness.fromPersistedValue(values[4] as Int),
-            faceMinimumGroupSize = values[5] as Int,
-            ocrAnalysisScope = OcrAnalysisScope.fromPersistedValue(values[6] as Int),
-            semanticSearchStrictness = SemanticSearchStrictness.fromPersistedValue(values[7] as Int),
-            semanticSearchResultCount = values[8] as Int,
-            recommendationPreference = RecommendationPreference.fromPersistedValue(values[9] as Int),
+            faceGroupingStrictness = FaceGroupingStrictness.fromPersistedValue(ai.faceGroupingStrictness),
+            faceMinimumGroupSize = ai.faceMinimumGroupSize,
+            ocrAnalysisScope = OcrAnalysisScope.fromPersistedValue(ai.ocrAnalysisScope),
+            semanticSearchStrictness = SemanticSearchStrictness.fromPersistedValue(ai.semanticSearchStrictness),
+            semanticSearchResultCount = ai.semanticSearchResultCount,
+            recommendationPreference = RecommendationPreference.fromPersistedValue(misc.recommendationPreference),
         ).normalized()
-        val onboarding = values[10] as Boolean
-        val showNomedia = values[11] as Boolean
-        val showAnalysisProgressUi = values[12] as Boolean
-        val albumSort = values[13] as Int
         SettingsState(
-            scanRoots = roots,
-            ignoreDirNames = ignores,
-            themeMode = theme,
-            analysisSchedulingMode = schedulingMode,
+            scanRoots = basic.scanRoots,
+            ignoreDirNames = basic.ignoreDirNames,
+            themeMode = basic.themeMode,
+            analysisSchedulingMode = basic.analysisSchedulingMode,
             aiAnalysisPreferences = aiPreferences,
-            onboardingCompleted = onboarding,
-            showNomediaDirectories = showNomedia,
-            showAnalysisProgressUi = showAnalysisProgressUi,
-            albumSortMode = albumSort,
+            onboardingCompleted = basic.onboardingCompleted,
+            showNomediaDirectories = misc.showNomediaDirectories,
+            showAnalysisProgressUi = misc.showAnalysisProgressUi,
+            albumSortMode = misc.albumSortMode,
         )
     }
 
