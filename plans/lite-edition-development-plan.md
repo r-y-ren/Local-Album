@@ -1176,7 +1176,7 @@ Lite 保留真实换脸，同时扫描前/中不主动加载换脸资源。
 
 - Scene：`AUTO_DISABLED`。当前无绑定 Android 设备、数据集和完整 scene-auto-off/on A/B，任何缺失测量均按失败处理；Scene 仍只属于 ENHANCEMENT，手动计划能力保留，不存在 CORE 选项。
 - Quality：`AUTO_DISABLED`。除缺少绑定设备 A/B 外，当前 Provider API 尚不能证明与媒体元数据解析复用同一 Bitmap，Stage 明确记录 `bitmapDecodeReused=false`；Quality 仍只属于 ENHANCEMENT，手动计划能力保留，不存在 CORE 选项。
-- 冻结证据为 [`lite-phase7-enhancement-admission-report.json`](evidence/lite-phase7-enhancement-admission-report.json)，文件 SHA-256 为 `deb7718c2f158fc2c72d7fdde107df1657424274027370084b40eb5e78acb043`。该报告只记录“无设备、未批准、自动关闭”，没有伪造任何 P95/P99、TCore、吞吐、内存或稳定性数值。
+- 冻结证据为 [`lite-phase7-enhancement-admission-report.json`](evidence/lite-phase7-enhancement-admission-report.json)，仓库规范化 LF 文件的 SHA-256 为 `c78cb8c3466e3ab342dd813af35fae9d0a3cbe27bb7d6a836a39871f01ef4378`。该报告只记录“无设备、未批准、自动关闭”，没有伪造任何 P95/P99、TCore、吞吐、内存或稳定性数值。
 
 已完成：
 

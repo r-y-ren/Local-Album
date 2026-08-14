@@ -77,7 +77,7 @@ object LiteScanFeaturePolicy : ScanFeaturePolicy {
     override val claimLegacyFullAnalysisTasks: Boolean = false
     override val enhancementAdmissionIdentity = EnhancementAdmissionIdentity(
         reportId = "lite-scene-quality-phase7",
-        reportHash = "sha256:deb7718c2f158fc2c72d7fdde107df1657424274027370084b40eb5e78acb043",
+        reportHash = "sha256:c78cb8c3466e3ab342dd813af35fae9d0a3cbe27bb7d6a836a39871f01ef4378",
     )
 
     private val manualEnhancementStages = listOf(
