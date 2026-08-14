@@ -74,6 +74,13 @@ import com.renyxin.localalbum.core.pipeline.ProgressManager
  * - 取消按钮（支持中断耗时任务）
  * - 管道完成后自动隐藏
  *
+ * 浮层三态（消除「扫描期空白 / 识别批次间空窗」误号）：
+ * 1. [ProgressOverlayMode.ANALYSIS]：分析管线运行中，展示原有可展开分析卡片；
+ * 2. [ProgressOverlayMode.SCAN]：核心扫描运行中（管线尚未开始），展示扫描进度卡片；
+ * 3. [ProgressOverlayMode.WAITING]：增强任务已入队但管线批次间空窗
+ *    （AnalysisWorker 按批租约执行，每批结束 onPipelineComplete 会短暂将
+ *    isCompleted 置 true），展示「等待下一批次」卡片避免浮层消失。
+ *
  * 使用方式：
  * ```kotlin
  * GlobalProgressIndicator(
@@ -85,15 +92,30 @@ import com.renyxin.localalbum.core.pipeline.ProgressManager
  * @param progressManager 管道级 [ProgressManager]
  * @param onCancel 取消回调（可选），用户点击取消按钮时调用
  * @param modifier 外部 Modifier
+ * @param scanMessage 核心扫描阶段的人类可读状态文案；null 表示当前无核心扫描
+ * @param scanProcessed 核心扫描已处理文件数（0 表示不确定进度）
+ * @param scanTotal 核心扫描总文件数（0 表示不确定进度）
+ * @param analysisPending 增强任务已入队/运行中（EnhancementState 为
+ *   QUEUED/RUNNING/WAITING_FOR_CORE 时为 true），用于批次间空窗保持浮层
  */
 @Composable
 fun GlobalProgressIndicator(
     progressManager: ProgressManager,
     onCancel: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    scanMessage: String? = null,
+    scanProcessed: Int = 0,
+    scanTotal: Int = 0,
+    analysisPending: Boolean = false,
 ) {
     val progress by progressManager.progress.collectAsState()
-    val isVisible = !progress.isCompleted && (progress.totalFiles > 0 || progress.hasError)
+    val analysisVisible = !progress.isCompleted && (progress.totalFiles > 0 || progress.hasError)
+    val overlayMode = resolveProgressOverlayMode(
+        analysisRunning = analysisVisible,
+        scanActive = scanMessage != null,
+        analysisPending = analysisPending,
+    )
+    val isVisible = overlayMode != ProgressOverlayMode.HIDDEN
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val density = LocalDensity.current
@@ -133,9 +155,54 @@ fun GlobalProgressIndicator(
                     }
                 },
         ) {
-            ExpandableProgressCard(progress = progress, onCancel = onCancel)
+            when (overlayMode) {
+                ProgressOverlayMode.ANALYSIS ->
+                    ExpandableProgressCard(progress = progress, onCancel = onCancel)
+                ProgressOverlayMode.SCAN ->
+                    ScanProgressCard(
+                        message = scanMessage.orEmpty(),
+                        processed = scanProcessed,
+                        total = scanTotal,
+                    )
+                ProgressOverlayMode.WAITING ->
+                    WaitingBatchCard()
+                ProgressOverlayMode.HIDDEN -> Unit
+            }
         }
     }
+}
+
+/** 全局进度浮层的显示模式。 */
+enum class ProgressOverlayMode {
+    /** 分析管线运行中：展示可展开的分析进度卡片。 */
+    ANALYSIS,
+
+    /** 核心扫描运行中：展示扫描进度卡片。 */
+    SCAN,
+
+    /** 增强任务已入队但管线批次间空窗：展示等待卡片。 */
+    WAITING,
+
+    /** 无任何进度可展示：浮层隐藏。 */
+    HIDDEN,
+}
+
+/**
+ * 浮层模式判定（纯函数，供单元测试覆盖）。
+ *
+ * 优先级：分析运行 > 核心扫描 > 等待批次 > 隐藏。
+ * 分析批次间空窗由 [analysisPending]（EnhancementState 为 QUEUED/RUNNING/WAITING_FOR_CORE）
+ * 兜底，避免浮层在 Worker 退避重试间隙闪烁消失。
+ */
+internal fun resolveProgressOverlayMode(
+    analysisRunning: Boolean,
+    scanActive: Boolean,
+    analysisPending: Boolean,
+): ProgressOverlayMode = when {
+    analysisRunning -> ProgressOverlayMode.ANALYSIS
+    scanActive -> ProgressOverlayMode.SCAN
+    analysisPending -> ProgressOverlayMode.WAITING
+    else -> ProgressOverlayMode.HIDDEN
 }
 
 @Composable
@@ -226,6 +293,116 @@ private fun ExpandableProgressCard(
                 exit = shrinkVertically() + fadeOut(),
             ) {
                 ExpandedDetail(progress, summary, onCancel)
+            }
+        }
+    }
+}
+
+/** 核心扫描阶段的轻量进度卡片（管线尚未开始，仅有 ScanState 数据）。 */
+@Composable
+private fun ScanProgressCard(
+    message: String,
+    processed: Int,
+    total: Int,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(12.dp),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.97f),
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(7.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "正在扫描媒体库",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = message.ifBlank { "正在建立媒体索引…" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (total > 0 && processed > 0) {
+                    Text(
+                        text = "${processed}/${total}",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            if (total > 0) {
+                LinearProgressIndicator(
+                    progress = { (processed.toFloat() / total).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    strokeCap = StrokeCap.Round,
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    strokeCap = StrokeCap.Round,
+                )
+            }
+            Text(
+                text = "扫描完成后将自动开始 AI 识别",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+    }
+}
+
+/** 识别批次间空窗的等待卡片（增强任务已入队，Worker 批次间隙）。 */
+@Composable
+private fun WaitingBatchCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(12.dp),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.97f),
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Default.PlayArrow,
+                null,
+                Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "AI 识别进行中",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "正在准备下一批分析任务…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
