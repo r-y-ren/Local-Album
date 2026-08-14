@@ -180,79 +180,83 @@ tasks.withType<KotlinCompile>().configureEach {
 }
 
 dependencies {
+    // 依赖坐标统一由 gradle/libs.versions.toml（Version Catalog）管理；
+    // 版本与迁移前字符串声明完全一致，未夹带任何升级。
+    // 注：本模块以 apply(plugin=) 方式应用插件，dependencies 块无 implementation 等类型安全访问器，
+    // 故统一保留 add("configuration", libs.xxx) 写法。
+
     // OpenCV — 仿射变换 + 泊松融合（换脸 Reactor 流水线）
     add("implementation", project(":opencv"))
 
-    val composeBom = platform("androidx.compose:compose-bom:2024.09.02")
+    val composeBom = platform(libs.androidx.compose.bom)
 
-    add("implementation", "androidx.core:core-ktx:1.13.1")
-    add("implementation", "androidx.lifecycle:lifecycle-runtime-ktx:2.8.5")
-    add("implementation", "androidx.lifecycle:lifecycle-viewmodel-compose:2.8.5")
-    add("implementation", "androidx.lifecycle:lifecycle-runtime-compose:2.8.5")
-    add("implementation", "androidx.activity:activity-compose:1.9.2")
+    add("implementation", libs.androidx.core.ktx)
+    add("implementation", libs.androidx.lifecycle.runtime.ktx)
+    add("implementation", libs.androidx.lifecycle.viewmodel.compose)
+    add("implementation", libs.androidx.lifecycle.runtime.compose)
+    add("implementation", libs.androidx.activity.compose)
 
     add("implementation", composeBom)
     add("androidTestImplementation", composeBom)
 
-    add("implementation", "androidx.compose.ui:ui")
-    add("implementation", "androidx.compose.ui:ui-tooling-preview")
-    add("implementation", "androidx.compose.material:material-icons-extended")
-    add("implementation", "androidx.compose.material3:material3:1.3.0")
-    add("implementation", "com.google.android.material:material:1.14.0")
+    add("implementation", libs.androidx.compose.ui)
+    add("implementation", libs.androidx.compose.ui.tooling.preview)
+    add("implementation", libs.androidx.compose.material.icons.extended)
+    add("implementation", libs.androidx.compose.material3)
+    add("implementation", libs.google.material)
 
-    add("implementation", "androidx.datastore:datastore-preferences:1.1.1")
-    add("implementation", "androidx.exifinterface:exifinterface:1.3.7")
-    add("implementation", "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    add("implementation", libs.androidx.datastore.preferences)
+    add("implementation", libs.androidx.exifinterface)
+    add("implementation", libs.kotlinx.coroutines.android)
 
     // Coil for image loading (含视频帧解码，使视频预览图可直接从视频文件提取)
-    add("implementation", "io.coil-kt:coil-compose:2.6.0")
-    add("implementation", "io.coil-kt:coil-video:2.6.0")
+    add("implementation", libs.coil.compose)
+    add("implementation", libs.coil.video)
 
     // Media3 for video playback
-    add("implementation", "androidx.media3:media3-exoplayer:1.4.1")
-    add("implementation", "androidx.media3:media3-ui:1.4.1")
-    add("implementation", "androidx.media3:media3-common:1.4.1")
+    add("implementation", libs.androidx.media3.exoplayer)
+    add("implementation", libs.androidx.media3.ui)
+    add("implementation", libs.androidx.media3.common)
 
     // Room
-    val roomVersion = "2.6.1"
-    add("implementation", "androidx.room:room-runtime:$roomVersion")
-    add("implementation", "androidx.room:room-ktx:$roomVersion")
-    add("implementation", "androidx.room:room-paging:$roomVersion")
-    add("ksp", "androidx.room:room-compiler:$roomVersion")
-    add("androidTestImplementation", "androidx.room:room-testing:$roomVersion")
+    add("implementation", libs.androidx.room.runtime)
+    add("implementation", libs.androidx.room.ktx)
+    add("implementation", libs.androidx.room.paging)
+    add("ksp", libs.androidx.room.compiler)
+    add("androidTestImplementation", libs.androidx.room.testing)
 
     // WorkManager
-    add("implementation", "androidx.work:work-runtime-ktx:2.9.1")
+    add("implementation", libs.androidx.work.runtime.ktx)
 
     // Paging 3
-    add("implementation", "androidx.paging:paging-runtime-ktx:3.3.2")
-    add("implementation", "androidx.paging:paging-compose:3.3.2")
+    add("implementation", libs.androidx.paging.runtime.ktx)
+    add("implementation", libs.androidx.paging.compose)
 
     // ML Kit Text Recognition (OCR) — Full-only；Lite v1 无自动或手动 OCR 能力。
-    add("fullImplementation", "com.google.mlkit:text-recognition:16.0.1")
-    add("fullImplementation", "com.google.mlkit:text-recognition-chinese:16.0.1")
+    add("fullImplementation", libs.mlkit.text.recognition)
+    add("fullImplementation", libs.mlkit.text.recognition.chinese)
 
     // ML Kit Face Detection (人脸聚类 + Lite 交互式换脸的人脸 Provider)
-    add("implementation", "com.google.mlkit:face-detection:16.1.7")
+    add("implementation", libs.mlkit.face.detection)
 
     // TensorFlow Lite — 设备端 ML 推理（项目仅使用核心 Interpreter API）
-    add("implementation", "org.tensorflow:tensorflow-lite:2.14.0")
+    add("implementation", libs.tensorflow.lite)
 
     // ONNX Runtime — 升级到 1.19.2 以支持 EVA02-CLIP 模型所需的 ArgMax(13) 等算子
-    add("implementation", "com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
+    add("implementation", libs.onnxruntime.android)
 
     // PyTorch Mobile Lite — 插件模型运行时（Phase 2.3，支持 .ptl 格式模型）
-    add("implementation", "org.pytorch:pytorch_android_lite:1.13.1")
+    add("implementation", libs.pytorch.android.lite)
 
     // Core Library Desugaring
-    add("coreLibraryDesugaring", "com.android.tools:desugar_jdk_libs:2.0.4")
+    add("coreLibraryDesugaring", libs.desugar.jdk.libs)
 
-    add("testImplementation", "junit:junit:4.13.2")
-    add("testImplementation", "org.jetbrains.kotlin:kotlin-test:1.9.24")
-    add("testImplementation", "org.json:json:20240303")
-    add("testImplementation", "org.mockito:mockito-core:5.5.0")
+    add("testImplementation", libs.junit)
+    add("testImplementation", libs.kotlin.test)
+    add("testImplementation", libs.json)
+    add("testImplementation", libs.mockito.core)
 
-    add("androidTestImplementation", "androidx.test.ext:junit:1.2.1")
+    add("androidTestImplementation", libs.androidx.test.ext.junit)
 
-    add("debugImplementation", "androidx.compose.ui:ui-tooling")
+    add("debugImplementation", libs.androidx.compose.ui.tooling)
 }

@@ -20,6 +20,28 @@ import androidx.compose.ui.platform.LocalContext
  */
 enum class ThemeMode { System, Light, Dark }
 
+/** 持久化的主题模式取值：0=System，1=Light，2=Dark（SettingsStore 写入时 coerceIn(0, 2)）。 */
+private const val THEME_MODE_SYSTEM = 0
+private const val THEME_MODE_LIGHT = 1
+private const val THEME_MODE_DARK = 2
+
+/**
+ * 将持久化 Int 还原为 [ThemeMode]（MainActivity 与 LocalAlbumApp 共享的唯一映射）。
+ * 越界/未知值一律回退 [ThemeMode.System]。
+ */
+fun themeModeFromPersisted(mode: Int): ThemeMode = when (mode) {
+    THEME_MODE_LIGHT -> ThemeMode.Light
+    THEME_MODE_DARK -> ThemeMode.Dark
+    else -> ThemeMode.System
+}
+
+/** [ThemeMode] 对应的持久化 Int（与 [themeModeFromPersisted] 互逆）。 */
+fun themeModePersistedValue(mode: ThemeMode): Int = when (mode) {
+    ThemeMode.System -> THEME_MODE_SYSTEM
+    ThemeMode.Light -> THEME_MODE_LIGHT
+    ThemeMode.Dark -> THEME_MODE_DARK
+}
+
 private val LightColorScheme = lightColorScheme(
     primary = Color(0xFF1A73E8),
     onPrimary = Color.White,

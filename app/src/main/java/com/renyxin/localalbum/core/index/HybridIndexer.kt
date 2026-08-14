@@ -47,6 +47,28 @@ import java.util.concurrent.atomic.AtomicInteger
  * - fingerprintHead 作为 modifiedAt 变化时的内容真实性二次校验（mtime 相同视为未变更，跳过指纹计算）
  * - 扫描流水线：枚举 → 元数据提取 → 缩略图 → 入库
  */
+/**
+ * 构造参数契约（主构造 18 个参数，其中 11 个可空 DAO/组件）：
+ *
+ * - [context] / [profileId] / [mediaDao] / [mediaSource]：必有。profileId 区分 full/lite
+ *   扫描 profile（隔离扫描运行记录与删除协调器）。
+ * - [database]：可空。仅事务性复合写入（staging 提交等）需要；null 时相关路径退化为
+ *   非事务写入，主要为旧测试构造保留。
+ * - [faceDao] / [embeddingDao] / [featureStoreDao]：可空。null 时扫描不持久化对应的
+ *   AI 特征表（人脸/语义向量/异构特征），增强阶段直接跳过。
+ * - [pluginPipeline]：可空。null 时扫描完成后不驱动 AI 分析管道（纯索引模式）。
+ * - [analysisStateDao] / [analysisTaskDao]：可空。null 时无断点续跑与持久分析任务
+ *   （重分析/续跑相关 API 变为 no-op）。
+ * - [enhancementOutboxDao]：可空。null 时扫描核心完成后不入队增强 outbox。
+ * - [scanRunDao] / [scanStagingDao]：可空。null 时无扫描运行记录与 staging 流水线
+ *   （[latestScanRun] / [publishCoreComplete] 等会经 requireScanRunDao() 抛异常）。
+ * - [mediaChangeDao]：可空。null 时 ContentObserver 变更不持久化。
+ * - [deletionTombstoneDao] / [mediaDeletionCoordinator]：可空。null 时媒体删除不走
+ *   墓碑/协调器链路（删除语义退化为直接操作）。
+ * - [scanTelemetry]：默认 [LogScanTelemetry]，测量事件写 Logcat。
+ *
+ * 生产环境（AppContainer）注入全部非空；「仅 mediaDao + 少量 DAO」的组合是测试专用形态。
+ */
 class HybridIndexer(
     private val context: Context,
     private val profileId: String,
@@ -67,8 +89,29 @@ class HybridIndexer(
     private val mediaDeletionCoordinator: com.renyxin.localalbum.data.repo.MediaDeletionCoordinator? = null,
     private val scanTelemetry: ScanTelemetry = LogScanTelemetry(),
 ) {
+    /**
+     * 最近一次扫描运行记录。
+     *
+     * @return 最近一条 [ScanRunEntity]；无任何记录（未扫描过）时返回 null
+     * @throws IllegalStateException 未注入 [scanRunDao]（测试专用构造形态）
+     */
     suspend fun latestScanRun(): ScanRunEntity? = requireScanRunDao().getLatest()
 
+    /**
+     * 发布扫描核心终态（SNAPSHOT_PUBLISHED → CORE_SCAN_COMPLETED 双里程碑）。
+     *
+     * 契约：
+     * 1. 先经 [requireScanRunDao].markSnapshotPublished 将该 scanId 标记为快照已发布；
+     *    `check` 失败（影响行数 != 1）意味着 scanId 不存在或状态不满足前置条件，直接抛
+     *    [IllegalStateException]——核心终态提交绝不容忍静默丢失；
+     * 2. 依次记录 [ScanMilestone.SNAPSHOT_PUBLISHED] 与 [ScanMilestone.CORE_SCAN_COMPLETED]
+     *    两段 telemetry 里程碑（elapsedMs 均相对 result.startedAtMs）；
+     * 3. 若本次扫描有增强 outbox 条目（result.enhancementOutboxCount > 0），标记增强已入队并
+     *    调度 EnhancementHandoffWorker。入队失败（非取消异常）的降级路径：不回滚核心发布，
+     *    持久 outbox 保持 PENDING，待进程重启或回前台的恢复逻辑重新入队。
+     *
+     * @param result 本次扫描核心阶段的提交结果（scanId、起止计数、outbox 计数等）
+     */
     suspend fun publishCoreComplete(result: ScanCommitResult) {
         val completedAt = System.currentTimeMillis()
         check(requireScanRunDao().markSnapshotPublished(result.scanId, completedAt) == 1) {
@@ -108,6 +151,15 @@ class HybridIndexer(
         }
     }
 
+    /**
+     * 标记一次扫描在「索引已入库之后、核心终态发布之前」失败。
+     *
+     * 与直接废弃不同：媒体数据已落库，仅扫描运行记录被标记为失败态，
+     * 下次扫描可在此基础上做增量修复。errorType 会被截断到 80 字符以防溢出列宽。
+     *
+     * @param scanId 目标扫描运行 ID
+     * @param errorType 稳定的失败分类标识（非用户可读文案）
+     */
     suspend fun markCoreFailedAfterIndex(scanId: String, errorType: String) {
         requireScanRunDao().markCoreFailedAfterIndex(
             errorType = errorType.take(80),
@@ -129,7 +181,7 @@ class HybridIndexer(
      */
     suspend fun invalidateAnalysisState(paths: List<String>) {
         if (paths.isEmpty() || analysisStateDao == null) return
-        paths.chunked(500).forEach { chunk ->
+        paths.chunked(CHANGE_BATCH_SIZE).forEach { chunk ->
             analysisStateDao.deleteByPaths(chunk)
         }
     }

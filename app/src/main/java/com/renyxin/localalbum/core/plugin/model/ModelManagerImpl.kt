@@ -54,6 +54,12 @@ class ModelManagerImpl(
 
     companion object {
         private const val TAG = "ModelManager"
+
+        /** 模型管理器持久化标记使用的 SharedPreferences 文件名。 */
+        private const val PREFS_NAME = "model_manager_prefs"
+
+        /** 「随包内置模型已复制到本地」标记的 key（v2：换名以重置旧版标记）。 */
+        private const val KEY_BUNDLED_MODELS_COPIED = "bundled_models_copied_v2"
     }
 
     /** Phase 6: 推理调度器（优先级队列 + 并发控制） */
@@ -241,8 +247,8 @@ class ModelManagerImpl(
 
     // ---- 内置模型复制标记 (SharedPreferences key) ----
 
-    private val prefs = context.getSharedPreferences("model_manager_prefs", Context.MODE_PRIVATE)
-    private val bundledCopiedKey = "bundled_models_copied_v2"
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val bundledCopiedKey = KEY_BUNDLED_MODELS_COPIED
 
     // ===================== 注册 =====================
 
@@ -259,6 +265,26 @@ class ModelManagerImpl(
 
     // ===================== 生命周期 =====================
 
+    /**
+     * 确保模型处于可推理状态（NOT_DOWNLOADED → DOWNLOADING → DOWNLOADED → LOADING → LOADED）。
+     *
+     * 状态机转换：
+     * 1. 未注册 → 直接返回 failure（IllegalStateException），不产生状态变更；
+     * 2. 已 LOADED（对应运行时的实例池仍持有实例）→ 幂等返回 success(modelFile)；
+     * 3. asset 旁路：先尝试把 [ModelManager.ModelDescriptor.assetFileName] 命名的随包资产
+     *    重命名为 `modelId` 规范文件名，命中即视为已就绪，跳过下载；
+     * 4. NOT_DOWNLOADED / ERROR → 经注入的 [downloadManager] 下载（带 SHA-256 校验与进度
+     *    回写），失败则置 ERROR 并返回 failure；
+     * 5. 加载（mmap 模型文件 → 创建 TFLite Interpreter / ONNX session 并初始化对应实例池），
+     *    成功置 LOADED，异常置 ERROR 并返回 failure。
+     *
+     * 并发语义：整段持实例级 [mutex]（同一 [ModelManagerImpl] 内同一时刻仅一个模型在
+     * 准备），文件级下载互斥进一步由 [ModelDownloadManagerV2.ensureModel] 内的 per-file
+     * Mutex 保证；推理不持此锁（见按 modelId 的 inferenceLocks）。
+     *
+     * @param modelId 已注册的模型 ID
+     * @return success(模型文件) 或 failure（未注册/下载失败/文件缺失/加载异常）
+     */
     override suspend fun ensureModelReady(modelId: String): Result<File> {
         val descriptor = descriptors[modelId]
             ?: return Result.failure(IllegalStateException("模型未注册: $modelId"))

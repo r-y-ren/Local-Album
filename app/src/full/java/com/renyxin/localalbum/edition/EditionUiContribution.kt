@@ -15,8 +15,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaQueryContext
 import com.renyxin.localalbum.data.repo.ScanState
-import com.renyxin.localalbum.ui.MoreFeatureListItem
-import com.renyxin.localalbum.ui.QuickAccessCard
+import com.renyxin.localalbum.ui.screens.QuickAccessCard
+import com.renyxin.localalbum.ui.screens.settings.MoreFeatureListItem
 import com.renyxin.localalbum.ui.screens.AiAnalysisPreferencesScreen
 import com.renyxin.localalbum.ui.screens.FacesScreen
 import com.renyxin.localalbum.ui.vm.AlbumViewModel

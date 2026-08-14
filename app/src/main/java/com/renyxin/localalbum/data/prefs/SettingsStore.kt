@@ -17,25 +17,33 @@ private val Context.settingsDataStore: DataStore<Preferences> by preferencesData
 )
 
 /**
- * 持久化用户设置。
+ * 持久化用户设置（DataStore Preferences）。
  *  - 扫描根目录列表、忽略目录名规则
  *  - 主题模式 (0=System, 1=Light, 2=Dark)
  *  - 扫描与 AI 识别进度 UI 是否显示
  *  - 首次引导是否已完成
+ *
+ * 各 Flow 属性与 [com.renyxin.localalbum.data.repo.SettingsRepository.state] 的嵌套
+ * combine 分组（ScanAndBasicSettings / AiRawSettings / MiscSettings）按字段一一对应；
+ * 新增设置项时需同步：本类 Flow + KEY + setter + Repository 对应中间数据类，
+ * 全部为类型安全命名解构，无下标对应关系。
  */
 class SettingsStore internal constructor(
     private val store: DataStore<Preferences>,
 ) {
     constructor(context: Context) : this(context.settingsDataStore)
 
+    /** 扫描根目录绝对路径列表（去重、尾部 `/` 修剪，输出按字典序排序）。默认空列表 = 使用默认扫描策略。 */
     val scanRoots: Flow<List<String>> = store.data.map { prefs ->
         prefs[KEY_SCAN_ROOTS]?.toList()?.sorted() ?: emptyList()
     }
 
+    /** 忽略的目录名规则列表（按目录名精确/模式匹配，输出按字典序排序）。默认空列表。 */
     val ignoreDirNames: Flow<List<String>> = store.data.map { prefs ->
         prefs[KEY_IGNORE_DIRS]?.toList()?.sorted() ?: emptyList()
     }
 
+    /** 主题模式：0=跟随系统（默认），1=浅色，2=深色。写入时 coerceIn(0, 2)。 */
     val themeMode: Flow<Int> = store.data.map { prefs ->
         prefs[KEY_THEME_MODE] ?: 0
     }
@@ -45,34 +53,42 @@ class SettingsStore internal constructor(
         prefs[KEY_ANALYSIS_SCHEDULING_MODE] ?: 0
     }
 
+    /** 人脸聚类严格度：0=宽松，1=标准（默认），2=严格。写入时 coerceIn(0, 2)。 */
     val faceGroupingStrictness: Flow<Int> = store.data.map { prefs ->
         prefs[KEY_FACE_GROUPING_STRICTNESS] ?: 1
     }
 
+    /** 人脸最小成组人数：少于该值的簇不展示为分组。默认 2，范围 1..5。 */
     val faceMinimumGroupSize: Flow<Int> = store.data.map { prefs ->
         prefs[KEY_FACE_MINIMUM_GROUP_SIZE] ?: 2
     }
 
+    /** OCR 分析范围：0=关闭（默认），1=仅新图，2=全部。写入时 coerceIn(0, 2)。 */
     val ocrAnalysisScope: Flow<Int> = store.data.map { prefs ->
         prefs[KEY_OCR_ANALYSIS_SCOPE] ?: 0
     }
 
+    /** 语义搜索严格度：0=宽松，1=标准（默认），2=严格。写入时 coerceIn(0, 2)。 */
     val semanticSearchStrictness: Flow<Int> = store.data.map { prefs ->
         prefs[KEY_SEMANTIC_SEARCH_STRICTNESS] ?: 1
     }
 
+    /** 语义搜索返回结果数上限。默认 50，范围 20..100。 */
     val semanticSearchResultCount: Flow<Int> = store.data.map { prefs ->
         prefs[KEY_SEMANTIC_SEARCH_RESULT_COUNT] ?: 50
     }
 
+    /** 推荐偏好：0..4 枚举索引（由 RecommendationPreference.fromPersistedValue 解码）。默认 0。 */
     val recommendationPreference: Flow<Int> = store.data.map { prefs ->
         prefs[KEY_RECOMMENDATION_PREFERENCE] ?: 0
     }
 
+    /** 首次引导是否已完成。默认 false（未完成时 OnboardingScreen 接管首屏）。 */
     val onboardingCompleted: Flow<Boolean> = store.data.map { prefs ->
         prefs[KEY_ONBOARDING_COMPLETED] ?: false
     }
 
+    /** 扫描目录树时是否显示含 .nomedia 的目录。默认 false（遵循 .nomedia 约定跳过）。 */
     val showNomediaDirectories: Flow<Boolean> = store.data.map { prefs ->
         prefs[KEY_SHOW_NOMEDIA] ?: false
     }

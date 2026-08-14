@@ -90,11 +90,7 @@ class MainActivity : ComponentActivity() {
         hasPermission.value = checkPermission()
         setContent {
             val settingsState by settingsViewModel.state.collectAsStateWithLifecycle()
-            val themeMode = when (settingsState.themeMode) {
-                1 -> ThemeMode.Light
-                2 -> ThemeMode.Dark
-                else -> ThemeMode.System
-            }
+            val themeMode = com.renyxin.localalbum.ui.theme.themeModeFromPersisted(settingsState.themeMode)
             LocalAlbumTheme(themeMode = themeMode) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),

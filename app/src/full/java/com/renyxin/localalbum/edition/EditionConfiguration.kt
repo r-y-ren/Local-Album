@@ -13,6 +13,16 @@ import com.renyxin.localalbum.core.plugin.model.GLMOcrProvider
 import com.renyxin.localalbum.core.plugin.model.ModelManager
 import com.renyxin.localalbum.core.search.KeywordSearchProfile
 
+/**
+ * Full 版 edition 配置（本文件仅存在于 full 源集）。
+ *
+ * - [features]：full 功能开关矩阵（全能力槽位 + 语义搜索 + 插件管理）；
+ * - [registerEditionCapabilityProviders]：注册 full 专属能力（OCR 槽位及 PaddleOCR /
+ *   GLM-OCR / MlKit Provider）。调用时机：AppContainer 的 capabilityRegistry `apply` 块
+ *   末尾（即 registry 构造期间，每进程一次）；重复调用同一 slotId 的 registerSlot/registerProvider
+ *   由注册表内部幂等处理，但正常生命周期内不会发生二次调用；
+ * - [enqueueFaceClusterMaintenance]：full 允许人脸聚类维护 Worker。
+ */
 object EditionConfiguration {
     val features = EditionFeatures(
         editionId = "full",

@@ -121,6 +121,12 @@ class PluginAnalysisPipeline(
         private const val PIPELINE_SCOPE_VERSION = 1
         private const val STAGE_TASK_SCOPE_VERSION = 1
 
+        /**
+         * 分析断点表按路径批操作的分批大小（SQLite IN 子句变量上限约束；
+         * 与 HybridIndexer.CHANGE_BATCH_SIZE 同值同语义，二者各属其文件）。
+         */
+        private const val ANALYSIS_STATE_BATCH_SIZE = 500
+
         internal fun buildPipelineScope(parts: List<String>): String =
             "pipeline:v$PIPELINE_SCOPE_VERSION|" + parts.sorted().joinToString("|")
 
@@ -231,7 +237,7 @@ class PluginAnalysisPipeline(
             // 断点续跑只查询当前调用批次，禁止为一个 250 条批次加载该阶段数万条历史路径。
             // chunked 同时保护未来调用方传入较大批次时不超过 SQLite IN 参数上限。
             val donePaths: Set<String> = if (stage.isCacheable && analysisStateDao != null) {
-                targetPaths.chunked(500).flatMap { batch ->
+                targetPaths.chunked(ANALYSIS_STATE_BATCH_SIZE).flatMap { batch ->
                     analysisStateDao.getDonePathsInBatch(stage.stageId, stage.modelVersion, batch)
                 }.toSet()
             } else {
@@ -298,7 +304,7 @@ class PluginAnalysisPipeline(
             // 落库本次成功的 done 状态（仅缓存型阶段，批量事务规避 999 变量上限）
             if (stage.isCacheable && analysisStateDao != null && completedPaths.isNotEmpty()) {
                 val now = System.currentTimeMillis()
-                completedPaths.toList().chunked(500).forEach { chunk ->
+                completedPaths.toList().chunked(ANALYSIS_STATE_BATCH_SIZE).forEach { chunk ->
                     analysisStateDao.upsertAll(
                         chunk.map {
                             AnalysisStateEntity(

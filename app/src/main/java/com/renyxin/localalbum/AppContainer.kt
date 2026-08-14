@@ -64,6 +64,43 @@ import kotlinx.coroutines.withContext
 /** Phase 2: 回前台补偿扫描节流窗口（毫秒）。 */
 private const val FOREGROUND_RESCAN_THROTTLE_MS = 30_000L
 
+/** 模型状态同步的 debounce 窗口（毫秒）：合并下载期高频进度回调，避免全量重算风暴。 */
+private const val MODEL_STATUS_SYNC_DEBOUNCE_MS = 200L
+
+/** 扩展插件加载失败最大重试次数（总尝试次数 = 次数 + 1）。 */
+private const val PLUGIN_LOAD_MAX_RETRIES = 2
+
+/** 扩展插件加载重试间隔（毫秒）。 */
+private const val PLUGIN_LOAD_RETRY_DELAY_MS = 1_000L
+
+/**
+ * 手写 DI 容器：应用进程级的全部单例装配点与后台任务宿主。
+ *
+ * ## 职责
+ * 构造即完成全部核心组件的装配（按属性声明顺序）：
+ * [database] → [settingsRepository] → [modelDownloadManager]/[modelManager]/[modelStorageManager]/
+ * [modelCatalog] → [capabilityRegistry]（含各能力槽位与 Provider 注册）→ [extensionPluginRegistry]
+ * → [pluginAnalysisPipeline]（by lazy 单例）→ [hybridIndexer] → [albumRepository]。
+ *
+ * ## init 副作用清单
+ * 构造末尾的 init 块会启动以下后台任务（均跑在内部 [appScope] 上）：
+ * 1. [modelStorageManager] 存储统计刷新；
+ * 2. Demo 插件初始化（仅 [EditionFeatures.showPluginManager] 为 true 的 edition）；
+ * 3. [startModelStatusSync] —— ModelManager 状态到能力注册表的同步协程；
+ * 4. [registerBuiltinExtensions] —— 内置换脸插件注册（仅 [EditionFeatures.showFaceSwap]）；
+ * 5. [startScanProgressNotification] —— 增强分析进度通知；
+ * 6. [startAnalysisResumeFlagTracking] —— 「中断待续跑」标志维护。
+ *
+ * 注意属性声明顺序即初始化顺序：[pluginAnalysisPipeline] 必须声明在 init 块之前，
+ * 否则 init 中经 appScope.launch 异步访问它会触发 NPE（历史教训见该属性 KDoc）。
+ *
+ * ## 与 LocalAlbumApplication 的生命周期契约
+ * - 容器在 `Application.onCreate` 中构造一次，存活至进程结束（所有 Activity 停止时仅注销
+ *   ContentObserver，不 shutdown 容器）；
+ * - `Application.onCreate` 随后依序调用 [registerContentObserver]、[maybeResumePendingScanChanges]、
+ *   [loadPlugins]、[maybeResumeAnalysis] 完成启动恢复；
+ * - 回到前台（首个 Activity onStart）时由宿主调用 [maybeRescanOnForeground] 触发补偿扫描。
+ */
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
     private val processStartedAtMs = System.currentTimeMillis()
@@ -360,6 +397,22 @@ class AppContainer(context: Context) {
     }
 
     /**
+     * 内置人脸模型包（assets/models/buffalo_l.zip）是否随包分发。
+     *
+     * 纯 assets 元数据查询：不打开模型文件、不复制、不初始化任何 native runtime，
+     * 符合冷启动架构约束（NativeRuntimeArchitectureTest）。结果随包固定，缓存一次。
+     */
+    private val bundledFaceModelPackAvailable: Boolean by lazy {
+        runCatching { appContext.assets.list("models")?.contains("buffalo_l.zip") == true }
+            .getOrDefault(false)
+            .also { available ->
+                if (!available) {
+                    android.util.Log.w("AppContainer", "buffalo_l.zip 未随包，人脸聚类模型需按需来源")
+                }
+            }
+    }
+
+    /**
      * 启动 ModelManager → CapabilityRegistryV2 的状态同步协程。
      *
      * 持续监听 [modelManager] 中所有模型的 [ModelManager.ModelState] 变化，
@@ -370,7 +423,7 @@ class AppContainer(context: Context) {
         appScope.launch {
             // 修复：debounce 合并下载期间高频进度回调，避免每次状态变更都触发
             // O(slots×providers×models) 全量重算造成 CPU 开销过大。
-            modelManager.getAllModelStates().debounce(200L).collect { states ->
+            modelManager.getAllModelStates().debounce(MODEL_STATUS_SYNC_DEBOUNCE_MS).collect { states ->
                 // 诊断日志：打印所有模型状态，便于排查"内置模型未就绪"问题
                 android.util.Log.i("AppContainer", "模型状态快照: ${states.joinToString { "${it.modelId}=${it.status}" }}")
                 // modelId -> status/progress 映射
@@ -436,6 +489,28 @@ class AppContainer(context: Context) {
                         readiness = com.renyxin.localalbum.core.plugin.capability.ModelReadiness.READY,
                         progress = 0f,
                     )
+                }
+
+                // InsightFace（face 槽位默认 Provider）与 EVA02-CLIP 同理：模型随包内置
+                // （assets/models/buffalo_l.zip），运行时经 ensureModelReady 的 asset 旁路
+                // 按需解压加载，不经下载状态机。冷启动受架构约束（NativeRuntimeArchitectureTest
+                // 禁止启动期调用 prepareBundledModels）不触发 asset 解析，聚合状态因此停留在
+                // NOT_DOWNLOADED，导致"AI 插件管理"界面人脸聚类恒显"未就绪"。
+                // 仅在尚未被运行时触碰（NOT_DOWNLOADED）且 buffalo_l.zip 确实随包时修正展示语义，
+                // 不覆盖真实的 DOWNLOADING/ERROR 状态。
+                if (bundledFaceModelPackAvailable) {
+                    val faceProviderId = capabilityRegistry.getActiveProviderId("face")
+                    if (faceProviderId == "model:insightface" &&
+                        capabilityRegistry.getProviderModelStatus("face", faceProviderId) ==
+                        com.renyxin.localalbum.core.plugin.capability.ModelReadiness.NOT_DOWNLOADED
+                    ) {
+                        capabilityRegistry.updateProviderModelStatus(
+                            slotId = "face",
+                            providerId = faceProviderId,
+                            readiness = com.renyxin.localalbum.core.plugin.capability.ModelReadiness.READY,
+                            progress = 0f,
+                        )
+                    }
                 }
             }
         }
@@ -586,7 +661,9 @@ class AppContainer(context: Context) {
                 if (!progress.isCompleted && progress.processedFiles > 0) {
                     val text = appContext.getString(
                         com.renyxin.localalbum.R.string.scan_notif_stage,
-                        progress.currentStageName.ifEmpty { "正在分析" },
+                        progress.currentStageName.ifEmpty {
+                            appContext.getString(com.renyxin.localalbum.R.string.scan_notif_stage_fallback)
+                        },
                         progress.processedFiles,
                         progress.totalFiles,
                     )
@@ -599,6 +676,18 @@ class AppContainer(context: Context) {
         }
     }
 
+    /**
+     * 注册 MediaStore ContentObserver，将图片/视频变更导入增量扫描链路。
+     *
+     * 回调契约（顺序不可换）：先把变更集持久化到 Room（[HybridIndexer.recordMediaChanges]），
+     * 再调度 [com.renyxin.localalbum.data.worker.ScanWorker]，最后尝试空闲时的即时增量重扫。
+     * 「先持久化」保证扫描锁忙或进程被杀时变更集不丢失，下次启动由
+     * [maybeResumePendingScanChanges] 恢复。
+     *
+     * 生命周期：由 `LocalAlbumApplication.onCreate` 与每次回前台（首个 Activity onStart）调用；
+     * 重复注册会被 [HybridIndexer.registerContentObserver] 内部拒绝；所有 Activity 停止时
+     * 调用 [unregisterContentObserver] 注销。
+     */
     fun registerContentObserver() {
         hybridIndexer.registerContentObserver(onChanges = { changes ->
             appScope.launch {
@@ -610,6 +699,19 @@ class AppContainer(context: Context) {
         })
     }
 
+    /**
+     * 进程重启后的启动恢复入口（`LocalAlbumApplication.onCreate` 中调用）。
+     *
+     * 恢复顺序契约：
+     * 1. 若存在待和解快照或未确认的变更集，调度 ScanWorker；
+     * 2. 将 PREEMPTED（被抢占的瞬时态）增强收敛回可续跑态——用户主动 PAUSED 不在此触碰；
+     * 3. 若配置了 retired policy scope（lite v2 停用旧自动 Scene/Quality），先结算
+     *    未决的旧 scope 任务，否则它们会永远 PENDING 并卡住 EnhancementState 的终态；
+     *    结算需持有自动增强资源闸（EnhancementResourceGate），拿不到则本轮放弃（等下次启动）；
+     * 4. 逐条恢复各持久化增强队列：enhancement outbox → 分析任务 → 自动/交互缩略图任务。
+     *
+     * 幂等性：所有检查均为「存在才调度」，可安全地在每次冷启动重复调用。
+     */
     fun maybeResumePendingScanChanges() {
         appScope.launch {
             if (hybridIndexer.hasPendingReconciliation() || hybridIndexer.hasOutstandingMediaChanges()) {
@@ -700,7 +802,7 @@ class AppContainer(context: Context) {
         if (!editionFeatures.showPluginManager) return
         appScope.launch {
             var attempts = 0
-            val maxRetries = 2
+            val maxRetries = PLUGIN_LOAD_MAX_RETRIES
             var lastError: Throwable? = null
 
             while (attempts <= maxRetries) {
@@ -716,14 +818,14 @@ class AppContainer(context: Context) {
                     attempts++
                     if (attempts <= maxRetries) {
                         android.util.Log.w("AppContainer", "扩展插件加载失败，${maxRetries - attempts + 1} 秒后重试…", e)
-                        delay(1000L)
+                        delay(PLUGIN_LOAD_RETRY_DELAY_MS)
                     }
                 } catch (e: Exception) {
                     lastError = e
                     attempts++
                     if (attempts <= maxRetries) {
                         android.util.Log.w("AppContainer", "扩展插件加载异常，${maxRetries - attempts + 1} 秒后重试…", e)
-                        delay(1000L)
+                        delay(PLUGIN_LOAD_RETRY_DELAY_MS)
                     }
                 }
             }

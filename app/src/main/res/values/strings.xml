@@ -12,4 +12,5 @@
     <string name="scan_notif_scanning">Scanning media files…</string>
     <string name="scan_notif_analyzing">Analyzing AI features…</string>
     <string name="scan_notif_stage">Analyzing: %1$s (%2$d/%3$d)</string>
+    <string name="scan_notif_stage_fallback">正在分析</string>
 </resources>

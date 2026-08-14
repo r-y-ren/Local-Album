@@ -1214,6 +1214,17 @@ class PluginViewModel(
 
     // ---- Factory ----
 
+    /**
+     * PluginViewModel 的构造工厂。
+     *
+     * 各可空依赖缺失时的功能降级行为（与 ViewModel 内一致）：
+     * - [modelDownloadManager] = null：模型市场下载入口报「下载管理器未初始化」并置 ERROR；
+     * - [modelManager] = null：模型推理相关入口报「模型管理器未初始化」；
+     * - [modelStorageManager] = null：存储统计流降级为空值 Flow、缓存清理为 no-op；
+     * - [modelCatalog] = null：模型目录列表静默保持为空（不加载）。
+     *
+     * 生产路径（MainActivity）全部注入 AppContainer 单例，可空性主要为测试保留。
+     */
     class Factory(
         private val appContext: Context,
         private val database: AppDatabase,

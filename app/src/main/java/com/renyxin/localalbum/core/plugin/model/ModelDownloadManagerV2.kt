@@ -36,6 +36,11 @@ class ModelDownloadManagerV2(
     private fun lockFor(modelFileName: String): Mutex =
         fileLocks.computeIfAbsent(modelFileName) { Mutex() }
 
+    /**
+     * 模型文件根目录（`{filesDir}/models`），不存在时自动创建（含父目录）。
+     *
+     * @return 已确保存在的模型目录
+     */
     fun getModelDir(): File {
         val dir = File(context.filesDir, "models")
         if (!dir.exists()) dir.mkdirs()
@@ -46,6 +51,25 @@ class ModelDownloadManagerV2(
         fun onProgress(downloaded: Long, total: Long)
     }
 
+    /**
+     * 确保模型文件就绪：已存在且校验通过则直接复用，否则下载到 `.tmp` 后原子改名。
+     *
+     * 契约与失败条件：
+     * - 目标文件已存在且（提供了 [expectedSha256] 时）SHA-256 匹配 → 返回该文件；
+     *   校验不匹配会先删除损坏文件再重新下载；
+     * - 下载写入固定命名的临时文件 `"$modelFileName.tmp"`（完成后 renameTo 正式文件）；
+     * - 返回 null 的全部条件：HTTP 响应码非 200、下载后 SHA-256 不匹配（临时文件已清理）、
+     *   下载过程中发生 IO/其他异常（临时文件已清理）。
+     *
+     * 并发保护：同一 [modelFileName] 经 [lockFor] 的 per-file [Mutex] 串行化（Phase 4 加固），
+     * 实例内并发调用不会互写 `.tmp`；配合 AppContainer 的单例收敛，全进程亦唯一。
+     *
+     * @param modelFileName 目标文件名（含扩展名，最终落在 [getModelDir] 下）
+     * @param url 下载地址
+     * @param expectedSha256 期望的 SHA-256（十六进制）；null 表示跳过校验
+     * @param progress 可选进度回调（已下载字节数 / 总字节数，总长未知时为 -1）
+     * @return 就绪的模型文件；上述任一失败条件命中时返回 null
+     */
     suspend fun ensureModel(
         modelFileName: String,
         url: String,

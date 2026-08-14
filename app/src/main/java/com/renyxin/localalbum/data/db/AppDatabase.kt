@@ -100,6 +100,21 @@ import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
     version = 32,
     exportSchema = true,
 )
+/**
+ * 应用主数据库（Room，schema version 32，exportSchema = true）。
+ *
+ * 单例入口见 [getDatabase]；全部 DAO 通过 abstract 访问器暴露。
+ *
+ * ## 迁移规则（新增 schema 变更的固定流程）
+ * 1. 新增一个 `MIGRATION_N_N+1`（object : Migration(N, N+1)）并附 KDoc 说明变更内容；
+ * 2. **必须**同步追加到 [getDatabase] 的 `addMigrations(...)` 数组——遗漏会导致升级路径
+ *    抛异常（本项目已配置升级缺失迁移时抛异常而非静默清库，仅降级允许销毁重建）；
+ * 3. bump `@Database(version = ...)` 并重新编译生成 `app/schemas/.../{N+1}.json`；
+ * 4. 验证导出的 schema JSON 与预期 diff 一致（历史版本 31/32.json 为参照）。
+ *
+ * companion object 中 MIGRATION_8_9 … MIGRATION_31_32 共 24 个迁移约占本文件 85%，
+ * 为刻意保留：Room Migration 数组需静态引用，拆文件收益低且有 exportSchema 回归风险。
+ */
 abstract class AppDatabase : RoomDatabase() {
     abstract fun mediaDao(): MediaDao
     abstract fun faceDao(): FaceDao
@@ -993,6 +1008,15 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * 数据库单例入口（double-checked locking，进程内唯一实例，库名 `local_album_db`）。
+         *
+         * 注册了 MIGRATION_8_9 至 MIGRATION_31_32 的完整迁移链；升级缺失迁移时抛异常，
+         * 仅降级时允许销毁重建（fallbackToDestructiveMigrationOnDowngrade）。
+         *
+         * @param context 任意 Context，内部取 applicationContext，持有进程级单例安全
+         * @return 进程唯一的 [AppDatabase] 实例
+         */
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(

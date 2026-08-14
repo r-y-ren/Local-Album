@@ -9,12 +9,29 @@ package com.renyxin.localalbum.core.index
  * 仅被 JVM 测试（ScanBenchmarkConfigTest）引用，故置于 test 源集；
  * 活代码使用的 ScanMilestone / ScanTelemetry / LogScanTelemetry 保留在 main 源集。
  */
+/** 基准数据集定义：[id] 稳定标识、[mediaCount] 为数据集媒体规模（张）、[description] 中文说明。 */
 data class ScanBenchmarkDataset(
     val id: String,
     val mediaCount: Int,
     val description: String,
 )
 
+/**
+ * 扫描基准暂定门槛。所有字段单位均为毫秒（ms），测量口径为 nearest-rank P95
+ * （见 [ScanBenchmarkConfig.percentile]），样本取自对应数据集规模的扫描运行。
+ *
+ * 命名约定：`full{n}Tti` = n 张媒体首次全量扫描的 TTI（首帧时间线可用）；
+ * `full{n}Core` = 核心扫描完成；`incremental*` = 增量场景的核心扫描完成耗时。
+ *
+ * @param full1kTtiP95Ms 1k 数据集首次全量扫描 TTI P95 门槛（ms）
+ * @param full1kCoreP95Ms 1k 数据集首次全量扫描核心完成 P95 门槛（ms）
+ * @param full10kTtiP95Ms 10k 数据集首次全量扫描 TTI P95 门槛（ms）
+ * @param full10kCoreP95Ms 10k 数据集首次全量扫描核心完成 P95 门槛（ms）
+ * @param noChangeIncrementalCoreP95Ms 无变更增量扫描核心完成 P95 门槛（ms）
+ * @param singleAddCoreP95Ms 单张新增增量扫描核心完成 P95 门槛（ms）
+ * @param singleDeleteCoreP95Ms 单张删除增量扫描核心完成 P95 门槛（ms）
+ * @param batch100CoreP95Ms 100 张批量新增增量扫描核心完成 P95 门槛（ms）
+ */
 data class ScanBenchmarkThresholds(
     val full1kTtiP95Ms: Long = 3_000L,
     val full1kCoreP95Ms: Long = 30_000L,

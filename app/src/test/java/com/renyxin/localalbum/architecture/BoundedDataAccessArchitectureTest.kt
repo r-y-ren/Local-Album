@@ -485,20 +485,31 @@ class BoundedDataAccessArchitectureTest {
         assertFalse("Lite 组合根不得解析 OCR 具体实现", liteComposition.contains("OcrProvider"))
         assertFalse("Lite 组合根不得解析 ML Kit OCR", liteComposition.contains("MlKitOcrProvider"))
 
+        // Version Catalog 迁移后：坐标/版本定义于 gradle/libs.versions.toml，
+        // build 脚本通过 libs.* 访问器引用；守护意图不变（必须 fullImplementation、不得共享 implementation）。
         val buildScript = File(projectRoot, "app/build.gradle.kts").readText()
+        val catalog = File(projectRoot, "gradle/libs.versions.toml").readText()
         listOf(
-            "com.google.mlkit:text-recognition:16.0.1",
-            "com.google.mlkit:text-recognition-chinese:16.0.1",
-        ).forEach { coordinate ->
+            "mlkit-text-recognition" to "libs.mlkit.text.recognition",
+            "mlkit-text-recognition-chinese" to "libs.mlkit.text.recognition.chinese",
+        ).forEach { (alias, accessor) ->
             assertTrue(
-                "ML Kit OCR 依赖必须声明为 fullImplementation: $coordinate",
-                buildScript.contains("add(\"fullImplementation\", \"$coordinate\")"),
+                "ML Kit OCR 依赖必须声明为 fullImplementation: $accessor",
+                buildScript.contains("add(\"fullImplementation\", $accessor)"),
             )
             assertFalse(
-                "ML Kit OCR 依赖不得回到共享 implementation: $coordinate",
-                buildScript.contains("add(\"implementation\", \"$coordinate\")"),
+                "ML Kit OCR 依赖不得回到共享 implementation: $accessor",
+                buildScript.contains("add(\"implementation\", $accessor)"),
+            )
+            assertTrue(
+                "Version Catalog 必须定义 ML Kit OCR 条目: $alias",
+                catalog.contains(alias),
             )
         }
+        assertTrue(
+            "ML Kit OCR 版本必须保持 16.0.1",
+            catalog.contains("mlkitTextRecognition = \"16.0.1\""),
+        )
 
         val purposePolicy = File(projectRoot, "scripts/lite-artifact-purpose-policy.json").readText()
         assertTrue(

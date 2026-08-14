@@ -40,5 +40,5 @@ extensions.configure<LibraryExtension>("android") {
 }
 
 dependencies {
-    add("implementation", "androidx.annotation:annotation:1.8.0")
+    add("implementation", libs.androidx.annotation)
 }
