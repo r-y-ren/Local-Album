@@ -14,7 +14,11 @@ import com.renyxin.localalbum.data.db.entity.FaceClusterPrototypeEntity
 import com.renyxin.localalbum.data.db.entity.FaceEntity
 import com.renyxin.localalbum.data.db.entity.MaintenanceRunEntity
 import com.renyxin.localalbum.data.db.entity.MediaEntity
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -104,6 +108,48 @@ class FaceClusterV23Test {
         assertTrue(dao.publish(2, 23))
         val afterPublish = dao.activePrototypesAfter("p", "m", "", -1, 10)
         assertEquals(listOf(2L), afterPublish.map { it.generation }.distinct())
+    }
+
+    @Test
+    fun 人物摘要与统计由RoomFlow自动更新且metadata名称优先() = runBlocking {
+        val faceDao = database.faceDao()
+        val summaryEmission = async(start = CoroutineStart.UNDISPATCHED) {
+            withTimeout(5_000L) {
+                faceDao.getClusterSummariesFlow().first { summaries ->
+                    summaries.singleOrNull()?.personName == "小明"
+                }
+            }
+        }
+        val statsEmission = async(start = CoroutineStart.UNDISPATCHED) {
+            withTimeout(5_000L) {
+                faceDao.getStatsFlow().first { it.totalFaces == 1 && it.clusteredFaces == 1 }
+            }
+        }
+
+        faceDao.insertFace(
+            FaceEntity(
+                filePath = "/room-flow.jpg",
+                clusterId = "c-room-flow",
+                personName = null, // Mirrors freshly rebuilt FaceStage rows.
+                embedding = "1,0",
+                boxLeft = 0f,
+                boxTop = 0f,
+                boxRight = 1f,
+                boxBottom = 1f,
+            ),
+        )
+        database.faceClusterDao().upsertMeta(
+            FaceClusterMetaEntity(
+                generation = 1L,
+                clusterId = "c-room-flow",
+                personName = "小明",
+                providerScope = "provider",
+                modelScope = "model",
+            ),
+        )
+
+        assertEquals("小明", summaryEmission.await().single().personName)
+        assertEquals(1, statsEmission.await().clusterCount)
     }
 
     @Test

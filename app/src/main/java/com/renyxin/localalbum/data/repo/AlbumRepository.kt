@@ -770,13 +770,25 @@ class AlbumRepository(
     }
 
     private suspend fun resumeTransientlyPreemptedEnhancements() {
-        if (EnhancementResourceGate.isAutomaticWorkBlocked) return
+        // A following core/maintenance owner will perform its own release. Interactive AI is short
+        // lived and must not suppress the only durable queue wake-up after core publication.
+        if (EnhancementResourceGate.isCoreRequested || EnhancementResourceGate.isMaintenanceRequested) return
         database?.scanRunDao()?.resumePreemptedEnhancements()
         appContext?.let { context ->
             if (database?.enhancementOutboxDao()?.hasRunnableEntries() == true) {
                 com.renyxin.localalbum.data.worker.EnhancementHandoffWorker.enqueue(context)
             }
-            if (database?.analysisTaskDao()?.countActiveEnhancementTasks()?.let { it > 0 } == true) {
+            val taskDao = database?.analysisTaskDao()
+            val hasScanOwnedAnalysis = taskDao?.countActiveScanOwnedEnhancementTasks()?.let { it > 0 } == true
+            val activeUserTasks = taskDao?.countActiveUserTasks() ?: 0
+            val hasResumableUserAnalysis = com.renyxin.localalbum.data.worker.AnalysisWorker
+                .userTaskAdmission(
+                    userPaused = AnalysisResumePrefs.isUserPaused(context),
+                    resumePending = AnalysisResumePrefs.isPending(context),
+                    activeUserTasks = activeUserTasks,
+                )
+            if (hasResumableUserAnalysis) AnalysisResumePrefs.setPending(context, true)
+            if (hasScanOwnedAnalysis || hasResumableUserAnalysis) {
                 com.renyxin.localalbum.data.worker.AnalysisWorker.enqueue(context)
             }
             if (database?.thumbnailTaskDao()?.countAutomaticRunnable()?.let { it > 0 } == true) {
@@ -856,14 +868,24 @@ class AlbumRepository(
         val scanDao = database?.scanRunDao()
         val taskDao = database?.analysisTaskDao()
         val hasDurableEnhancement = scanDao?.getEnhancementScanIds()?.isNotEmpty() == true
-        val hasActiveEnhancementTasks = taskDao?.countActiveEnhancementTasks()?.let { it > 0 } == true
-        if (!AnalysisResumePrefs.isPending(ctx) && !hasDurableEnhancement && !hasActiveEnhancementTasks) {
+        val hasScanOwnedTasks = taskDao?.countActiveScanOwnedEnhancementTasks()?.let { it > 0 } == true
+        val activeUserTasks = taskDao?.countActiveUserTasks() ?: 0
+        val hasResumableUserTasks = com.renyxin.localalbum.data.worker.AnalysisWorker
+            .userTaskAdmission(
+                userPaused = AnalysisResumePrefs.isUserPaused(ctx),
+                resumePending = AnalysisResumePrefs.isPending(ctx),
+                activeUserTasks = activeUserTasks,
+            )
+        if (hasResumableUserTasks) AnalysisResumePrefs.setPending(ctx, true)
+        if (!hasDurableEnhancement && !hasScanOwnedTasks && !hasResumableUserTasks) {
+            if (activeUserTasks == 0) AnalysisResumePrefs.setPending(ctx, false)
             return@withContext
         }
         scanMutex.withLock {
             Log.i(TAG, "resumeAnalysisIfNeeded: 恢复持久化分析任务领取")
             indexer.resumePendingAnalysis()
-            AnalysisResumePrefs.setPending(ctx, false)
+            // User work keeps its marker until the final bounded Stage window has converged.
+            if (activeUserTasks == 0) AnalysisResumePrefs.setPending(ctx, false)
         }
     }
 
@@ -881,7 +903,9 @@ class AlbumRepository(
     /** Persists a user pause before WorkManager cancellation can terminate individual consumers. */
     suspend fun pauseEnhancementsByUser() = withContext(Dispatchers.IO) {
         database?.scanRunDao()?.pauseAllActiveEnhancements()
-        AnalysisResumePrefs.setPending(appContext ?: return@withContext, false)
+        val context = appContext ?: return@withContext
+        AnalysisResumePrefs.setUserPaused(context, true)
+        AnalysisResumePrefs.setPending(context, false)
     }
 
     // ---- 删除/回收站 ----
@@ -1315,30 +1339,37 @@ class AlbumRepository(
 
     // ---- 人脸聚类管理 (Phase 3.3) ----
 
-    /**
-     * 获取所有人脸聚类（供人脸相册界面分组展示）。
-     * 返回 clusterId → 聚类信息列表，按人脸数量降序。
-     */
-    suspend fun getFaceClusters(): List<FaceCluster> = withContext(Dispatchers.IO) {
-        val dao = faceDao ?: return@withContext emptyList()
-        val summaries = dao.getClusterSummaries()
-        if (summaries.isEmpty()) return@withContext emptyList()
+    private fun FaceClusterSummary.toFaceCluster() = FaceCluster(
+        clusterId = clusterId,
+        personName = personName,
+        faceCount = faceCount,
+        representativeThumb = representativeThumb,
+        // 摘要只保留一个回退封面路径，人物详情通过 PagingSource 查询。
+        filePaths = listOfNotNull(representativeFilePath),
+    )
 
-        summaries.map { summary ->
-            FaceCluster(
-                clusterId = summary.clusterId,
-                personName = summary.personName,
-                faceCount = summary.faceCount,
-                representativeThumb = summary.representativeThumb,
-                // 摘要只保留一个回退封面路径，人物详情通过 PagingSource 查询。
-                filePaths = listOfNotNull(summary.representativeFilePath),
+    /**
+     * Room 是人物页的权威来源；每个人脸阶段批次提交后自动发射，不依赖 UI 轮询。
+     */
+    val faceClusters: Flow<List<FaceCluster>> = faceDao?.getClusterSummariesFlow()
+        ?.map { summaries -> summaries.map { it.toFaceCluster() } }
+        ?: flowOf(emptyList())
+
+    /** 人物统计与摘要观察同一张 faces 表，保证卡片和计数同步失效。 */
+    val faceStats: Flow<FaceStats> = faceDao?.getStatsFlow()
+        ?.map { stats ->
+            FaceStats(
+                totalFaces = stats.totalFaces,
+                clusteredFaces = stats.clusteredFaces,
+                clusterCount = stats.clusterCount,
             )
         }
-    }
+        ?: flowOf(FaceStats())
 
-    /** 人脸聚类摘要 Flow（供 UI 实时更新） */
-    val faceClusterSummaries: Flow<List<FaceClusterSummary>>?
-        get() = faceDao?.getClusterSummariesFlow()
+    /** 兼容非响应式调用方；新 UI 应直接观察 [faceClusters]。 */
+    suspend fun getFaceClusters(): List<FaceCluster> = withContext(Dispatchers.IO) {
+        faceDao?.getClusterSummaries()?.map { it.toFaceCluster() }.orEmpty()
+    }
 
     /** 获取某个聚类内的人脸记录 */
     suspend fun getFacesInCluster(clusterId: String): List<FaceEntity> = withContext(Dispatchers.IO) {

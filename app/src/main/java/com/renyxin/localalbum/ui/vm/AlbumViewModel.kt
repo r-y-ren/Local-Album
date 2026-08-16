@@ -184,10 +184,8 @@ class AlbumViewModel(
         // 修复：同样赋值给 scanJob，支持取消并避免与 rescan 并发
         scanJob?.cancel()
         scanJob = viewModelScope.launch {
+            // 此调用只原子创建持久任务；人物结果由 Room Flow 随 Face Stage 提交自动刷新。
             repository.forceReanalyzeAll()
-            // 分析完成后刷新人脸/语义数据
-            loadFaceClusters()
-            loadSemanticStats()
         }
     }
 
@@ -397,26 +395,16 @@ class AlbumViewModel(
 
     // ---- 人脸聚类管理 (Phase 3.3) ----
 
-    private val _faceClusters = MutableStateFlow<List<FaceCluster>>(emptyList())
-    val faceClusters: StateFlow<List<FaceCluster>> = _faceClusters.asStateFlow()
+    /** Room invalidation drives every Face Stage batch directly into the people screen. */
+    val faceClusters: StateFlow<List<FaceCluster>> = repository.faceClusters
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    private val _faceStats = MutableStateFlow(FaceStats())
-    val faceStats: StateFlow<FaceStats> = _faceStats.asStateFlow()
+    val faceStats: StateFlow<FaceStats> = repository.faceStats
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FaceStats())
 
-    /** 加载所有人脸聚类（供人脸相册界面分组展示） */
-    fun loadFaceClusters() {
-        viewModelScope.launch {
-            _faceClusters.value = repository.getFaceClusters()
-            _faceStats.value = repository.getFaceStats()
-        }
-    }
-
-    /** 为聚类命名（人物名称） */
+    /** 为聚类命名（人物名称）；双写事务提交后 Room Flow 自动更新卡片。 */
     fun setPersonName(clusterId: String, name: String?) {
-        viewModelScope.launch {
-            repository.setPersonName(clusterId, name)
-            _faceClusters.value = repository.getFaceClusters()
-        }
+        viewModelScope.launch { repository.setPersonName(clusterId, name) }
     }
 
     /** 仅启动显式人物原型维护，不触发图片全量重分析。 */

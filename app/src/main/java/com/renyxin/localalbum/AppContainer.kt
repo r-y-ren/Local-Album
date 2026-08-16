@@ -357,19 +357,22 @@ class AppContainer(context: Context) {
     }
 
     /**
-     * Phase 1: 订阅 [PluginAnalysisPipeline.pipelineStatusFlow]，管道运行中置位中断标志，
-     * 正常结束（COMPLETED/ERROR）清零。进程被杀后标志保持，下次启动触发续跑。
+     * Generic pipeline status may belong to scan-owned work and therefore must never turn a user
+     * pause back on. Explicit queue publication sets the marker; terminal status may only converge an
+     * already-enabled marker after Room reports no remaining user-owned task.
      */
     private fun startAnalysisResumeFlagTracking() {
         appScope.launch {
             pluginAnalysisPipeline.pipelineStatusFlow.collect { status ->
-                when (status) {
-                    PluginAnalysisPipeline.Status.RUNNING ->
-                        AnalysisResumePrefs.setPending(appContext, true)
-                    PluginAnalysisPipeline.Status.COMPLETED,
-                    PluginAnalysisPipeline.Status.ERROR ->
-                        AnalysisResumePrefs.setPending(appContext, false)
-                    PluginAnalysisPipeline.Status.IDLE -> Unit
+                if (
+                    status in setOf(
+                        PluginAnalysisPipeline.Status.COMPLETED,
+                        PluginAnalysisPipeline.Status.ERROR,
+                    ) &&
+                    AnalysisResumePrefs.isPending(appContext) &&
+                    database.analysisTaskDao().countActiveUserTasks() == 0
+                ) {
+                    AnalysisResumePrefs.setPending(appContext, false)
                 }
             }
         }
@@ -747,7 +750,17 @@ class AppContainer(context: Context) {
             if (database.enhancementOutboxDao().hasRunnableEntries()) {
                 com.renyxin.localalbum.data.worker.EnhancementHandoffWorker.enqueue(appContext)
             }
-            if (database.analysisTaskDao().countActiveEnhancementTasks() > 0) {
+            val analysisTaskDao = database.analysisTaskDao()
+            val hasScanOwnedAnalysis = analysisTaskDao.countActiveScanOwnedEnhancementTasks() > 0
+            val activeUserTasks = analysisTaskDao.countActiveUserTasks()
+            val hasResumableUserAnalysis = com.renyxin.localalbum.data.worker.AnalysisWorker
+                .userTaskAdmission(
+                    userPaused = AnalysisResumePrefs.isUserPaused(appContext),
+                    resumePending = AnalysisResumePrefs.isPending(appContext),
+                    activeUserTasks = activeUserTasks,
+                )
+            if (hasResumableUserAnalysis) AnalysisResumePrefs.setPending(appContext, true)
+            if (hasScanOwnedAnalysis || hasResumableUserAnalysis) {
                 com.renyxin.localalbum.data.worker.AnalysisWorker.enqueue(appContext)
             }
             if (database.thumbnailTaskDao().countAutomaticRunnable() > 0) {

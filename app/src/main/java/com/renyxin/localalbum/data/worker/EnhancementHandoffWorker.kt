@@ -96,20 +96,42 @@ class EnhancementHandoffWorker(
                 batches++
             }
 
-            val hasRunnableEntries = EnhancementResourceGate.tryWithAutomaticEnhancement {
+            val queueState = EnhancementResourceGate.tryWithAutomaticEnhancement {
                 // The terminal cross-table read/write is part of the same maintenance exclusion
                 // contract as handoff transactions. Never inspect tables while import may replace
                 // them after the final batch released its lane.
                 finalizeEmptyScans(database, touchedScans)
-                outboxDao.hasRunnableEntries()
+                val now = System.currentTimeMillis()
+                val active = outboxDao.hasRunnableEntries()
+                val claimable = outboxDao.hasClaimableEntries(now)
+                active to claimable
             } ?: return Result.retry()
+            val (hasActiveEntries, hasClaimableEntries) = queueState
+            val activeAnalysisTasks = database.analysisTaskDao().countActiveEnhancementTasks()
+            val decision = continuationDecision(hasActiveEntries, hasClaimableEntries)
+            Log.i(
+                TAG,
+                "handoff diagnostic: batches=$batches seededAnalysis=$seededAnalysis " +
+                    "activeOutbox=$hasActiveEntries claimableOutbox=$hasClaimableEntries " +
+                    "activeAnalysis=$activeAnalysisTasks decision=$decision",
+            )
 
             // Scheduling itself does not touch production tables. A worker that starts after an
             // exclusive request will be rejected by the gate and recover from its durable queue.
-            if (seededAnalysis) AnalysisWorker.enqueue(applicationContext)
+            if (seededAnalysis) {
+                Log.i(TAG, "handoff diagnostic: requesting AnalysisWorker wake-up")
+                AnalysisWorker.enqueue(applicationContext)
+            }
             if (seededThumbnails) ThumbnailWorker.enqueueBackground(applicationContext)
 
-            if (hasRunnableEntries) Result.retry() else Result.success()
+            when (decision) {
+                ContinuationDecision.ENQUEUE_SUCCESSOR -> {
+                    enqueue(applicationContext)
+                    Result.success()
+                }
+                ContinuationDecision.RETRY_BACKOFF -> Result.retry()
+                ContinuationDecision.COMPLETE -> Result.success()
+            }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -122,6 +144,12 @@ class EnhancementHandoffWorker(
         database: com.renyxin.localalbum.data.db.AppDatabase,
         scanIds: Set<String>,
     ) = settleEnhancementScans(database, scanIds)
+
+    internal enum class ContinuationDecision {
+        ENQUEUE_SUCCESSOR,
+        RETRY_BACKOFF,
+        COMPLETE,
+    }
 
     companion object {
         internal data class SeedOutcome(
@@ -246,5 +274,14 @@ class EnhancementHandoffWorker(
 
         internal fun retryDelayMs(attempt: Int): Long =
             BASE_RETRY_DELAY_MS * (1L shl (attempt - 1).coerceIn(0, 8))
+
+        internal fun continuationDecision(
+            hasActiveEntries: Boolean,
+            hasClaimableEntries: Boolean,
+        ): ContinuationDecision = when {
+            hasClaimableEntries -> ContinuationDecision.ENQUEUE_SUCCESSOR
+            hasActiveEntries -> ContinuationDecision.RETRY_BACKOFF
+            else -> ContinuationDecision.COMPLETE
+        }
     }
 }

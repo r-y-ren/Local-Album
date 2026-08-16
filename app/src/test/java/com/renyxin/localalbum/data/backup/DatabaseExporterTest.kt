@@ -4,6 +4,7 @@ import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.FaceClusterSummary
+import com.renyxin.localalbum.data.db.dao.FaceStatsSummary
 import com.renyxin.localalbum.data.db.dao.DirectorySummary
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.entity.FaceEntity
@@ -209,6 +210,16 @@ class DatabaseExporterTest {
         override suspend fun getClusterIds(): List<String> = store.mapNotNull { it.clusterId }.distinct()
         override suspend fun getClusterSummaries(): List<FaceClusterSummary> = emptyList()
         override fun getClusterSummariesFlow(): Flow<List<FaceClusterSummary>> = flowOf(emptyList())
+        override fun getStatsFlow(): Flow<FaceStatsSummary> = flowOf(
+            FaceStatsSummary(
+                totalFaces = store.size,
+                clusteredFaces = store.count { it.clusterId != null && !it.clusterId.orEmpty().startsWith("pending:") },
+                clusterCount = store.mapNotNull { it.clusterId }
+                    .filterNot { it.startsWith("pending:") }
+                    .distinct()
+                    .size,
+            ),
+        )
         override suspend fun updateClusterIds(faceIds: List<Long>, clusterId: String) {}
         override suspend fun updateClusterIdsByFilePaths(filePaths: List<String>, clusterId: String) {}
         override suspend fun updateClusterId(faceId: Long, clusterId: String) {}

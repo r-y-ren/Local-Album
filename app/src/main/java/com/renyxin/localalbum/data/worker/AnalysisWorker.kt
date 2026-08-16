@@ -76,8 +76,28 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
         val leasedGroups = mutableListOf<LeasedTaskGroup>()
         val touchedScanIds = linkedSetOf<String>()
+        // Snapshot explicit-user admission before a scan-owned Stage can publish generic pipeline
+        // status. A dedicated pause bit distinguishes an old/import queue from an explicit cancel.
+        val activeUserTasksAtStart = dao.countActiveUserTasks()
+        val includeUserTasks = userTaskAdmission(
+            userPaused = AnalysisResumePrefs.isUserPaused(applicationContext),
+            resumePending = AnalysisResumePrefs.isPending(applicationContext),
+            activeUserTasks = activeUserTasksAtStart,
+        )
+        if (includeUserTasks && activeUserTasksAtStart > 0) {
+            AnalysisResumePrefs.setPending(applicationContext, true)
+        }
         try {
             if (container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested) return Result.retry()
+            val diagnosticNow = System.currentTimeMillis()
+            val activeAtStart = activeTaskCount(dao, claimableScopes, includeUserTasks)
+            val claimableAtStart = claimableTaskCount(dao, claimableScopes, diagnosticNow, includeUserTasks)
+            Log.i(
+                TAG,
+                "analysis diagnostic: attempt=$runAttemptCount claimableScopes=${claimableScopes.size} " +
+                    "includeUser=$includeUserTasks activeAtStart=$activeAtStart " +
+                    "claimableAtStart=$claimableAtStart",
+            )
             setForeground(getForegroundInfo())
 
             val laneResult = EnhancementResourceGate.tryWithAutomaticEnhancement {
@@ -100,10 +120,11 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     // completed or superseded during recovery and no new lease is claimed below.
                     touchedScanIds += scanRunDao.getUnsettledEnhancementScanIds()
 
-                    // Pick exactly one durable identity per Worker run. Aggregate compatibility
-                    // scopes run first, then per-Stage scopes follow pipeline topological order.
+                    // Pick exactly one immediately claimable durable identity per Worker run.
+                    // A prior scope whose failures are waiting for nextRetryAt must not starve a later
+                    // Stage that can run now. Aggregate compatibility scopes still retain precedence.
                     val activeScope = claimableScopes.firstOrNull { scope ->
-                        dao.countRunnable(scope) > 0
+                        dao.countClaimable(recoveryNow, scope, includeUserTasks) > 0
                     }
                     if (activeScope != null) {
                         repeat(schedulingProfile.workerLeaseGroups.coerceIn(1, MAX_BATCHES_PER_RUN)) {
@@ -122,6 +143,7 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                                 leaseToken = token,
                                 leaseDurationMs = LEASE_MS,
                                 scope = activeScope,
+                                includeUserTasks = includeUserTasks,
                             )
                             if (tasks.isEmpty()) return@repeat
                             leasedGroups += LeasedTaskGroup(token, tasks)
@@ -198,8 +220,31 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     }
 
                     finalizeEnhancementStates(scanRunDao, dao, touchedScanIds)
-                    val active = activeTaskCount(dao, claimableScopes)
-                    if (active > 0) Result.retry() else Result.success()
+                    val now = System.currentTimeMillis()
+                    val active = activeTaskCount(dao, claimableScopes, includeUserTasks)
+                    val claimable = claimableTaskCount(dao, claimableScopes, now, includeUserTasks)
+                    if (includeUserTasks) {
+                        AnalysisResumePrefs.setPending(
+                            applicationContext,
+                            AnalysisResumePrefs.isPending(applicationContext) &&
+                                dao.countActiveUserTasks() > 0,
+                        )
+                    }
+                    val decision = continuationDecision(activeTasks = active, claimableTasks = claimable)
+                    Log.i(
+                        TAG,
+                        "analysis diagnostic: leasedGroups=${leasedGroups.size} " +
+                            "touchedScans=${touchedScanIds.size} remainingActive=$active " +
+                            "claimable=$claimable decision=$decision",
+                    )
+                    when (decision) {
+                        ContinuationDecision.ENQUEUE_SUCCESSOR -> {
+                            enqueue(applicationContext)
+                            Result.success()
+                        }
+                        ContinuationDecision.RETRY_BACKOFF -> Result.retry()
+                        ContinuationDecision.COMPLETE -> Result.success()
+                    }
                 } catch (cancelled: CancellationException) {
                     // The caller persists PREEMPTED (core/maintenance) or PAUSED (user) before
                     // cancellation. Release leases before this automatic lane becomes available.
@@ -225,7 +270,7 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     } catch (stateError: Throwable) {
                         Log.e(TAG, "保存增强终态失败", stateError)
                     }
-                    val active = activeTaskCount(dao, claimableScopes)
+                    val active = activeTaskCount(dao, claimableScopes, includeUserTasks)
                     if (active > 0) Result.retry() else Result.success()
                 }
             }
@@ -274,7 +319,15 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
     private suspend fun activeTaskCount(
         dao: com.renyxin.localalbum.data.db.dao.AnalysisTaskDao,
         scopes: List<String>,
-    ): Int = scopes.sumOf { scope -> dao.countRunnable(scope) }
+        includeUserTasks: Boolean,
+    ): Int = scopes.sumOf { scope -> dao.countRunnable(scope, includeUserTasks) }
+
+    private suspend fun claimableTaskCount(
+        dao: com.renyxin.localalbum.data.db.dao.AnalysisTaskDao,
+        scopes: List<String>,
+        now: Long,
+        includeUserTasks: Boolean,
+    ): Int = scopes.sumOf { scope -> dao.countClaimable(now, scope, includeUserTasks) }
 
     private suspend fun markFailed(
         dao: com.renyxin.localalbum.data.db.dao.AnalysisTaskDao,
@@ -316,6 +369,12 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
     }
 
+    internal enum class ContinuationDecision {
+        ENQUEUE_SUCCESSOR,
+        RETRY_BACKOFF,
+        COMPLETE,
+    }
+
     companion object {
         private const val TAG = "AnalysisWorker"
         private const val WORK_NAME = "analysis_task_queue"
@@ -327,24 +386,69 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         private const val LEASE_RENEW_INTERVAL_MS = 5 * 60 * 1000L
 
         fun enqueue(context: Context) {
-            WorkManager.getInstance(context).enqueueUniqueWork(
+            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                 WORK_NAME,
-                ExistingWorkPolicy.KEEP,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
                 OneTimeWorkRequestBuilder<AnalysisWorker>().build(),
             )
         }
 
+        /**
+         * Ordinary bounded continuation must not consume WorkManager's failure backoff. A successor
+         * is appended while this unique request is still RUNNING, then this request completes.
+         */
+        internal fun continuationDecision(
+            activeTasks: Int,
+            claimableTasks: Int,
+        ): ContinuationDecision = when {
+            claimableTasks > 0 -> ContinuationDecision.ENQUEUE_SUCCESSOR
+            activeTasks > 0 -> ContinuationDecision.RETRY_BACKOFF
+            else -> ContinuationDecision.COMPLETE
+        }
+
         /** User cancellation is persistent and must not be auto-resumed. */
         fun cancel(context: Context) {
+            AnalysisResumePrefs.setUserPaused(context, true)
             AnalysisResumePrefs.setPending(context, false)
             WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
         }
 
-        /** Core preemption preserves the durable resume marker for post-core re-release. */
+        /** Core/maintenance preemption preserves, but never creates, the user resume marker. */
         fun cancelForCorePreemption(context: Context) {
+            WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
+        }
+
+        /** User reanalysis replaces the chain but must remain resumable until new tasks are durable. */
+        fun cancelForQueueReplacement(context: Context) {
+            AnalysisResumePrefs.setUserPaused(context, false)
             AnalysisResumePrefs.setPending(context, true)
             WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
         }
+
+        /**
+         * Publishes the post-transaction user queue as an independent unique chain. Normal bounded
+         * continuation must keep using [enqueue]; REPLACE is reserved for this explicit reset path.
+         */
+        fun publishQueueReplacement(context: Context, hasRunnableTasks: Boolean) {
+            AnalysisResumePrefs.setUserPaused(context, false)
+            AnalysisResumePrefs.setPending(context, hasRunnableTasks)
+            val workManager = WorkManager.getInstance(context.applicationContext)
+            if (hasRunnableTasks) {
+                workManager.enqueueUniqueWork(
+                    WORK_NAME,
+                    ExistingWorkPolicy.REPLACE,
+                    OneTimeWorkRequestBuilder<AnalysisWorker>().build(),
+                )
+            } else {
+                workManager.cancelUniqueWork(WORK_NAME)
+            }
+        }
+
+        internal fun userTaskAdmission(
+            userPaused: Boolean,
+            resumePending: Boolean,
+            activeUserTasks: Int,
+        ): Boolean = !userPaused && (resumePending || activeUserTasks > 0)
 
         internal fun failureSummary(
             results: Map<String, StageResult>,

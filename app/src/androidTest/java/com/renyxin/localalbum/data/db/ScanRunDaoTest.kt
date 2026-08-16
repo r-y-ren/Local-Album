@@ -2,12 +2,14 @@ package com.renyxin.localalbum.data.db
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.core.pipeline.PluginAnalysisPipeline
 import com.renyxin.localalbum.data.db.entity.AnalysisTaskEntity
 import com.renyxin.localalbum.data.db.entity.CoreScanState
 import com.renyxin.localalbum.data.db.entity.EnhancementOutboxEntity
 import com.renyxin.localalbum.data.db.entity.EnhancementState
 import com.renyxin.localalbum.data.db.entity.IndexAvailability
+import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.db.entity.ScanRunEntity
 import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
 import com.renyxin.localalbum.data.db.entity.ScanStagingEntity
@@ -491,9 +493,138 @@ class ScanRunDaoTest {
 
         assertEquals(4, taskDao.countActive("scope-a"))
         assertEquals(2, taskDao.countRunnable("scope-a"))
-        val claimed = taskDao.claimBatch(1L, 10, "lease-runnable", 100L, "scope-a")
-        assertEquals(setOf("/queued.jpg", "/manual.jpg"), claimed.map { it.filePath }.toSet())
+        assertEquals(1, taskDao.countRunnable("scope-a", includeUserTasks = false))
+        assertEquals(1, taskDao.countActiveScanOwnedEnhancementTasks())
+        assertEquals(1, taskDao.countActiveUserTasks())
+        val scanOnly = taskDao.claimBatch(
+            now = 1L,
+            limit = 10,
+            leaseToken = "lease-scan-only",
+            leaseDurationMs = 100L,
+            scope = "scope-a",
+            includeUserTasks = false,
+        )
+        assertEquals(listOf("/queued.jpg"), scanOnly.map { it.filePath })
+        assertEquals(1, taskDao.markDone(scanOnly.map { it.taskId }, "lease-scan-only", 2L))
+        val user = taskDao.claimBatch(3L, 10, "lease-user", 100L, "scope-a")
+        assertEquals(listOf("/manual.jpg"), user.map { it.filePath })
         assertEquals(1, taskDao.countActiveForScan("scan-paused"))
+    }
+
+    @Test
+    fun fullReanalysisDetachesTerminalScanAndCanBeTriggeredRepeatedly() = runBlocking {
+        val scope = "scope-user-reanalysis"
+        val path = "/terminal-owned.jpg"
+        database.mediaDao().insertAll(listOf(media(path, modifiedAtMs = 10L, fileSize = 100L)))
+        database.scanRunDao().insert(
+            ScanRunEntity(
+                scanId = "scan-terminal-owner",
+                generation = 40L,
+                scanType = ScanRunEntity.TYPE_FULL,
+                status = ScanRunEntity.STATUS_COMPLETED,
+                coreScanState = CoreScanState.COMPLETED.name,
+                indexAvailability = IndexAvailability.PUBLISHED.name,
+                enhancementState = EnhancementState.COMPLETED.name,
+            ),
+        )
+        val dao = database.analysisTaskDao()
+        dao.enqueueAllForScan(
+            listOf(
+                AnalysisTaskEntity(
+                    filePath = path,
+                    sourceVersion = "10:100",
+                    pipelineScope = scope,
+                ),
+            ),
+            "scan-terminal-owner",
+        )
+        assertEquals(0, dao.countRunnable(scope))
+
+        val first = dao.prepareFullReanalysisScope(
+            scope = scope,
+            scanId = null,
+            mediaType = MediaType.IMAGE.name,
+            priority = AnalysisTaskEntity.PRIORITY_USER,
+            now = 1L,
+        )
+        assertEquals(1, first.reset)
+        val firstLease = dao.claimBatch(2L, 10, "user-first", 10_000L, scope)
+        assertEquals(listOf(path), firstLease.map { it.filePath })
+        assertEquals(null, firstLease.single().scanId)
+        assertEquals(1, dao.markDone(firstLease.map { it.taskId }, "user-first", 3L))
+
+        val second = dao.prepareFullReanalysisScope(
+            scope = scope,
+            scanId = null,
+            mediaType = MediaType.IMAGE.name,
+            priority = AnalysisTaskEntity.PRIORITY_USER,
+            now = 4L,
+        )
+        assertEquals(1, second.reset)
+        assertEquals(
+            listOf(path),
+            dao.claimBatch(5L, 10, "user-second", 10_000L, scope).map { it.filePath },
+        )
+    }
+
+    @Test
+    fun fullReanalysisPreparationNeverStealsLiveLease() = runBlocking {
+        val scope = "scope-live-user-reanalysis"
+        database.mediaDao().insertAll(listOf(media("/live.jpg", modifiedAtMs = 20L, fileSize = 200L)))
+        val dao = database.analysisTaskDao()
+        dao.prepareFullReanalysisScope(
+            scope = scope,
+            scanId = null,
+            mediaType = MediaType.IMAGE.name,
+            priority = AnalysisTaskEntity.PRIORITY_USER,
+            now = 1L,
+        )
+        val live = dao.claimBatch(2L, 10, "live-owner", 10_000L, scope)
+        assertEquals(1, live.size)
+
+        val repeated = dao.prepareFullReanalysisScope(
+            scope = scope,
+            scanId = null,
+            mediaType = MediaType.IMAGE.name,
+            priority = AnalysisTaskEntity.PRIORITY_USER,
+            now = 3L,
+        )
+        assertEquals(0, repeated.reset)
+        assertTrue(dao.claimBatch(4L, 10, "must-not-steal", 10_000L, scope).isEmpty())
+        assertEquals(1, dao.markDone(live.map { it.taskId }, "live-owner", 5L))
+    }
+
+    @Test
+    fun setBasedFullReanalysisConvergesBeyondSingleWorkerWindow() = runBlocking {
+        val scope = "scope-large-user-reanalysis"
+        val total = 1_001
+        database.mediaDao().insertAll(
+            (0 until total).map { index ->
+                media("/large-$index.jpg", modifiedAtMs = index.toLong(), fileSize = index + 1L)
+            },
+        )
+        val dao = database.analysisTaskDao()
+        val prepared = dao.prepareFullReanalysisScope(
+            scope = scope,
+            scanId = null,
+            mediaType = MediaType.IMAGE.name,
+            priority = AnalysisTaskEntity.PRIORITY_USER,
+            now = 1L,
+        )
+        assertEquals(total, prepared.inserted)
+        assertEquals(total, dao.countActiveEnhancementTasks())
+
+        var completed = 0
+        var leaseIndex = 0
+        while (true) {
+            val token = "large-lease-${leaseIndex++}"
+            val batch = dao.claimBatch(2L, 250, token, 10_000L, scope)
+            if (batch.isEmpty()) break
+            completed += batch.size
+            assertEquals(batch.size, dao.markDone(batch.map { it.taskId }, token, 3L))
+        }
+        assertEquals(total, completed)
+        assertEquals(0, dao.countRunnable(scope))
     }
 
     @Test
@@ -746,4 +877,14 @@ class ScanRunDaoTest {
         assertEquals(1, dao.releaseLease("recovered-bg", 6L))
         assertEquals(1, dao.releaseLease("recovered-ui", 6L))
     }
+
+    private fun media(path: String, modifiedAtMs: Long, fileSize: Long) = MediaEntity(
+        filePath = path,
+        fileName = path.substringAfterLast('/'),
+        mediaType = MediaType.IMAGE,
+        capturedAtMs = modifiedAtMs,
+        modifiedAtMs = modifiedAtMs,
+        parentPath = "/",
+        fileSize = fileSize,
+    )
 }

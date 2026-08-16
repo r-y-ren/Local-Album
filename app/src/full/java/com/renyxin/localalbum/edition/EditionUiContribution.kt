@@ -6,11 +6,7 @@ import androidx.compose.material.icons.filled.Face
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaQueryContext
@@ -21,8 +17,6 @@ import com.renyxin.localalbum.ui.screens.AiAnalysisPreferencesScreen
 import com.renyxin.localalbum.ui.screens.FacesScreen
 import com.renyxin.localalbum.ui.vm.AlbumViewModel
 import com.renyxin.localalbum.ui.vm.SettingsViewModel
-import kotlinx.coroutines.delay
-
 /** Full-only navigation and UI implementation for people albums and AI analysis preferences. */
 object EditionUiContribution {
     fun acceptsDestination(destinationId: String): Boolean = destinationId in destinationIds
@@ -32,7 +26,7 @@ object EditionUiContribution {
         destinationId: String,
         albumViewModel: AlbumViewModel,
         settingsViewModel: SettingsViewModel,
-        scanState: ScanState,
+        @Suppress("UNUSED_PARAMETER") scanState: ScanState,
         showAnalysisProgressUi: Boolean,
         onBack: () -> Unit,
         onMediaClick: (MediaItem, MediaQueryContext) -> Unit,
@@ -42,22 +36,6 @@ object EditionUiContribution {
             val faceStats by albumViewModel.faceStats.collectAsStateWithLifecycle()
             val faceProgress by albumViewModel.faceFileProgress.collectAsStateWithLifecycle()
             val isPipelineRunning by albumViewModel.isPipelineRunning.collectAsStateWithLifecycle()
-            var wasScanning by remember { mutableStateOf(false) }
-
-            LaunchedEffect(scanState) {
-                val isScanning = scanState is ScanState.Scanning
-                if (wasScanning && !isScanning) {
-                    albumViewModel.loadFaceClusters()
-                }
-                wasScanning = isScanning
-            }
-            LaunchedEffect(isPipelineRunning) {
-                while (isPipelineRunning) {
-                    albumViewModel.loadFaceClusters()
-                    delay(1_500L)
-                }
-                albumViewModel.loadFaceClusters()
-            }
 
             FacesScreen(
                 faceClusters = faceClusters,

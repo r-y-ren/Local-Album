@@ -165,13 +165,25 @@ abstract class EnhancementOutboxDao {
     @Query(
         """SELECT EXISTS(SELECT 1 FROM enhancement_outbox
            WHERE status IN ('PENDING', 'RUNNING')
-             AND scanId IN (
-                 SELECT scanId FROM scan_runs
-                 WHERE coreScanState = 'COMPLETED' AND indexAvailability = 'PUBLISHED'
-                   AND enhancementState IN ('NOT_SCHEDULED', 'QUEUED', 'RUNNING')
-             ))""",
+              AND scanId IN (
+                  SELECT scanId FROM scan_runs
+                  WHERE coreScanState = 'COMPLETED' AND indexAvailability = 'PUBLISHED'
+                    AND enhancementState IN ('NOT_SCHEDULED', 'QUEUED', 'RUNNING')
+              ))""",
     )
     abstract suspend fun hasRunnableEntries(): Boolean
+
+    /** Distinguishes ordinary bounded continuation from rows intentionally waiting for retry backoff. */
+    @Query(
+        """SELECT EXISTS(SELECT 1 FROM enhancement_outbox
+           WHERE status = 'PENDING' AND nextRetryAt <= :now
+              AND scanId IN (
+                  SELECT scanId FROM scan_runs
+                  WHERE coreScanState = 'COMPLETED' AND indexAvailability = 'PUBLISHED'
+                    AND enhancementState IN ('NOT_SCHEDULED', 'QUEUED', 'RUNNING')
+              ))""",
+    )
+    abstract suspend fun hasClaimableEntries(now: Long): Boolean
 
     @Query("SELECT COUNT(*) FROM enhancement_outbox WHERE scanId = :scanId AND status IN ('PENDING', 'RUNNING')")
     abstract suspend fun countActiveForScan(scanId: String): Int

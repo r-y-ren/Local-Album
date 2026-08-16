@@ -4,6 +4,7 @@ import android.content.Context
 import android.provider.MediaStore
 import android.util.Log
 import androidx.room.withTransaction
+import com.renyxin.localalbum.core.concurrent.EnhancementResourceGate
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.core.pipeline.PluginAnalysisPipeline
@@ -106,9 +107,10 @@ class HybridIndexer(
      *    [IllegalStateException]——核心终态提交绝不容忍静默丢失；
      * 2. 依次记录 [ScanMilestone.SNAPSHOT_PUBLISHED] 与 [ScanMilestone.CORE_SCAN_COMPLETED]
      *    两段 telemetry 里程碑（elapsedMs 均相对 result.startedAtMs）；
-     * 3. 若本次扫描有增强 outbox 条目（result.enhancementOutboxCount > 0），标记增强已入队并
-     *    调度 EnhancementHandoffWorker。入队失败（非取消异常）的降级路径：不回滚核心发布，
-     *    持久 outbox 保持 PENDING，待进程重启或回前台的恢复逻辑重新入队。
+     * 3. 若本次扫描有增强 outbox 条目（result.enhancementOutboxCount > 0），标记增强已入队。
+     *    核心资源 gate 仍被持有时不提前启动 EnhancementHandoffWorker；由 gate 释放后的统一恢复
+     *    入口唤醒，避免首个 unique work 在正常核心互斥期间进入 WorkManager 失败退避。
+     *    非 gate 调用中的入队失败不回滚核心发布，持久 outbox 保持 PENDING，待恢复逻辑重试。
      *
      * @param result 本次扫描核心阶段的提交结果（scanId、起止计数、outbox 计数等）
      */
@@ -139,14 +141,22 @@ class HybridIndexer(
         )
         if (result.enhancementOutboxCount > 0) {
             requireScanRunDao().markEnhancementQueued(result.scanId)
-            try {
-                EnhancementHandoffWorker.enqueue(context)
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                // The durable outbox remains PENDING. A process restart/foreground resume can
-                // enqueue the handoff Worker again without rolling core publication back.
-                Log.e(TAG, "增强交接 Worker 入队失败，持久 outbox 保留待恢复", error)
+            if (EnhancementResourceGate.isCoreRequested) {
+                Log.i(
+                    TAG,
+                    "enhancement handoff deferred until core gate release: " +
+                        "scanIdHash=${result.scanId.hashCode()} outbox=${result.enhancementOutboxCount}",
+                )
+            } else {
+                try {
+                    EnhancementHandoffWorker.enqueue(context)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    // The durable outbox remains PENDING. A process restart/foreground resume can
+                    // enqueue the handoff Worker again without rolling core publication back.
+                    Log.e(TAG, "增强交接 Worker 入队失败，持久 outbox 保留待恢复", error)
+                }
             }
         }
     }
@@ -217,20 +227,57 @@ class HybridIndexer(
     /** 获取插件化分析管道，供兼容调用使用。 */
     internal fun getPluginPipeline() = pluginPipeline
 
-    /** 将当前策略允许消费的任务重置为用户优先级，并启动有界领取。 */
+    /**
+     * Atomically creates explicit user tasks for every current image without materializing paths or
+     * placing them in WorkManager Data. Per-Stage identities avoid replaying the aggregate DAG once
+     * per scope; legacy aggregate scopes are retired before the user run starts.
+     */
     suspend fun requestFullReanalysis() {
-        analysisStateDao?.deleteAll()
-        val now = System.currentTimeMillis()
-        val scopes = pluginPipeline?.claimableTaskScopes
-            ?: listOf(AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE)
-        scopes.forEach { scope ->
-            analysisTaskDao?.resetAll(
-                AnalysisTaskEntity.PRIORITY_USER,
-                now,
-                scope,
-            )
+        val pipeline = pluginPipeline ?: return
+        val dao = analysisTaskDao ?: return
+        val scopes = pipeline.stageTaskScopes.values.toList()
+        if (scopes.isEmpty()) {
+            Log.w(TAG, "full-reanalysis ignored: current edition has no executable analysis stages")
+            return
         }
-        AnalysisWorker.enqueue(context)
+
+        // Replace the old unique chain before mutating checkpoints. Cancellation releases any live
+        // lease; the shared lane then provides a strict boundary against an in-flight Stage writing
+        // analysis_state after this request cleared it.
+        AnalysisWorker.cancelForQueueReplacement(context)
+        EnhancementResourceGate.withInteractiveAi {
+            val now = System.currentTimeMillis()
+            dao.recoverInterruptedLeases(now)
+            database?.withTransaction {
+                analysisStateDao?.deleteAll()
+                pipeline.claimablePipelineScopes.forEach { legacyScope ->
+                    dao.supersedeScope(legacyScope, "user_reanalysis_uses_stage_tasks", now)
+                }
+                scopes.forEach { scope ->
+                    val prepared = dao.prepareFullReanalysisScope(
+                        scope = scope,
+                        scanId = null,
+                        mediaType = MediaType.IMAGE.name,
+                        priority = AnalysisTaskEntity.PRIORITY_USER,
+                        now = now,
+                    )
+                    Log.i(
+                        TAG,
+                        "full-reanalysis prepared: scopeHash=${scope.hashCode()} " +
+                            "reset=${prepared.reset} inserted=${prepared.inserted} " +
+                            "superseded=${prepared.superseded}",
+                    )
+                }
+            } ?: run {
+                analysisStateDao?.deleteAll()
+                scopes.forEach { scope ->
+                    dao.resetAll(AnalysisTaskEntity.PRIORITY_USER, now, scope)
+                }
+            }
+        }
+        val runnable = scopes.sumOf { scope -> dao.countRunnable(scope) }
+        Log.i(TAG, "full-reanalysis diagnostic: scopes=${scopes.size} runnable=$runnable")
+        AnalysisWorker.publishQueueReplacement(context, hasRunnableTasks = runnable > 0)
     }
 
     /** 启动时由 WorkManager 继续领取持久任务。 */

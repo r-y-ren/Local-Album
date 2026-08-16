@@ -117,4 +117,80 @@ class AnalysisWorkerTest {
             ),
         )
     }
+
+    @Test
+    fun `large healthy queue appends bounded successors without consuming retry backoff`() {
+        var remaining = 50_000 // 10,000 Full images multiplied by five Stage task scopes.
+        var successors = 0
+        while (remaining > 0) {
+            remaining = (remaining - 1_000).coerceAtLeast(0)
+            val decision = AnalysisWorker.continuationDecision(
+                activeTasks = remaining,
+                claimableTasks = remaining,
+            )
+            if (remaining > 0) {
+                assertEquals(AnalysisWorker.ContinuationDecision.ENQUEUE_SUCCESSOR, decision)
+                successors++
+            } else {
+                assertEquals(AnalysisWorker.ContinuationDecision.COMPLETE, decision)
+            }
+        }
+        assertEquals(49, successors)
+    }
+
+    @Test
+    fun `only active tasks delayed by task retry budget use work backoff`() {
+        assertEquals(
+            AnalysisWorker.ContinuationDecision.RETRY_BACKOFF,
+            AnalysisWorker.continuationDecision(activeTasks = 7, claimableTasks = 0),
+        )
+    }
+
+    @Test
+    fun `user task admission distinguishes legacy work from explicit pause`() {
+        assertTrue(
+            AnalysisWorker.userTaskAdmission(
+                userPaused = false,
+                resumePending = false,
+                activeUserTasks = 1,
+            ),
+        )
+        assertEquals(
+            false,
+            AnalysisWorker.userTaskAdmission(
+                userPaused = true,
+                resumePending = true,
+                activeUserTasks = 10,
+            ),
+        )
+    }
+
+    @Test
+    fun `handoff appends a successor for an ordinary remaining batch`() {
+        assertEquals(
+            EnhancementHandoffWorker.ContinuationDecision.ENQUEUE_SUCCESSOR,
+            EnhancementHandoffWorker.continuationDecision(
+                hasActiveEntries = true,
+                hasClaimableEntries = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `handoff reserves work retry for entries waiting on failure budget`() {
+        assertEquals(
+            EnhancementHandoffWorker.ContinuationDecision.RETRY_BACKOFF,
+            EnhancementHandoffWorker.continuationDecision(
+                hasActiveEntries = true,
+                hasClaimableEntries = false,
+            ),
+        )
+        assertEquals(
+            EnhancementHandoffWorker.ContinuationDecision.COMPLETE,
+            EnhancementHandoffWorker.continuationDecision(
+                hasActiveEntries = false,
+                hasClaimableEntries = false,
+            ),
+        )
+    }
 }

@@ -362,6 +362,8 @@ class BoundedDataAccessArchitectureTest {
         assertTrue("交接取消必须立即释放租约", handoff.contains("releaseLease("))
         assertTrue("交接必须在单独 Worker 创建分析任务", handoff.contains("enqueueAllForScan("))
         assertTrue("交接必须在单独 Worker 创建缩略图任务", handoff.contains("thumbnailTaskDao().enqueueAll("))
+        assertTrue("交接正常续批必须追加后继而非消耗失败退避", handoff.contains("ExistingWorkPolicy.APPEND_OR_REPLACE"))
+        assertTrue("交接必须区分当前可领取任务与失败等待任务", outboxDao.contains("hasClaimableEntries"))
         assertTrue("outbox 领取必须要求核心完成", outboxDao.contains("coreScanState = 'COMPLETED'"))
         assertTrue("outbox 领取必须要求快照已发布", outboxDao.contains("indexAvailability = 'PUBLISHED'"))
 
@@ -386,6 +388,11 @@ class BoundedDataAccessArchitectureTest {
         assertTrue("分析 Worker 必须在核心扫描活跃时退避", analysisWorker.contains("isCoreScanActive()"))
         assertTrue("分析推理必须持有严格自动资源闸门", analysisWorker.contains("tryWithAutomaticEnhancement"))
         assertTrue("核心抢占必须保留恢复语义", analysisWorker.contains("cancelForCorePreemption"))
+        assertTrue("分析正常续批必须追加后继而非消耗失败退避", analysisWorker.contains("ExistingWorkPolicy.APPEND_OR_REPLACE"))
+        assertTrue(
+            "分析阶段选择必须跳过尚在失败退避的前序 scope，并遵守用户暂停",
+            analysisWorker.contains("countClaimable(recoveryNow, scope, includeUserTasks)"),
+        )
 
         val repository = File(
             sourceRoot,
@@ -447,6 +454,14 @@ class BoundedDataAccessArchitectureTest {
         val rescan = viewModel.substringAfter("fun rescan()")
             .substringBefore("fun forceReanalyzeAll()")
         assertFalse("UI 扫描完成不得直接调度缩略图", rescan.contains("ThumbnailWorker.enqueue("))
+        assertTrue("人物页必须直接观察 Room-backed Repository Flow", viewModel.contains("repository.faceClusters"))
+
+        val fullUi = File(
+            projectRoot,
+            "app/src/full/java/com/renyxin/localalbum/edition/EditionUiContribution.kt",
+        ).readText()
+        assertFalse("人物页不得恢复定时快照轮询", fullUi.contains("delay(1_500L)"))
+        assertFalse("人物页不得在管道循环中手动刷新快照", fullUi.contains("loadFaceClusters()"))
     }
 
     @Test

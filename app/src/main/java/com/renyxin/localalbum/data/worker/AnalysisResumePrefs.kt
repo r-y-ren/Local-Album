@@ -3,15 +3,17 @@ package com.renyxin.localalbum.data.worker
 import android.content.Context
 
 /**
- * AI 分析「中断待续跑」标志持久化（Phase 1）。
+ * Explicit user/import analysis admission and crash-resume marker.
  *
- * 管道进入 RUNNING 时置 true，正常完成（COMPLETED/ERROR）时置 false。
- * 进程被杀后标志保持 true，下次启动据此触发自动续跑。
+ * Scan-owned tasks derive admission from scan lifecycle state. Only explicit null-scanId work uses
+ * this marker, so a later automatic scan cannot silently undo a user pause. Process death preserves
+ * true; the final bounded user-task window or explicit cancellation clears it.
  */
 object AnalysisResumePrefs {
 
     private const val PREFS_NAME = "analysis_resume"
     private const val KEY_PENDING = "analysis_pending"
+    private const val KEY_USER_PAUSED = "analysis_user_paused"
 
     fun setPending(context: Context, pending: Boolean) {
         context.applicationContext
@@ -25,5 +27,19 @@ object AnalysisResumePrefs {
         return context.applicationContext
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_PENDING, false)
+    }
+
+    fun setUserPaused(context: Context, paused: Boolean) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_USER_PAUSED, paused)
+            .apply()
+    }
+
+    fun isUserPaused(context: Context): Boolean {
+        return context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_USER_PAUSED, false)
     }
 }

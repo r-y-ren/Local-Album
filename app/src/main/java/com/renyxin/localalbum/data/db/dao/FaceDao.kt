@@ -95,9 +95,14 @@ interface FaceDao {
                (SELECT filePath FROM faces f2
                  WHERE f2.clusterId = f1.clusterId
                  ORDER BY f2.detectedAtMs ASC LIMIT 1) AS representativeFilePath,
-               (SELECT personName FROM faces f3
-                 WHERE f3.clusterId = f1.clusterId AND f3.personName IS NOT NULL
-                 LIMIT 1) AS personName
+               COALESCE(
+                 (SELECT personName FROM face_cluster_meta meta
+                   WHERE meta.clusterId = f1.clusterId AND meta.personName IS NOT NULL
+                   ORDER BY meta.generation DESC LIMIT 1),
+                 (SELECT personName FROM faces f3
+                   WHERE f3.clusterId = f1.clusterId AND f3.personName IS NOT NULL
+                   LIMIT 1)
+               ) AS personName
         FROM faces f1
         WHERE clusterId IS NOT NULL AND clusterId NOT LIKE 'pending:%'
         GROUP BY clusterId
@@ -116,15 +121,31 @@ interface FaceDao {
                (SELECT filePath FROM faces f2
                  WHERE f2.clusterId = f1.clusterId
                  ORDER BY f2.detectedAtMs ASC LIMIT 1) AS representativeFilePath,
-               (SELECT personName FROM faces f3
-                 WHERE f3.clusterId = f1.clusterId AND f3.personName IS NOT NULL
-                 LIMIT 1) AS personName
+               COALESCE(
+                 (SELECT personName FROM face_cluster_meta meta
+                   WHERE meta.clusterId = f1.clusterId AND meta.personName IS NOT NULL
+                   ORDER BY meta.generation DESC LIMIT 1),
+                 (SELECT personName FROM faces f3
+                   WHERE f3.clusterId = f1.clusterId AND f3.personName IS NOT NULL
+                   LIMIT 1)
+               ) AS personName
         FROM faces f1
         WHERE clusterId IS NOT NULL AND clusterId NOT LIKE 'pending:%'
         GROUP BY clusterId
         ORDER BY faceCount DESC
     """)
     fun getClusterSummariesFlow(): Flow<List<FaceClusterSummary>>
+
+    /** 单行聚合统计；faces 表任意批次提交后由 Room 自动重新发射。 */
+    @Query("""
+        SELECT COUNT(*) AS totalFaces,
+               COALESCE(SUM(CASE WHEN clusterId IS NOT NULL AND clusterId NOT LIKE 'pending:%'
+                                 THEN 1 ELSE 0 END), 0) AS clusteredFaces,
+               COUNT(DISTINCT CASE WHEN clusterId IS NOT NULL AND clusterId NOT LIKE 'pending:%'
+                                   THEN clusterId ELSE NULL END) AS clusterCount
+        FROM faces
+    """)
+    fun getStatsFlow(): Flow<FaceStatsSummary>
 
     // ---- 更新 ----
 
@@ -165,4 +186,11 @@ data class FaceClusterSummary(
     val representativeThumb: String?,
     val representativeFilePath: String?,
     val personName: String? = null,
+)
+
+/** 人物页统计聚合 DTO。 */
+data class FaceStatsSummary(
+    val totalFaces: Int,
+    val clusteredFaces: Int,
+    val clusterCount: Int,
 )
