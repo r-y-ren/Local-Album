@@ -9,7 +9,7 @@ class ScanWorkerTest {
     fun `completed persisted drain succeeds regardless of attempt count`() {
         assertEquals(
             ScanWorker.ScanWorkDecision.SUCCESS,
-            ScanWorker.scanWorkDecision(PersistedScanDrainResult.COMPLETED, runAttemptCount = 99),
+            ScanWorker.scanWorkDecision(PersistedScanDrainResult.Completed, runAttemptCount = 99),
         )
     }
 
@@ -17,23 +17,36 @@ class ScanWorkerTest {
     fun `deferred persisted drain always retries`() {
         assertEquals(
             ScanWorker.ScanWorkDecision.RETRY,
-            ScanWorker.scanWorkDecision(PersistedScanDrainResult.DEFERRED, runAttemptCount = 99),
+            ScanWorker.scanWorkDecision(PersistedScanDrainResult.Deferred, runAttemptCount = 99),
         )
     }
 
     @Test
-    fun `failed persisted drain retries below limit`() {
+    fun `failed persisted drain retries below limit without losing run identity`() {
+        val failure = PersistedScanDrainResult.Failed(
+            scanId = "same-reserved-run",
+            error = "SecurityException",
+        )
+
         assertEquals(
             ScanWorker.ScanWorkDecision.RETRY,
-            ScanWorker.scanWorkDecision(PersistedScanDrainResult.FAILED, runAttemptCount = 2),
+            ScanWorker.scanWorkDecision(failure, runAttemptCount = 2),
         )
+        assertEquals("same-reserved-run", failure.scanId)
+        assertEquals("SecurityException", failure.error)
     }
 
     @Test
-    fun `failed persisted drain stops at retry limit`() {
+    fun `failed persisted drain becomes terminal only at retry limit`() {
+        val failure = PersistedScanDrainResult.Failed(
+            scanId = "same-reserved-run",
+            error = "SecurityException",
+        )
+
         assertEquals(
             ScanWorker.ScanWorkDecision.FAILURE,
-            ScanWorker.scanWorkDecision(PersistedScanDrainResult.FAILED, runAttemptCount = 3),
+            ScanWorker.scanWorkDecision(failure, runAttemptCount = 3),
         )
+        assertEquals("same-reserved-run", failure.scanId)
     }
 }

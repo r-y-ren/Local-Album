@@ -156,7 +156,7 @@ class BoundedDataAccessArchitectureTest {
         )
 
         val scanCompletion = repository.substringAfter("val changedCount = publishedCoreResult?.let")
-            .substringBefore("ScanExecutionResult.COMPLETED")
+            .substringBefore("ScanExecutionResult.Completed")
         assertTrue("无变化增量必须跳过统计刷新", scanCompletion.contains("changedCount == null || changedCount > 0"))
         assertFalse(
             "普通增量不得重建全库推荐池",
@@ -201,16 +201,12 @@ class BoundedDataAccessArchitectureTest {
     }
 
     @Test
-    fun `edition composition and restore seeding do not bypass policy scope`() {
+    fun `restore publishes a local baseline but cannot bypass explicit rebuild admission`() {
         val sourceRoot = File(projectRoot, "app/src/main/java")
         val container = File(sourceRoot, "com/renyxin/localalbum/AppContainer.kt").readText()
         val importer = File(
             sourceRoot,
             "com/renyxin/localalbum/data/backup/DatabaseImporter.kt",
-        ).readText()
-        val seeder = File(
-            sourceRoot,
-            "com/renyxin/localalbum/data/backup/PostRestoreTaskSeeder.kt",
         ).readText()
 
         assertTrue(
@@ -222,42 +218,26 @@ class BoundedDataAccessArchitectureTest {
             container.contains("FullScanFeaturePolicy"),
         )
         assertTrue(
-            "恢复 policy 必须使用当前管线 scope",
-            container.contains("pipelineScope = pluginAnalysisPipeline.pipelineScope"),
-        )
-        assertTrue(
-            "恢复 policy 必须由显式 Stage plan 决定是否创建分析交接",
-            container.contains(
-                "enqueueAutomaticAnalysis = pluginAnalysisPipeline.requiredStageIds.isNotEmpty()",
-            ),
-        )
-        assertTrue(
-            "恢复器只能委托显式 policy seeder",
-            importer.contains("postRestoreTaskSeeder?.seed(db)"),
+            "导入切表事务必须重建本机主页基线并标记待显式校验",
+            importer.contains("publishImportedBaselineAndRequireValidation(db)") &&
+                importer.contains("DELETE FROM home_media_snapshot") &&
+                importer.contains("'PLACEHOLDER'") &&
+                importer.contains("'NEEDS_REBUILD'") &&
+                importer.contains("'backup_import_requires_validation'"),
         )
         assertFalse(
-            "恢复器不得保留 edition 或 pipeline 判断",
+            "导入不得预建无 activeRunId 的孤儿恢复任务",
+            importer.contains("postRestoreTaskSeeder") ||
+                importer.contains("INSERT OR IGNORE INTO enhancement_outbox") ||
+                importer.contains("INSERT OR IGNORE INTO analysis_tasks") ||
+                importer.contains("INSERT OR IGNORE INTO thumbnail_tasks"),
+        )
+        assertFalse(
+            "恢复器不得保留 edition、pipeline scope 或旧 Full 默认判断",
             importer.contains("restoredAnalysisPipelineScope") ||
                 importer.contains("restoredAnalysisEnabled") ||
-                importer.contains("restoredProfileId"),
-        )
-        assertTrue(
-            "policy seeder 必须只创建 durable handoff",
-            seeder.contains("INSERT OR IGNORE INTO enhancement_outbox"),
-        )
-        assertFalse(
-            "恢复器与 policy seeder 均不得直接 seed analysis task",
-            importer.contains("INSERT OR IGNORE INTO analysis_tasks") ||
-                seeder.contains("INSERT OR IGNORE INTO analysis_tasks"),
-        )
-        assertFalse(
-            "恢复器与 policy seeder 均不得直接 seed thumbnail task",
-            importer.contains("INSERT OR IGNORE INTO thumbnail_tasks") ||
-                seeder.contains("INSERT OR IGNORE INTO thumbnail_tasks"),
-        )
-        assertFalse(
-            "恢复器不得创建旧 Full 默认 scope",
-            importer.contains("'core:v1'") || seeder.contains("'core:v1'"),
+                importer.contains("restoredProfileId") ||
+                importer.contains("'core:v1'"),
         )
         val switchGenericStaging = importer.substringAfter("private suspend fun switchGenericStaging(")
             .substringBefore("private fun insertJsonRow(")
@@ -356,6 +336,14 @@ class BoundedDataAccessArchitectureTest {
             sourceRoot,
             "com/renyxin/localalbum/data/db/dao/EnhancementOutboxDao.kt",
         ).readText()
+        val thumbnailTaskDao = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/db/dao/ThumbnailTaskDao.kt",
+        ).readText()
+        val analysisTaskDao = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/db/dao/AnalysisTaskDao.kt",
+        ).readText()
         assertTrue("交接 Worker 必须有界领取", handoff.contains("limit = BATCH_SIZE"))
         assertTrue("交接 Worker 必须在任意核心扫描活跃时退避", handoff.contains("isCoreScanActive()"))
         assertTrue("交接 Worker 必须进入严格自动资源闸门", handoff.contains("tryWithAutomaticEnhancement"))
@@ -366,6 +354,17 @@ class BoundedDataAccessArchitectureTest {
         assertTrue("交接必须区分当前可领取任务与失败等待任务", outboxDao.contains("hasClaimableEntries"))
         assertTrue("outbox 领取必须要求核心完成", outboxDao.contains("coreScanState = 'COMPLETED'"))
         assertTrue("outbox 领取必须要求快照已发布", outboxDao.contains("indexAvailability = 'PUBLISHED'"))
+        listOf(
+            "enhancement outbox" to outboxDao,
+            "缩略图任务" to thumbnailTaskDao,
+            "分析任务" to analysisTaskDao,
+        ).forEach { (label, daoSource) ->
+            assertTrue(
+                "$label 失败统计必须由 Room Flow 实时驱动",
+                daoSource.contains("observeFailedCount()") &&
+                    daoSource.contains("status = 'FAILED'"),
+            )
+        }
 
         val thumbnailWorker = File(
             sourceRoot,
@@ -379,7 +378,16 @@ class BoundedDataAccessArchitectureTest {
         assertTrue("后台缩略图必须进入严格资源闸门", thumbnailWorker.contains("tryWithAutomaticEnhancement"))
         assertTrue("可视缩略图必须走独立有界交互闸门", thumbnailWorker.contains("withInteractiveThumbnail"))
         assertTrue("缩略图取消必须立即释放租约", thumbnailWorker.contains("releaseLease("))
-        assertTrue("交互和后台缩略图必须使用不同 unique work", thumbnailWorker.contains("INTERACTIVE_WORK_NAME") && thumbnailWorker.contains("BACKGROUND_WORK_NAME"))
+        val thumbnailDispatcher = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/repo/ThumbnailWakeDispatcher.kt",
+        ).readText()
+        assertTrue(
+            "交互和后台缩略图必须使用两个固定且不同的 unique pump",
+            thumbnailDispatcher.contains("thumbnail_interactive_pump") &&
+                thumbnailDispatcher.contains("thumbnail_automatic_pump") &&
+                thumbnailDispatcher.contains("awaitTerminal()"),
+        )
 
         val analysisWorker = File(
             sourceRoot,
@@ -391,7 +399,10 @@ class BoundedDataAccessArchitectureTest {
         assertTrue("分析正常续批必须追加后继而非消耗失败退避", analysisWorker.contains("ExistingWorkPolicy.APPEND_OR_REPLACE"))
         assertTrue(
             "分析阶段选择必须跳过尚在失败退避的前序 scope，并遵守用户暂停",
-            analysisWorker.contains("countClaimable(recoveryNow, scope, includeUserTasks)"),
+            analysisWorker.contains("dao.countClaimable(") &&
+                analysisWorker.contains("now = recoveryNow") &&
+                analysisWorker.contains("includeUserTasks = includeUserTasks") &&
+                analysisWorker.contains("admittedScanId = admittedScanId"),
         )
 
         val repository = File(
@@ -416,8 +427,11 @@ class BoundedDataAccessArchitectureTest {
             importerHandoff.contains("withExclusiveBackupMaintenance"),
         )
         assertTrue(
-            "恢复 outbox 必须在导入后 reconciliation 完成后释放",
-            importerHandoff.indexOf("rescan()") < importerHandoff.indexOf("EnhancementHandoffWorker::enqueue"),
+            "导入只能持久化校验需求，不得自动遍历扫描根或绕过流水线释放 outbox",
+            importerHandoff.contains("markRebuildRequired") &&
+                importerHandoff.contains("libraryPipelineCoordinator?.wake()") &&
+                !importerHandoff.contains("EnhancementHandoffWorker::enqueue") &&
+                !importerHandoff.contains("rescan()"),
         )
 
         val fullSourceRoot = File(projectRoot, "app/src/full/java")
@@ -445,16 +459,134 @@ class BoundedDataAccessArchitectureTest {
         )
 
         val container = File(sourceRoot, "com/renyxin/localalbum/AppContainer.kt").readText()
-        assertTrue("启动恢复必须覆盖 thumbnail-only 队列", container.contains("countAutomaticRunnable()"))
+        val pipelineCoordinator = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/repo/LibraryPipelineCoordinator.kt",
+        ).readText()
+        val automaticAnalysisAdmission = pipelineCoordinator
+            .substringAfter("private suspend fun startOrFinishAnalysisLocked")
+            .substringBefore("private suspend fun updateAnalysisProgressLocked")
+        assertTrue(
+            "自动分析阶段必须追加交接和分析 successor",
+            automaticAnalysisAdmission.contains("EnhancementHandoffWorker.appendSuccessor(context)") &&
+                automaticAnalysisAdmission.contains("AnalysisWorker.appendSuccessor(context)"),
+        )
+        assertFalse(
+            "自动分析阶段不得使用外部 KEEP 唤醒入口",
+            automaticAnalysisAdmission.contains("EnhancementHandoffWorker.enqueue(context)") ||
+                automaticAnalysisAdmission.contains("AnalysisWorker.enqueue(context)"),
+        )
+        val thumbnailGateAdmission = pipelineCoordinator
+            .substringAfter("private suspend fun advanceThumbnailGateLocked")
+            .substringBefore("private suspend fun updateThumbnailProgressLocked")
+        assertFalse(
+            "后台缩略图 gate 不得按交互 participant 数追加交互 successor",
+            thumbnailGateAdmission.contains("replayInteractiveWake") ||
+                thumbnailGateAdmission.contains("countInteractiveActive") ||
+                thumbnailGateAdmission.contains("interactiveActive > 0"),
+        )
+        assertTrue(
+            "后台 gate 只能在交互 completion 修复 scan target 时追加一次后台 successor",
+            thumbnailGateAdmission.contains("repairedTargets && expectedScanId == null") &&
+                thumbnailGateAdmission.contains("ThumbnailWorker.appendBackgroundSuccessor(context)"),
+        )
+        val failedRetryAdmission = pipelineCoordinator.substringAfter("suspend fun retryFailedThumbnails()")
+        val analysisResumePrefs = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/worker/AnalysisResumePrefs.kt",
+        ).readText()
+        assertTrue(
+            "手动缩略图失败重试必须转换成交互 ownership 并消费持久 generation wake 权",
+            failedRetryAdmission.contains("retryAllFailedInteractive") &&
+                failedRetryAdmission.contains("if (wakeRequired)") &&
+                failedRetryAdmission.contains("ThumbnailWorker.replayInteractiveWake"),
+        )
+        assertTrue(
+            "手动分析失败重试必须在 ownership 转换前同步持久化用户恢复标记",
+            failedRetryAdmission.contains("AnalysisResumePrefs.resumeUserWork(context)") &&
+                failedRetryAdmission.indexOf("AnalysisResumePrefs.resumeUserWork(context)") <
+                failedRetryAdmission.indexOf("retryFailedAsUserForScopes") &&
+                failedRetryAdmission.contains("analysisPipeline().claimableTaskScopes") &&
+                failedRetryAdmission.contains("countFailedForScopes(scopes)") &&
+                failedRetryAdmission.contains("AnalysisWorker.enqueue(context)") &&
+                analysisResumePrefs.contains("fun resumeUserWork(context: Context)") &&
+                analysisResumePrefs.contains(".commit()"),
+        )
+        assertTrue(
+            "失败 outbox 重试必须在事务中展开为 null-scan 用户任务并原子完成",
+            failedRetryAdmission.contains("retryFailedEnhancementOutbox") &&
+                failedRetryAdmission.contains("database.withTransaction") &&
+                failedRetryAdmission.contains("getFailedForUserRetry") &&
+                failedRetryAdmission.contains("scanId = null") &&
+                failedRetryAdmission.contains("markRetriedForUser") &&
+                failedRetryAdmission.contains("recordUserRetryFailure") &&
+                failedRetryAdmission.contains("ThumbnailWorker.replayInteractiveWake") &&
+                failedRetryAdmission.contains("AnalysisWorker.enqueue(context)"),
+        )
+        assertTrue(
+            "失败重试 UI 准入必须观察协调器的同一持久状态规则",
+            pipelineCoordinator.contains("val userTaskRetryAllowed: Flow<Boolean>") &&
+                pipelineCoordinator.contains("state?.let(::canAdmitUserTasks) ?: false") &&
+                failedRetryAdmission.contains("if (!canAdmitUserTasks(state))"),
+        )
+        val pipelineWorker = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/worker/LibraryPipelineWorker.kt",
+        ).readText()
+        assertTrue(
+            "启动恢复必须覆盖持久 thumbnail-only 阶段且不得绕过流水线门禁",
+            container.contains("libraryPipelineCoordinator.wake()") &&
+                pipelineCoordinator.contains("stage.isThumbnail") &&
+                pipelineWorker.contains("ThumbnailWorker.appendBackgroundSuccessor"),
+        )
+        assertTrue(
+            "启动恢复必须从 Room lane level 重放交互缩略图 wake",
+            pipelineCoordinator.contains("thumbnailTaskDao().laneState(") &&
+                pipelineCoordinator.contains("STATE_PENDING") &&
+                pipelineCoordinator.contains("if (admission.thumbnails)") &&
+                pipelineCoordinator.contains("ThumbnailWorker.replayInteractiveWake"),
+        )
 
         val viewModel = File(
             sourceRoot,
             "com/renyxin/localalbum/ui/vm/AlbumViewModel.kt",
         ).readText()
+        val gridThumbnailRequest = viewModel
+            .substringAfter("fun requestGridThumbnails")
+            .substringBefore("suspend fun resolvePreviewThumbnail")
+        assertTrue(
+            "主页可见/预取窗口必须一次提交批量缩略图请求",
+            gridThumbnailRequest.contains("repository.requestThumbnails("),
+        )
+        assertFalse(
+            "主页可见/预取窗口不得逐媒体调用单项缩略图调度",
+            gridThumbnailRequest.contains("repository.requestThumbnail("),
+        )
+        val scanControls = File(
+            sourceRoot,
+            "com/renyxin/localalbum/ui/screens/settings/ScanControlSection.kt",
+        ).readText()
         val rescan = viewModel.substringAfter("fun rescan()")
             .substringBefore("fun forceReanalyzeAll()")
         assertFalse("UI 扫描完成不得直接调度缩略图", rescan.contains("ThumbnailWorker.enqueue("))
         assertTrue("人物页必须直接观察 Room-backed Repository Flow", viewModel.contains("repository.faceClusters"))
+        assertTrue(
+            "Repository 必须暴露三类 Room-backed 失败统计与持久重试准入",
+            repository.contains("val failedThumbnailCount: Flow<Int>") &&
+                repository.contains("val failedAnalysisTaskCount: Flow<Int>") &&
+                repository.contains("val failedEnhancementOutboxCount: Flow<Int>") &&
+                repository.contains("libraryPipelineCoordinator?.userTaskRetryAllowed"),
+        )
+        assertTrue(
+            "设置页必须显示三类失败并提供独立手动重试入口",
+            scanControls.contains("failedThumbnailCount") &&
+                scanControls.contains("failedAnalysisTaskCount") &&
+                scanControls.contains("failedEnhancementOutboxCount") &&
+                scanControls.contains("albumViewModel::retryFailedThumbnails") &&
+                scanControls.contains("albumViewModel::retryFailedAnalysis") &&
+                scanControls.contains("albumViewModel::retryFailedEnhancementOutbox") &&
+                scanControls.contains("retryAllowed && !anyRetryRunning"),
+        )
 
         val fullUi = File(
             projectRoot,
@@ -462,6 +594,235 @@ class BoundedDataAccessArchitectureTest {
         ).readText()
         assertFalse("人物页不得恢复定时快照轮询", fullUi.contains("delay(1_500L)"))
         assertFalse("人物页不得在管道循环中手动刷新快照", fullUi.contains("loadFaceClusters()"))
+    }
+
+    @Test
+    fun `complete rebuild stays user confirmed and scan scope changes are durably linearized`() {
+        val sourceRoot = File(projectRoot, "app/src/main/java")
+        val repository = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/repo/AlbumRepository.kt",
+        ).readText()
+        val viewModel = File(
+            sourceRoot,
+            "com/renyxin/localalbum/ui/vm/AlbumViewModel.kt",
+        ).readText()
+        val scanControls = File(
+            sourceRoot,
+            "com/renyxin/localalbum/ui/screens/settings/ScanControlSection.kt",
+        ).readText()
+        val settingsStore = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/prefs/SettingsStore.kt",
+        ).readText()
+        val settingsRepository = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/repo/SettingsRepository.kt",
+        ).readText()
+        val container = File(sourceRoot, "com/renyxin/localalbum/AppContainer.kt").readText()
+        val coordinator = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/repo/LibraryPipelineCoordinator.kt",
+        ).readText()
+
+        val repositoryRefresh = repository.substringAfter("suspend fun rescan(): Boolean")
+            .substringBefore("suspend fun requestFullRebuild()")
+        assertTrue("普通刷新必须只唤醒持久流水线", repositoryRefresh.contains("libraryPipelineCoordinator?.wake()"))
+        assertFalse("普通刷新不得授权完整重建", repositoryRefresh.contains("requestExplicitRebuild"))
+        val repositoryRebuild = repository.substringAfter("suspend fun requestFullRebuild()")
+            .substringBefore("suspend fun retryFailedThumbnails()")
+        assertTrue("Repository 完整重建入口必须委托显式准入", repositoryRebuild.contains("requestExplicitRebuild()"))
+
+        val viewModelRefresh = viewModel.substringAfter("fun rescan()")
+            .substringBefore("fun requestFullRebuild()")
+        assertTrue("ViewModel 普通刷新必须调用增量刷新入口", viewModelRefresh.contains("repository.rescan()"))
+        assertFalse("ViewModel 普通刷新不得转为完整重建", viewModelRefresh.contains("requestFullRebuild"))
+        val viewModelRebuild = viewModel.substringAfter("fun requestFullRebuild()")
+            .substringBefore("fun forceReanalyzeAll()")
+        assertTrue("ViewModel 显式重建必须只提交 Repository 请求", viewModelRebuild.contains("repository.requestFullRebuild()"))
+        assertFalse("ViewModel 不得直接触达流水线 DAO", viewModelRebuild.contains("requestExplicitRebuild"))
+
+        val confirmation = scanControls.substringAfter("confirmButton = {")
+            .substringBefore("dismissButton = {")
+        assertTrue("设置页完整重建必须使用确认对话框", scanControls.contains("AlertDialog("))
+        assertTrue("只有确认动作才能调用完整重建", confirmation.contains("albumViewModel.requestFullRebuild()"))
+        val controlCard = scanControls.substringAfter("ElevatedCard(")
+        val incrementalButton = controlCard.substringAfter("Button(")
+            .substringBefore("OutlinedButton(")
+        assertTrue("普通设置页按钮必须只检查增量更新", incrementalButton.contains("albumViewModel.rescan()"))
+        assertFalse("普通设置页按钮不得调用完整重建", incrementalButton.contains("requestFullRebuild"))
+        val rebuildButton = controlCard.substringAfter("OutlinedButton(")
+            .substringBefore("Text(\"完整重建图库\")")
+        assertTrue("完整重建按钮必须先打开确认状态", rebuildButton.contains("showRebuildConfirmation.value = true"))
+        assertFalse("完整重建按钮不得绕过确认直接提交", rebuildButton.contains("requestFullRebuild"))
+
+        fun callSites(call: String): Set<String> = sourceRoot.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.readText().contains(call) }
+            .map { it.relativeTo(projectRoot).path.replace('\\', '/') }
+            .toSet()
+
+        assertTrue(
+            "完整重建 UI 调用链出现了额外入口: ${callSites(".requestFullRebuild(")}",
+            callSites(".requestFullRebuild(") == setOf(
+                "app/src/main/java/com/renyxin/localalbum/ui/screens/settings/ScanControlSection.kt",
+                "app/src/main/java/com/renyxin/localalbum/ui/vm/AlbumViewModel.kt",
+            ),
+        )
+        assertTrue(
+            "显式重建协调器出现了额外调用方: ${callSites(".requestExplicitRebuild(")}",
+            callSites(".requestExplicitRebuild(") == setOf(
+                "app/src/main/java/com/renyxin/localalbum/data/repo/AlbumRepository.kt",
+            ),
+        )
+        assertTrue(
+            "rebuildRequested 出现了绕过协调器的写入方: ${callSites(".requestRebuild(")}",
+            callSites(".requestRebuild(") == setOf(
+                "app/src/main/java/com/renyxin/localalbum/data/repo/LibraryPipelineCoordinator.kt",
+            ),
+        )
+
+        assertTrue(
+            "扫描范围变化必须持久化 DataStore 重放标记",
+            settingsStore.contains("stringPreferencesKey(\"pending_scan_scope_change\")") &&
+                settingsStore.contains("val pendingScanScopeChangeReason"),
+        )
+        listOf(
+            Triple("setShowNomediaDirectories(", "setShowAnalysisProgressUi(", "nomedia_policy_changed"),
+            Triple("addScanRoot(", "removeScanRoot(", "scan_root_added"),
+            Triple("removeScanRoot(", "addIgnoreDir(", "scan_root_removed"),
+            Triple("addIgnoreDir(", "removeIgnoreDir(", "ignore_rule_added"),
+            Triple("removeIgnoreDir(", "acknowledgeScanScopeChange(", "ignore_rule_removed"),
+        ).forEach { (start, end, reason) ->
+            val mutation = settingsStore.substringAfter("suspend fun $start")
+                .substringBefore("suspend fun $end")
+            assertTrue("$start 必须在同一 DataStore edit 中写入待重放标记", mutation.contains("store.edit"))
+            assertTrue("$start 缺少待重放标记", mutation.contains("KEY_PENDING_SCAN_SCOPE_CHANGE"))
+            assertTrue("$start 缺少稳定原因 $reason", mutation.contains("\"$reason\""))
+        }
+        val acknowledgement = settingsStore.substringAfter("suspend fun acknowledgeScanScopeChange(")
+            .substringBefore("private companion object")
+        assertTrue(
+            "范围变化确认必须条件删除，避免清除并发的新标记",
+            acknowledgement.contains("prefs[KEY_PENDING_SCAN_SCOPE_CHANGE] == reason") &&
+                acknowledgement.contains("prefs.remove(KEY_PENDING_SCAN_SCOPE_CHANGE)"),
+        )
+
+        listOf(
+            "addScanRoot(" to "removeScanRoot(",
+            "removeScanRoot(" to "addIgnoreDir(",
+            "addIgnoreDir(" to "removeIgnoreDir(",
+            "removeIgnoreDir(" to "setShowNomediaDirectories(",
+            "setShowNomediaDirectories(" to "replayPendingScanScopeChange(",
+        ).forEach { (start, end) ->
+            val mutation = settingsRepository.substringAfter("suspend fun $start")
+                .substringBefore("suspend fun $end")
+            assertTrue("$start 必须与扫描配置读取共享互斥锁", mutation.contains("scanScopeMutex.withLock"))
+            assertTrue("$start 必须先提交 Room 控制面再确认 DataStore", mutation.contains("submitScanScopeChange("))
+        }
+        val replay = settingsRepository.substringAfter("suspend fun replayPendingScanScopeChange()")
+            .substringBefore("suspend fun <T> withStableScanSettings")
+        assertTrue("冷启动重放必须持有扫描范围互斥锁", replay.contains("scanScopeMutex.withLock"))
+        assertTrue("冷启动重放必须消费持久标记", replay.contains("pendingScanScopeChangeReason.first()"))
+        assertTrue("冷启动重放必须复用正常提交路径", replay.contains("submitScanScopeChange(reason)"))
+        val stableSettings = settingsRepository.substringAfter("suspend fun <T> withStableScanSettings")
+            .substringBefore("private suspend fun submitScanScopeChange")
+        assertTrue("扫描配置读取必须持有扫描范围互斥锁", stableSettings.contains("scanScopeMutex.withLock"))
+        assertTrue("扫描配置必须在锁内读取最新快照", stableSettings.contains("block(state.first())"))
+        val submitScopeChange = settingsRepository.substringAfter("private suspend fun submitScanScopeChange")
+            .substringBefore("suspend fun setShowAnalysisProgressUi")
+        val roomCommit = submitScopeChange.indexOf("onScanScopeChanged(reason)")
+        val dataStoreAck = submitScopeChange.indexOf("acknowledgeScanScopeChange(reason)")
+        assertTrue(
+            "范围变化必须先写 Room 控制面，成功后才确认 DataStore 标记",
+            roomCommit >= 0 && dataStoreAck > roomCommit,
+        )
+
+        val stableReservation = repository.substringAfter("val admitted = withTimeoutOrNull(5000L)")
+            .substringBefore("val settings = admitted?.first")
+        val stableBoundary = stableReservation.indexOf("settingsRepository.withStableScanSettings")
+        val runReservation = stableReservation.indexOf("getOrCreateAdmittedScanRun()")
+        assertTrue(
+            "扫描设置读取和持久 run 预留必须处于同一线性化边界",
+            stableBoundary >= 0 && runReservation > stableBoundary,
+        )
+
+        val scopeCallback = container.substringAfter("SettingsRepository(settingsStore) { reason ->")
+            .substringBefore("private val mediaSource")
+        assertTrue("设置变化必须提交为待重建提示", scopeCallback.contains("markScanScopeChanged(reason)"))
+        assertTrue("设置变化提交后必须唤醒已授权的首次阶段", scopeCallback.contains("libraryPipelineCoordinator.wake()"))
+        assertFalse("设置变化不得授权完整重建", scopeCallback.contains("requestExplicitRebuild"))
+        val startupRecovery = container.substringAfter("fun maybeResumePendingScanChanges()")
+            .substringBefore("fun maybeRescanOnForeground()")
+        val ensureState = startupRecovery.indexOf("libraryPipelineCoordinator.ensureState()")
+        val replayMarker = startupRecovery.indexOf("settingsRepository.replayPendingScanScopeChange()")
+        val wakePipeline = startupRecovery.lastIndexOf("libraryPipelineCoordinator.wake()")
+        assertTrue(
+            "冷启动必须先恢复控制面，再重放 DataStore 标记，最后唤醒持久阶段",
+            ensureState >= 0 && replayMarker > ensureState && wakePipeline > replayMarker,
+        )
+        assertFalse("冷启动恢复不得授权完整重建", startupRecovery.contains("requestExplicitRebuild"))
+
+        val scopeChange = coordinator.substringAfter("suspend fun markScanScopeChanged(")
+            .substringBefore("suspend fun startQueuedWorkIfIdle()")
+        assertTrue("范围变化必须受流水线互斥锁保护", scopeChange.contains("mutex.withLock"))
+        assertTrue("已有基线或 active run 时范围变化只能标记需要重建", scopeChange.contains("dao.requireRebuild("))
+        assertFalse("范围变化不得写 rebuildRequested", scopeChange.contains("dao.requestRebuild("))
+        val queuedWork = coordinator.substringAfter("private suspend fun startQueuedWorkIfIdleLocked()")
+            .substringBefore("suspend fun admittedScanStage()")
+        assertTrue("模糊 MediaStore 事件只能标记需要重建", queuedWork.contains("dao.requireRebuild(\"ambiguous_media_store_change\")"))
+        assertTrue("只有已持久化的显式请求才能进入重建扫描", queuedWork.contains("if (state.rebuildRequested)"))
+        assertTrue(
+            "待重建提示不得永久阻塞可精确解析的 MEDIA journal",
+            queuedWork.contains("LibraryPipelineStage.NEEDS_REBUILD") &&
+                queuedWork.indexOf("hasOutstandingMediaChanges()") >
+                queuedWork.indexOf("consumeReconciliationHintAsAdvisory()"),
+        )
+
+        val observer = container.substringAfter("fun registerContentObserver()")
+            .substringBefore("fun maybeResumePendingScanChanges()")
+        val persistJournal = observer.indexOf("hybridIndexer.recordMediaChanges(changes)")
+        val notifyCoordinator = observer.indexOf("libraryPipelineCoordinator.onMediaChangesRecorded()")
+        assertTrue(
+            "ContentObserver 必须先持久化 journal，再通知唯一协调器",
+            persistJournal >= 0 && notifyCoordinator > persistJournal,
+        )
+        assertFalse("ContentObserver 不得直接调度扫描 Worker", observer.contains("ScanWorker.schedule("))
+        assertFalse("ContentObserver 不得直接调度流水线 Worker", observer.contains("LibraryPipelineWorker."))
+
+        val pipelineWorker = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/worker/LibraryPipelineWorker.kt",
+        ).readText()
+        val scanWorker = File(
+            sourceRoot,
+            "com/renyxin/localalbum/data/worker/ScanWorker.kt",
+        ).readText()
+        assertTrue(
+            "外部 level-triggered 流水线唤醒必须用 KEEP 去重",
+            pipelineWorker.contains("fun enqueue(context: Context) = enqueue(context, ExistingWorkPolicy.KEEP)"),
+        )
+        assertTrue(
+            "阶段完成后的有序 successor 必须使用 APPEND_OR_REPLACE",
+            pipelineWorker.contains(
+                "fun appendSuccessor(context: Context) = enqueue(context, ExistingWorkPolicy.APPEND_OR_REPLACE)",
+            ),
+        )
+        assertTrue(
+            "已准入扫描的内部调度必须追加 successor，避免上一 Worker 退出窗口吞掉唤醒",
+            scanWorker.contains("ExistingWorkPolicy.APPEND_OR_REPLACE"),
+        )
+        assertTrue(
+            "扫描 Worker 最终异常必须使用预留身份终结当前 run",
+            scanWorker.contains("admittedScanId") &&
+                scanWorker.contains("markActiveScanFailed(") &&
+                scanWorker.contains("if (runAttemptCount < MAX_RETRIES)"),
+        )
+        assertTrue(
+            "ScanWorker 调度出现了绕过流水线 pump 的调用方: ${callSites("ScanWorker.schedule(")}",
+            callSites("ScanWorker.schedule(") == setOf(
+                "app/src/main/java/com/renyxin/localalbum/data/worker/LibraryPipelineWorker.kt",
+            ),
+        )
     }
 
     @Test

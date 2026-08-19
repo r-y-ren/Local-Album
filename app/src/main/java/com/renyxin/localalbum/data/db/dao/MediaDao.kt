@@ -464,9 +464,23 @@ interface MediaDao {
     @Query("SELECT * FROM media_items WHERE thumbnailPath IS NULL AND isTrashed = 0 AND filePath > :afterPath ORDER BY filePath ASC LIMIT :limit")
     suspend fun getMissingThumbnailsAfter(afterPath: String, limit: Int): List<MediaEntity>
 
-    // P0-4: 仅更新缩略图路径，避免 REPLACE 整行覆盖分析管道写入的 AI 字段
-    @Query("UPDATE media_items SET thumbnailPath = :thumbPath WHERE filePath = :filePath")
-    suspend fun updateThumbnail(filePath: String, thumbPath: String)
+    /**
+     * Canonical CAS used by thumbnail publication. Room's surrounding writer transaction orders
+     * this UPDATE with scanner writes, so a version/type/trash change can occur wholly before it
+     * (zero rows) or wholly after commit, never between validation and pointer publication.
+     */
+    @Query(
+        """UPDATE media_items SET thumbnailPath = :thumbPath
+           WHERE filePath = :filePath AND isTrashed = 0 AND mediaType = :mediaType
+             AND ('sv1|m=' || modifiedAtMs || '|s=' || fileSize || '|f=' ||
+                  COALESCE(LOWER(fingerprintHead),'-')) = :sourceVersion""",
+    )
+    suspend fun updateThumbnailIfCanonical(
+        filePath: String,
+        sourceVersion: String,
+        mediaType: String,
+        thumbPath: String,
+    ): Int
 
     // ---- 单条轻量查询（Phase 4.1 语义嵌入使用） ----
     @Query("SELECT * FROM media_items WHERE filePath = :path LIMIT 1")

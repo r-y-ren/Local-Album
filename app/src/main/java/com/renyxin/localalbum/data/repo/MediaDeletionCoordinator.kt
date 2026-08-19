@@ -2,6 +2,7 @@ package com.renyxin.localalbum.data.repo
 
 import androidx.room.withTransaction
 import com.renyxin.localalbum.data.db.AppDatabase
+import com.renyxin.localalbum.data.db.entity.ThumbnailCacheEntryEntity
 import java.io.File
 
 /**
@@ -20,12 +21,25 @@ class MediaDeletionCoordinator(
 
     private data class PreparedChunk(
         val paths: List<String>,
-        val removableCachePaths: List<String>,
+        val removableCacheEntries: List<ThumbnailCacheEntryEntity>,
     )
 
-    suspend fun purge(paths: Collection<String>) {
-        prepare(paths).forEach { prepared ->
-            database.withTransaction { purgePrepared(prepared, deleteSourceReferences = true) }
+    /**
+     * Canonical scan cleanup preserves the currently published home read model by default.
+     * Explicit user deletion opts into removing the same paths from that read model atomically.
+     */
+    suspend fun purge(
+        paths: Collection<String>,
+        removeFromHomeSnapshot: Boolean = false,
+    ) {
+        prepare(paths, preservePublishedGrid = !removeFromHomeSnapshot).forEach { prepared ->
+            database.withTransaction {
+                purgePrepared(
+                    prepared = prepared,
+                    deleteSourceReferences = true,
+                    removeFromHomeSnapshot = removeFromHomeSnapshot,
+                )
+            }
         }
     }
 
@@ -38,28 +52,51 @@ class MediaDeletionCoordinator(
         deleteSourceReferences: Boolean = true,
         writeReplacement: suspend () -> T,
     ): T {
-        val prepared = prepare(oldPaths)
+        val prepared = prepare(oldPaths, preservePublishedGrid = true)
         return database.withTransaction {
-            prepared.forEach { purgePrepared(it, deleteSourceReferences) }
+            prepared.forEach {
+                purgePrepared(
+                    prepared = it,
+                    deleteSourceReferences = deleteSourceReferences,
+                    removeFromHomeSnapshot = false,
+                )
+            }
             writeReplacement()
         }
     }
 
-    private suspend fun prepare(paths: Collection<String>): List<PreparedChunk> =
-        paths.distinct().chunked(CHUNK_SIZE).map { chunk ->
-            // Derived files are handled before the DB transaction; failed file deletion keeps metadata.
-            val cacheEntries = database.thumbnailCacheDao().getByPaths(chunk)
-            val removableCachePaths = cacheEntries.filter { entry ->
-                val cacheFile = File(entry.path)
-                !cacheFile.exists() ||
-                    (cacheFile.isFile && runCatching { cacheFile.delete() }.getOrDefault(false))
-            }.map { it.filePath }.distinct()
-            PreparedChunk(chunk, removableCachePaths)
+    private suspend fun prepare(
+        paths: Collection<String>,
+        preservePublishedGrid: Boolean,
+    ): List<PreparedChunk> = paths.distinct().chunked(CHUNK_SIZE).map { chunk ->
+        // A scan may remove canonical rows before the next publication. Keep the old published Grid
+        // file and cache metadata alive so the visible snapshot remains complete during that window.
+        val protectedPaths = if (preservePublishedGrid) {
+            database.homeMediaSnapshotDao().readyThumbnailPaths(chunk).toHashSet()
+        } else {
+            emptySet()
         }
+        // Other derived files are handled before the DB transaction; failed deletion keeps metadata.
+        // Delete metadata by the full cache key: one removable Preview must never erase a protected Grid row.
+        val now = System.currentTimeMillis()
+        val cacheEntries = database.thumbnailCacheDao().getByPaths(chunk)
+        val removableCacheEntries = cacheEntries.filter { entry ->
+            entry.path !in protectedPaths &&
+                entry.leaseUntil <= now &&
+                (entry.state == ThumbnailCacheEntryEntity.STATE_READY ||
+                    entry.state == ThumbnailCacheEntryEntity.STATE_DELETE_RETRY) && run {
+                    val cacheFile = File(entry.path)
+                    !cacheFile.exists() ||
+                        (cacheFile.isFile && runCatching { cacheFile.delete() }.getOrDefault(false))
+                }
+        }
+        PreparedChunk(chunk, removableCacheEntries)
+    }
 
     private suspend fun purgePrepared(
         prepared: PreparedChunk,
         deleteSourceReferences: Boolean,
+        removeFromHomeSnapshot: Boolean,
     ) {
         val chunk = prepared.paths
         database.duplicateMaintenanceDao().invalidateGroupsContaining(chunk)
@@ -75,12 +112,20 @@ class MediaDeletionCoordinator(
         database.featureStoreDao().deleteByFilePaths(chunk)
         database.thumbnailTaskDao().deleteByPaths(chunk)
         database.enhancementOutboxDao().deleteByPaths(chunk)
-        if (prepared.removableCachePaths.isNotEmpty()) {
-            database.thumbnailCacheDao().deleteByPaths(prepared.removableCachePaths)
+        // Delete only metadata whose private file was actually removed. Snapshot-protected Grid rows
+        // remain addressable until the next home publication releases them.
+        prepared.removableCacheEntries.forEach { entry ->
+            database.thumbnailCacheDao().deleteExact(
+                entry.filePath,entry.mediaType,entry.sourceVersion,entry.sizeClass,
+                entry.formatVersion,entry.path,
+            )
         }
         database.analysisTaskDao().deleteByPaths(chunk)
         if (deleteSourceReferences) {
             database.mediaChangeDao().deleteReferencesByPaths(profileId, chunk)
+        }
+        if (removeFromHomeSnapshot) {
+            database.homeMediaSnapshotDao().deleteByPaths(chunk)
         }
         // The primary rows are last so this order remains valid if foreign keys are introduced.
         database.mediaDao().deleteByPaths(chunk)

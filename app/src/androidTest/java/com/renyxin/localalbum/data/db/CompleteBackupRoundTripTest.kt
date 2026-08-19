@@ -4,16 +4,14 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.renyxin.localalbum.core.model.MediaType
-import com.renyxin.localalbum.core.pipeline.AnalysisPlanType
-import com.renyxin.localalbum.core.pipeline.StageInclusionPolicy
 import com.renyxin.localalbum.core.search.FtsQueryBuilder
 import com.renyxin.localalbum.core.search.KeywordSearchProfile
 import com.renyxin.localalbum.data.backup.BackupContract
 import com.renyxin.localalbum.data.backup.DatabaseExporter
 import com.renyxin.localalbum.data.backup.DatabaseImporter
-import com.renyxin.localalbum.data.backup.PostRestoreTaskPolicy
-import com.renyxin.localalbum.data.backup.PostRestoreTaskSeeder
 import com.renyxin.localalbum.data.db.entity.FaceEntity
+import com.renyxin.localalbum.data.db.entity.HomeMediaSnapshotEntity
+import com.renyxin.localalbum.data.db.entity.LibraryPipelineStage
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
 import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.db.entity.MediaFts
@@ -81,15 +79,6 @@ class CompleteBackupRoundTripTest {
             faceDao = database.faceDao(),
             embeddingDao = database.embeddingDao(),
             database = database,
-            postRestoreTaskSeeder = PostRestoreTaskSeeder(
-                PostRestoreTaskPolicy(
-                    profileId = features.editionId,
-                    pipelineScope = "test:restore|edition=${features.editionId}",
-                    enqueueAutomaticAnalysis = StageInclusionPolicy(features.scanFeaturePolicy)
-                        .includedStageIds(AnalysisPlanType.ENHANCEMENT)
-                        .isNotEmpty(),
-                ),
-            ),
         )
 
         val import = importer.importFromFile(backup)
@@ -125,6 +114,8 @@ class CompleteBackupRoundTripTest {
         assertEquals(0, count("semantic_maintenance_runs"))
         assertEquals(0, count("analysis_tasks"))
         assertEquals(0, count("thumbnail_tasks"))
+        assertEquals(0, count("enhancement_outbox"))
+        assertEquals(0, count("scan_runs"))
         assertEquals(
             if (features.keywordSearchProfile == KeywordSearchProfile.FULL) 1 else 0,
             database.mediaDao().countFts(
@@ -132,15 +123,15 @@ class CompleteBackupRoundTripTest {
             ),
         )
 
-        database.openHelper.readableDatabase.query(
-            "SELECT enqueueAnalysis,enqueueThumbnail FROM enhancement_outbox",
-        ).use { cursor ->
-            assertTrue(cursor.moveToFirst())
-            val expectedAnalysis = if (features.editionId == "full") 1 else 0
-            assertEquals(expectedAnalysis, cursor.getInt(0))
-            assertEquals(1, cursor.getInt(1))
-            assertFalse(cursor.moveToNext())
-        }
+        val home = requireNotNull(database.homeMediaSnapshotDao().getByPath(PATH))
+        assertEquals(HomeMediaSnapshotEntity.THUMBNAIL_PLACEHOLDER, home.thumbnailState)
+        assertEquals(null, home.thumbnailPath)
+        val library = requireNotNull(database.libraryPipelineDao().get())
+        assertEquals(LibraryPipelineStage.NEEDS_REBUILD.name, library.stage)
+        assertTrue(library.hasPublishedBaseline)
+        assertTrue(library.rebuildRequired)
+        assertFalse(library.rebuildRequested)
+        assertEquals(home.publishedGeneration, library.publishedGeneration)
 
         val secondBackup = File(backup.parentFile, "complete-round-trip-second-${System.nanoTime()}.zip")
         try {

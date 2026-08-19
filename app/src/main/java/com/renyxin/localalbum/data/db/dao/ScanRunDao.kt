@@ -130,6 +130,22 @@ abstract class ScanRunDao {
         errorType: String?,
     ): Int
 
+    /** Reopens only the pipeline-reserved core run; generation and identity never change on retry. */
+    @Query(
+        """UPDATE scan_runs
+           SET status = 'RUNNING', completedAt = 0, errorType = NULL,
+               mediaStoreCompleted = 0, fileSystemCompleted = 0,
+               coreScanState = 'DISCOVERING'
+           WHERE scanId = :scanId AND generation = :generation AND scanType = :scanType
+             AND status IN ('RUNNING', 'FAILED', 'ABORTED')
+             AND coreScanState NOT IN ('PUBLISHING', 'COMPLETED')""",
+    )
+    abstract suspend fun resumeReservedCoreRun(
+        scanId: String,
+        generation: Long,
+        scanType: String,
+    ): Int
+
     @Query(
         """UPDATE scan_runs
            SET status = 'ABORTED',
@@ -146,6 +162,22 @@ abstract class ScanRunDao {
            WHERE coreScanState = 'COMPLETED' AND enhancementState = 'RUNNING'""",
     )
     abstract suspend fun recoverRunningEnhancements(): Int
+
+    /** Strict pipeline recovery touches only the persisted active run. */
+    @Query(
+        """UPDATE scan_runs SET enhancementState = 'QUEUED'
+           WHERE scanId = :scanId AND coreScanState = 'COMPLETED'
+              AND enhancementState = 'RUNNING'""",
+    )
+    abstract suspend fun recoverRunningEnhancement(scanId: String): Int
+
+    /** Process recovery includes core-preempted work, but never overrides a durable user pause. */
+    @Query(
+        """UPDATE scan_runs SET enhancementState = 'QUEUED'
+           WHERE scanId = :scanId AND coreScanState = 'COMPLETED'
+             AND enhancementState IN ('RUNNING', 'PREEMPTED')""",
+    )
+    abstract suspend fun recoverPipelineEnhancement(scanId: String): Int
 
     @Query(
         """SELECT scanId FROM scan_runs

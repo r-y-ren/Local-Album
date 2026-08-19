@@ -16,6 +16,8 @@ import androidx.exifinterface.media.ExifInterface
 import com.renyxin.localalbum.core.index.IgnorePatternMatcher
 import com.renyxin.localalbum.core.index.MediaStoreIdentity
 import com.renyxin.localalbum.core.index.ScanRootPolicy
+import com.renyxin.localalbum.core.thumbnail.SourceVersionCodec
+import com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity
 import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
 import com.renyxin.localalbum.core.model.DirectoryNode
 import com.renyxin.localalbum.core.model.MediaItem
@@ -23,7 +25,10 @@ import com.renyxin.localalbum.core.model.MediaType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
+import java.security.MessageDigest
 import java.util.regex.Pattern
 import java.time.Instant
 import java.time.LocalDateTime
@@ -631,42 +636,192 @@ class MediaSource(
         }
     }
 
-    /** 按 grid(256px)/preview(1280px) 生成，并以临时文件 + rename 原子发布。 */
-    fun generateThumbnailSync(file: File, type: MediaType, sizeClass: String): String? {
+    data class PhysicalSourceSignature(
+        val canonicalPath: String,
+        val mediaType: String,
+        val modifiedAtMs: Long,
+        val fileSize: Long,
+        val fileKey: String?,
+        val fingerprintHead: String?,
+    )
+
+    data class GeneratedThumbnail(
+        val stagedPath: String,
+        val signatureBefore: PhysicalSourceSignature,
+        val signatureAfter: PhysicalSourceSignature,
+    )
+
+    /** 路径、类型、mtime、size、可用 dev/inode 与 fingerprint 的当前路径签名。 */
+    fun physicalSourceSignature(file: File, type: MediaType): PhysicalSourceSignature? = runCatching {
+        if (!file.isFile || detectMediaType(file.name) != type) return@runCatching null
+        val canonical = ThumbnailIdentity.canonicalizePath(file.path)
+        val stat = android.system.Os.stat(canonical)
+        PhysicalSourceSignature(
+            canonicalPath = canonical,
+            mediaType = type.name,
+            modifiedAtMs = stat.st_mtim.tv_sec * 1_000L + stat.st_mtim.tv_nsec / 1_000_000L,
+            fileSize = stat.st_size,
+            fileKey = "${stat.st_dev}:${stat.st_ino}",
+            fingerprintHead = fingerprintHead(File(canonical)),
+        )
+    }.getOrNull()
+
+    /** 从已经打开的唯一 fd 取签名；fingerprint 读取后恢复文件位置。 */
+    private fun physicalFdSignature(
+        source: RandomAccessFile,
+        canonicalPath: String,
+        type: MediaType,
+    ): PhysicalSourceSignature? = runCatching {
+        val stat = android.system.Os.fstat(source.fd)
+        PhysicalSourceSignature(
+            canonicalPath = canonicalPath,
+            mediaType = type.name,
+            modifiedAtMs = stat.st_mtim.tv_sec * 1_000L + stat.st_mtim.tv_nsec / 1_000_000L,
+            fileSize = stat.st_size,
+            fileKey = "${stat.st_dev}:${stat.st_ino}",
+            fingerprintHead = fingerprintHead(source),
+        )
+    }.getOrNull()
+
+    fun sourceMatchesIdentity(signature: PhysicalSourceSignature, identity: ThumbnailIdentity): Boolean =
+        signature.canonicalPath == identity.canonicalPath &&
+            signature.mediaType == identity.mediaType &&
+            SourceVersionCodec.matchesPhysical(
+                identity.sourceVersion,
+                signature.modifiedAtMs,
+                signature.fileSize,
+                signature.fingerprintHead,
+            )
+
+    internal fun sourceSnapshotsAllowPublication(
+        beforeFd: PhysicalSourceSignature,
+        afterFd: PhysicalSourceSignature,
+        currentPath: PhysicalSourceSignature,
+        identity: ThumbnailIdentity,
+    ): Boolean {
+        val fdStable = beforeFd.canonicalPath == afterFd.canonicalPath &&
+            beforeFd.mediaType == afterFd.mediaType &&
+            beforeFd.modifiedAtMs == afterFd.modifiedAtMs &&
+            beforeFd.fileSize == afterFd.fileSize &&
+            beforeFd.fingerprintHead == afterFd.fingerprintHead &&
+            (beforeFd.fileKey == null || afterFd.fileKey == null || beforeFd.fileKey == afterFd.fileKey)
+        val pathStillBound = currentPath.canonicalPath == beforeFd.canonicalPath &&
+            currentPath.mediaType == beforeFd.mediaType &&
+            currentPath.modifiedAtMs == beforeFd.modifiedAtMs &&
+            currentPath.fileSize == beforeFd.fileSize &&
+            currentPath.fingerprintHead == beforeFd.fingerprintHead &&
+            (beforeFd.fileKey == null || currentPath.fileKey == null || beforeFd.fileKey == currentPath.fileKey)
+        // fileKey 不可得时明确降级为 fd before/after 与当前路径的 type/mtime/size/fingerprint
+        // 全相等；任何一个可观察事实不一致均拒绝安装。
+        return fdStable && pathStillBound && sourceMatchesIdentity(beforeFd,identity) &&
+            sourceMatchesIdentity(afterFd,identity) && sourceMatchesIdentity(currentPath,identity)
+    }
+
+    /**
+     * 先打开唯一只读 fd，再从该 fd 取得 before；图片/视频都使用同一 fd 解码并取得 after。
+     * 最后独立读取当前路径，确认它仍绑定该 dev/inode（不可得时使用完整降级签名）。
+     */
+    fun generateThumbnailSync(
+        file: File,
+        type: MediaType,
+        identity: ThumbnailIdentity,
+        taskId: Long,
+        leaseToken: String,
+        publicationNonce: String = UUID.randomUUID().toString(),
+    ): GeneratedThumbnail? {
         val dir = thumbDir ?: return null
-        val targetPx = ThumbnailSpec.targetPx(sizeClass)
-        val thumbFile = File(dir, thumbnailCacheFileName(file, sizeClass))
-        if (thumbFile.exists()) return thumbFile.absolutePath
-        val temporary = File(dir, ".${thumbFile.name}.${UUID.randomUUID()}.tmp")
-
+        val identityHash = identity.sha256()
+        val leaseHash = sha256Hex(leaseToken).take(16)
+        val staged = File(
+            dir,
+            ".staged_${taskId}_${leaseHash}_${identityHash}_${publicationNonce}.tmp",
+        )
         return runCatching {
-            val bitmap = when (type) {
-                MediaType.IMAGE -> decodeImageForTarget(file, targetPx)
-                MediaType.VIDEO -> decodeVideoFrameForTarget(file, targetPx)
-            } ?: error("decode_failed")
-            encodeThumbnail(bitmap, temporary, sizeClass)
-            check(temporary.renameTo(thumbFile) || (thumbFile.exists() && temporary.delete())) {
-                "cache_publish_failed"
+            val canonicalPath = identity.canonicalPath
+            RandomAccessFile(canonicalPath,"r").use { source ->
+                val before = physicalFdSignature(source,canonicalPath,type) ?: error("source_missing")
+                check(sourceMatchesIdentity(before,identity)) { "source_changed_before_decode" }
+                val targetPx = ThumbnailSpec.targetPx(identity.sizeClass)
+                source.seek(0L)
+                val bitmap = when (type) {
+                    MediaType.IMAGE -> decodeImageForTarget(source,targetPx)
+                    MediaType.VIDEO -> decodeVideoFrameForTarget(source,targetPx)
+                } ?: error("decode_failed")
+                encodeThumbnail(bitmap,staged,identity.sizeClass)
+                check(staged.isFile && staged.length() > 0L && validateGeneratedThumbnail(staged)) {
+                    "staging_validation_failed"
+                }
+                val after = physicalFdSignature(source,canonicalPath,type)
+                    ?: error("source_missing_after_decode")
+                val currentPath = physicalSourceSignature(File(canonicalPath),type)
+                    ?: error("path_missing_or_type_changed_after_decode")
+                check(sourceSnapshotsAllowPublication(before,after,currentPath,identity)) {
+                    "source_changed_after_decode"
+                }
+                GeneratedThumbnail(staged.absolutePath,before,after)
             }
-            thumbFile.absolutePath
-        }.onFailure { temporary.delete() }.getOrNull()
+        }.onFailure { staged.delete() }.getOrNull()
     }
 
-    private fun decodeImageForTarget(file: File, targetPx: Int): Bitmap? {
+    /**
+     * Atomically installs staged bytes at a lease-private final path.
+     *
+     * The database identity remains `(filePath,sizeClass,sourceVersion)`, but the physical path also
+     * contains the task/lease publication identity. An expired worker can therefore delete only its
+     * own unpublished bytes after `LEASE_LOST`; it can never unlink a newer lease's published file.
+     */
+    fun installGeneratedThumbnail(
+        stagedPath: String,
+        identity: ThumbnailIdentity,
+        taskId: Long,
+        leaseToken: String,
+        publicationNonce: String,
+    ): String? {
+        val dir = thumbDir ?: return null
+        val staged = File(stagedPath)
+        if (!staged.isFile || staged.parentFile?.canonicalPath != dir.canonicalPath) return null
+        val leaseHash = sha256Hex(leaseToken).take(16)
+        val publicationId = "${taskId}_${leaseHash}_${identity.sha256()}_${publicationNonce}"
+        val target = File(
+            dir,
+            thumbnailCacheFileName(
+                identity.canonicalPath,
+                identity.sourceVersion,
+                identity.mediaType,
+                identity.sizeClass,
+                identity.formatVersion,
+                publicationId,
+            ),
+        )
+        return runCatching {
+            check(!target.exists()) { "final_already_exists" }
+            java.nio.file.Files.move(
+                staged.toPath(),
+                target.toPath(),
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+            )
+            check(target.isFile && target.length() > 0L) { "cache_publish_failed" }
+            target.absolutePath
+        }.onFailure { staged.delete() }.getOrNull()
+    }
+
+    private fun decodeImageForTarget(source: RandomAccessFile, targetPx: Int): Bitmap? {
         val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        android.graphics.BitmapFactory.decodeFile(file.absolutePath, bounds)
+        source.seek(0L)
+        android.graphics.BitmapFactory.decodeFileDescriptor(source.fd,null,bounds)
         val options = android.graphics.BitmapFactory.Options().apply {
-            inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, targetPx)
+            inSampleSize = calculateInSampleSize(bounds.outWidth,bounds.outHeight,targetPx)
         }
-        return android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
+        source.seek(0L)
+        return android.graphics.BitmapFactory.decodeFileDescriptor(source.fd,null,options)
     }
 
-    /** minSdk 29：优先 retriever 目标尺寸取帧，再用 ThumbnailUtils(Size)，最后才取普通帧。 */
-    private fun decodeVideoFrameForTarget(file: File, targetPx: Int): Bitmap? {
-        val scaled = runCatching {
+    /** minSdk 29：retriever 始终绑定已校验的同一只读 fd。 */
+    private fun decodeVideoFrameForTarget(source: RandomAccessFile, targetPx: Int): Bitmap? {
+        return runCatching {
             val retriever = MediaMetadataRetriever()
             try {
-                retriever.setDataSource(file.absolutePath)
+                retriever.setDataSource(source.fd)
                 val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
                 val frameTimeUs = if (durationMs > 0) durationMs * 1000 / 3 else 0L
                 retriever.getScaledFrameAtTime(
@@ -679,18 +834,47 @@ class MediaSource(
                 retriever.release()
             }
         }.getOrNull()
-        if (scaled != null) return scaled
-        return runCatching { ThumbnailUtils.createVideoThumbnail(file, Size(targetPx, targetPx), null) }
-            .getOrNull()
-            ?: runCatching {
-                val retriever = MediaMetadataRetriever()
-                try {
-                    retriever.setDataSource(file.absolutePath)
-                    retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                } finally {
-                    retriever.release()
-                }
-            }.getOrNull()
+    }
+
+    private fun validateGeneratedThumbnail(file: File): Boolean {
+        val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.absolutePath,options)
+        return options.outWidth > 0 && options.outHeight > 0
+    }
+
+    private fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+
+    private fun fingerprintHead(file: File): String? = runCatching {
+        FileInputStream(file).use { input -> fingerprintHead(input) }
+    }.getOrNull()
+
+    private fun fingerprintHead(source: RandomAccessFile): String? = runCatching {
+        val position = source.filePointer
+        try {
+            source.seek(0L)
+            fingerprintHead(object : java.io.InputStream() {
+                override fun read(): Int = source.read()
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+                    source.read(buffer,offset,length)
+            })
+        } finally {
+            source.seek(position)
+        }
+    }.getOrNull()
+
+    private fun fingerprintHead(input: java.io.InputStream): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(64 * 1024)
+        var remaining = buffer.size
+        while (remaining > 0) {
+            val read = input.read(buffer,0,remaining)
+            if (read <= 0) break
+            digest.update(buffer,0,read)
+            remaining -= read
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     internal fun encodeThumbnail(bitmap: Bitmap, targetFile: File, sizeClass: String): String {
@@ -719,7 +903,29 @@ class MediaSource(
 
     /** 以源身份、尺寸档和格式版本构成缓存文件名。 */
     private fun thumbnailCacheFileName(file: File, sizeClass: String): String =
-        "${file.absolutePath.hashCode()}_${file.lastModified()}_${file.length()}_${sizeClass}_v${ThumbnailSpec.CACHE_FORMAT_VERSION}.webp"
+        thumbnailCacheFileName(
+            ThumbnailIdentity.canonicalizePath(file.absolutePath),
+            ThumbnailSpec.sourceVersion(file.lastModified(), file.length(), fingerprintHead(file)),
+            detectMediaType(file.name)?.name ?: ThumbnailIdentity.MEDIA_IMAGE,
+            sizeClass,
+            ThumbnailSpec.CACHE_FORMAT_VERSION,
+        )
+
+    private fun thumbnailCacheFileName(
+        filePath: String,
+        sourceVersion: String,
+        mediaType: String,
+        sizeClass: String,
+        formatVersion: Int,
+        publicationId: String? = null,
+    ): String {
+        val identityHash = sha256Hex(
+            listOf(filePath,mediaType,sourceVersion,sizeClass,formatVersion.toString())
+                .joinToString("\u0000"),
+        )
+        val publicationSuffix = publicationId?.let { "_$it" }.orEmpty()
+        return "${identityHash}${publicationSuffix}_${sizeClass}_v${formatVersion}.webp"
+    }
 
     private fun calculateInSampleSize(width: Int, height: Int, targetSize: Int): Int {
         if (width <= 0 || height <= 0) return 1

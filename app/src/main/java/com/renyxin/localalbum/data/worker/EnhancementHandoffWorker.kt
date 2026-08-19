@@ -30,21 +30,25 @@ class EnhancementHandoffWorker(
 ) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val app = applicationContext as? LocalAlbumApplication ?: return Result.failure()
-        val database = app.container.database
-        val pipeline = app.container.pluginAnalysisPipeline
+        val container = app.container
+        val database = container.database
+        val pipeline = container.pluginAnalysisPipeline
         val outboxDao = database.enhancementOutboxDao()
-        val touchedScans = linkedSetOf<String>()
+        val pipelineState = database.libraryPipelineDao().get() ?: return Result.success()
+        val pipelineStage = com.renyxin.localalbum.data.db.entity.LibraryPipelineStage
+            .fromPersisted(pipelineState.stage)
+        if (!pipelineStage.isAnalysis) return Result.success()
+        val admittedScanId = pipelineState.activeRunId ?: return Result.success()
         var seededAnalysis = false
-        var seededThumbnails = false
         var interruptedLeasesRecovered = false
 
         return try {
-            if (app.container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested) {
+            if (container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested) {
                 return Result.retry()
             }
             var batches = 0
             while (batches < MAX_BATCHES_PER_RUN) {
-                if (isStopped || app.container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested) break
+                if (isStopped || container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested) break
                 val outcome = EnhancementResourceGate.tryWithAutomaticEnhancement {
                     val now = System.currentTimeMillis()
                     if (!interruptedLeasesRecovered) {
@@ -54,7 +58,8 @@ class EnhancementHandoffWorker(
                         interruptedLeasesRecovered = true
                     }
                     val leaseToken = UUID.randomUUID().toString()
-                    val entries = outboxDao.claimBatch(
+                    val entries = outboxDao.claimBatchForScan(
+                        scanId = admittedScanId,
                         now = now,
                         limit = BATCH_SIZE,
                         leaseToken = leaseToken,
@@ -62,7 +67,6 @@ class EnhancementHandoffWorker(
                     )
                     if (entries.isEmpty()) return@tryWithAutomaticEnhancement false
 
-                    touchedScans += entries.map { it.scanId }
                     try {
                         val seeded = seedClaimedEntries(
                             database = database,
@@ -70,9 +74,9 @@ class EnhancementHandoffWorker(
                             entries = entries,
                             leaseToken = leaseToken,
                             now = now,
+                            includeThumbnails = false,
                         )
                         seededAnalysis = seededAnalysis || seeded.analysis
-                        seededThumbnails = seededThumbnails || seeded.thumbnails
                     } catch (cancelled: kotlinx.coroutines.CancellationException) {
                         kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                             outboxDao.releaseLease(leaseToken, System.currentTimeMillis())
@@ -97,40 +101,32 @@ class EnhancementHandoffWorker(
             }
 
             val queueState = EnhancementResourceGate.tryWithAutomaticEnhancement {
-                // The terminal cross-table read/write is part of the same maintenance exclusion
-                // contract as handoff transactions. Never inspect tables while import may replace
-                // them after the final batch released its lane.
-                finalizeEmptyScans(database, touchedScans)
                 val now = System.currentTimeMillis()
-                val active = outboxDao.hasRunnableEntries()
-                val claimable = outboxDao.hasClaimableEntries(now)
+                val active = outboxDao.countActiveForScan(admittedScanId) > 0
+                val claimable = outboxDao.hasClaimableForScan(admittedScanId, now)
                 active to claimable
             } ?: return Result.retry()
             val (hasActiveEntries, hasClaimableEntries) = queueState
-            val activeAnalysisTasks = database.analysisTaskDao().countActiveEnhancementTasks()
+            val activeAnalysisTasks = database.analysisTaskDao().countActiveForScan(admittedScanId)
             val decision = continuationDecision(hasActiveEntries, hasClaimableEntries)
             Log.i(
                 TAG,
-                "handoff diagnostic: batches=$batches seededAnalysis=$seededAnalysis " +
-                    "activeOutbox=$hasActiveEntries claimableOutbox=$hasClaimableEntries " +
-                    "activeAnalysis=$activeAnalysisTasks decision=$decision",
+                "handoff diagnostic: scanIdHash=${admittedScanId.hashCode()} batches=$batches " +
+                    "seededAnalysis=$seededAnalysis activeOutbox=$hasActiveEntries " +
+                    "claimableOutbox=$hasClaimableEntries activeAnalysis=$activeAnalysisTasks " +
+                    "decision=$decision",
             )
-
-            // Scheduling itself does not touch production tables. A worker that starts after an
-            // exclusive request will be rejected by the gate and recover from its durable queue.
-            if (seededAnalysis) {
-                Log.i(TAG, "handoff diagnostic: requesting AnalysisWorker wake-up")
-                AnalysisWorker.enqueue(applicationContext)
-            }
-            if (seededThumbnails) ThumbnailWorker.enqueueBackground(applicationContext)
 
             when (decision) {
                 ContinuationDecision.ENQUEUE_SUCCESSOR -> {
-                    enqueue(applicationContext)
+                    appendSuccessor(applicationContext)
                     Result.success()
                 }
                 ContinuationDecision.RETRY_BACKOFF -> Result.retry()
-                ContinuationDecision.COMPLETE -> Result.success()
+                ContinuationDecision.COMPLETE -> {
+                    container.libraryPipelineCoordinator.startOrFinishAnalysis(admittedScanId)
+                    Result.success()
+                }
             }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
@@ -193,6 +189,7 @@ class EnhancementHandoffWorker(
             entries: List<EnhancementOutboxEntity>,
             leaseToken: String,
             now: Long,
+            includeThumbnails: Boolean = true,
         ): SeedOutcome {
             var analysisSeeded = false
             var thumbnailsSeeded = false
@@ -217,20 +214,24 @@ class EnhancementHandoffWorker(
                         analysisSeeded = true
                     }
 
-                    val thumbnails = scanEntries
-                        .filter { it.enqueueThumbnail }
-                        .map { entry ->
-                            ThumbnailTaskEntity(
-                                filePath = entry.filePath,
-                                sizeClass = ThumbnailSpec.SIZE_GRID,
-                                sourceVersion = entry.sourceVersion,
-                                mediaType = entry.mediaType,
-                                priority = ThumbnailSpec.PRIORITY_BACKGROUND,
-                                scanId = scanId,
-                                createdAt = now,
-                                updatedAt = now,
-                            )
-                        }
+                    val thumbnails = if (includeThumbnails) {
+                        scanEntries
+                            .filter { it.enqueueThumbnail }
+                            .map { entry ->
+                                ThumbnailTaskEntity(
+                                    filePath = entry.filePath,
+                                    sizeClass = ThumbnailSpec.SIZE_GRID,
+                                    sourceVersion = entry.sourceVersion,
+                                    mediaType = entry.mediaType,
+                                    priority = ThumbnailSpec.PRIORITY_BACKGROUND,
+                                    scanId = scanId,
+                                    createdAt = now,
+                                    updatedAt = now,
+                                )
+                            }
+                    } else {
+                        emptyList()
+                    }
                     if (thumbnails.isNotEmpty()) {
                         database.thumbnailTaskDao().enqueueAll(thumbnails)
                         thumbnailsSeeded = true
@@ -260,10 +261,17 @@ class EnhancementHandoffWorker(
         private const val BASE_RETRY_DELAY_MS = 60_000L
         private const val MAX_ERROR_LENGTH = 80
 
-        fun enqueue(context: Context) {
+        /** Coordinator admission is level-triggered; one active or pending handoff is sufficient. */
+        fun enqueue(context: Context) = enqueue(context, ExistingWorkPolicy.KEEP)
+
+        /** A bounded handoff or newly admitted analysis stage appends one ordered successor. */
+        internal fun appendSuccessor(context: Context) =
+            enqueue(context, ExistingWorkPolicy.APPEND_OR_REPLACE)
+
+        private fun enqueue(context: Context, policy: ExistingWorkPolicy) {
             WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                 WORK_NAME,
-                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                policy,
                 OneTimeWorkRequestBuilder<EnhancementHandoffWorker>().build(),
             )
         }

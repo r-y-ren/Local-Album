@@ -271,14 +271,11 @@ fun LocalAlbumApp(
     }
     val navigationStateHolder = rememberSaveableStateHolder()
     val scanState by albumViewModel.scanState.collectAsStateWithLifecycle()
-    val coreScanState by albumViewModel.coreScanState.collectAsStateWithLifecycle()
-    val coreScanActive = isCoreScanActive(scanState, coreScanState)
-    // 进度浮层三态数据：核心扫描文案 + 增强队列状态（批次间空窗保持浮层）
-    val enhancementState by albumViewModel.enhancementState.collectAsStateWithLifecycle()
-    val progressScanMessage = (scanState as? ScanState.Scanning)?.message
-    val progressScanProcessed = (scanState as? ScanState.Scanning)?.processed ?: 0
-    val progressScanTotal = (scanState as? ScanState.Scanning)?.total ?: 0
-    val analysisPending = enhancementState in PENDING_ENHANCEMENT_STATES
+    val pipelineState by albumViewModel.libraryPipelineState.collectAsStateWithLifecycle()
+    val coreScanActive = pipelineState.stage.isScan
+    val progressScanMessage = (scanState as? ScanState.Scanning)
+        ?.message
+        ?.takeIf { pipelineState.stage.isScan }
 
     // 手势引导：仅首次安装后展示一次，之后持久化不再弹出
     val gestureGuideShown by settingsViewModel.gestureGuideShown.collectAsStateWithLifecycle()
@@ -717,12 +714,13 @@ fun LocalAlbumApp(
                         )) {
                             GlobalProgressIndicator(
                                 progressManager = requireNotNull(progressManager),
+                                pipelineState = pipelineState,
+                                automaticAnalysisEnabled = editionFeatures.scanFeaturePolicy
+                                    .stageIds(com.renyxin.localalbum.core.pipeline.AnalysisPlanType.ENHANCEMENT)
+                                    .isNotEmpty(),
                                 onCancel = albumViewModel::cancelTask,
                                 modifier = Modifier.align(Alignment.BottomCenter),
                                 scanMessage = progressScanMessage,
-                                scanProcessed = progressScanProcessed,
-                                scanTotal = progressScanTotal,
-                                analysisPending = analysisPending,
                             )
                         }
                     }
@@ -744,12 +742,13 @@ fun LocalAlbumApp(
                     )) {
                         GlobalProgressIndicator(
                             progressManager = requireNotNull(progressManager),
+                            pipelineState = pipelineState,
+                            automaticAnalysisEnabled = editionFeatures.scanFeaturePolicy
+                                .stageIds(com.renyxin.localalbum.core.pipeline.AnalysisPlanType.ENHANCEMENT)
+                                .isNotEmpty(),
                             onCancel = albumViewModel::cancelTask,
                             modifier = Modifier.align(Alignment.BottomCenter),
                             scanMessage = progressScanMessage,
-                            scanProcessed = progressScanProcessed,
-                            scanTotal = progressScanTotal,
-                            analysisPending = analysisPending,
                         )
                     }
                 }
@@ -797,18 +796,6 @@ internal fun shouldShowGlobalProgressIndicator(
     hasProgressManager: Boolean,
 ): Boolean = showAnalysisProgressUi && hasProgressManager
 
-/**
- * 视为「增强分析仍在进行」的 [com.renyxin.localalbum.data.db.entity.EnhancementState] 集合。
- *
- * AnalysisWorker 按批租约执行：每批管线结束会把 ProgressManager 的 isCompleted 置 true，
- * 批间（含 Worker 退避重试间隙）浮层若仅依赖管线状态会消失。处于 QUEUED/RUNNING/
- * WAITING_FOR_CORE 之一即说明仍有增强任务未完成，浮层应保持显示「等待下一批次」。
- */
-internal val PENDING_ENHANCEMENT_STATES = setOf(
-    com.renyxin.localalbum.data.db.entity.EnhancementState.WAITING_FOR_CORE,
-    com.renyxin.localalbum.data.db.entity.EnhancementState.QUEUED,
-    com.renyxin.localalbum.data.db.entity.EnhancementState.RUNNING,
-)
 
 @Composable
 private fun currentTabContent(

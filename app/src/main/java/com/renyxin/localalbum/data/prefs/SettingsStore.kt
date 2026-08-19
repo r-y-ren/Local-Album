@@ -93,6 +93,11 @@ class SettingsStore internal constructor(
         prefs[KEY_SHOW_NOMEDIA] ?: false
     }
 
+    /** 跨 DataStore/Room 提交窗口的持久重放标记；成功写入流水线控制面后才确认清除。 */
+    val pendingScanScopeChangeReason: Flow<String?> = store.data.map { prefs ->
+        prefs[KEY_PENDING_SCAN_SCOPE_CHANGE]
+    }
+
     /** 默认保持现有行为：显示扫描与 AI 识别进度 UI。 */
     val showAnalysisProgressUi: Flow<Boolean> = store.data.map { prefs ->
         prefs[KEY_SHOW_ANALYSIS_PROGRESS_UI] ?: true
@@ -108,10 +113,16 @@ class SettingsStore internal constructor(
         prefs[KEY_GESTURE_GUIDE_SHOWN] ?: false
     }
 
-    suspend fun setShowNomediaDirectories(show: Boolean) {
+    suspend fun setShowNomediaDirectories(show: Boolean): Boolean {
+        var changed = false
         store.edit { prefs ->
-            prefs[KEY_SHOW_NOMEDIA] = show
+            if ((prefs[KEY_SHOW_NOMEDIA] ?: false) != show) {
+                prefs[KEY_SHOW_NOMEDIA] = show
+                prefs[KEY_PENDING_SCAN_SCOPE_CHANGE] = "nomedia_policy_changed"
+                changed = true
+            }
         }
+        return changed
     }
 
     suspend fun setShowAnalysisProgressUi(show: Boolean) {
@@ -168,37 +179,74 @@ class SettingsStore internal constructor(
         }
     }
 
-    suspend fun addScanRoot(path: String) {
+    suspend fun addScanRoot(path: String): Boolean {
+        val normalized = path.trimEnd('/')
+        var changed = false
         store.edit { prefs ->
             val current = prefs[KEY_SCAN_ROOTS] ?: emptySet()
-            prefs[KEY_SCAN_ROOTS] = current + path.trimEnd('/')
+            if (normalized !in current) {
+                prefs[KEY_SCAN_ROOTS] = current + normalized
+                prefs[KEY_PENDING_SCAN_SCOPE_CHANGE] = "scan_root_added"
+                changed = true
+            }
         }
+        return changed
     }
 
-    suspend fun removeScanRoot(path: String) {
+    suspend fun removeScanRoot(path: String): Boolean {
+        val normalized = path.trimEnd('/')
+        var changed = false
         store.edit { prefs ->
             val current = prefs[KEY_SCAN_ROOTS] ?: emptySet()
-            prefs[KEY_SCAN_ROOTS] = current - path.trimEnd('/')
+            if (normalized in current) {
+                prefs[KEY_SCAN_ROOTS] = current - normalized
+                prefs[KEY_PENDING_SCAN_SCOPE_CHANGE] = "scan_root_removed"
+                changed = true
+            }
         }
+        return changed
     }
 
-    suspend fun addIgnoreDir(name: String) {
+    suspend fun addIgnoreDir(name: String): Boolean {
+        val normalized = name.trim()
+        var changed = false
         store.edit { prefs ->
             val current = prefs[KEY_IGNORE_DIRS] ?: emptySet()
-            prefs[KEY_IGNORE_DIRS] = current + name.trim()
+            if (normalized !in current) {
+                prefs[KEY_IGNORE_DIRS] = current + normalized
+                prefs[KEY_PENDING_SCAN_SCOPE_CHANGE] = "ignore_rule_added"
+                changed = true
+            }
         }
+        return changed
     }
 
-    suspend fun removeIgnoreDir(name: String) {
+    suspend fun removeIgnoreDir(name: String): Boolean {
+        val normalized = name.trim()
+        var changed = false
         store.edit { prefs ->
             val current = prefs[KEY_IGNORE_DIRS] ?: emptySet()
-            prefs[KEY_IGNORE_DIRS] = current - name.trim()
+            if (normalized in current) {
+                prefs[KEY_IGNORE_DIRS] = current - normalized
+                prefs[KEY_PENDING_SCAN_SCOPE_CHANGE] = "ignore_rule_removed"
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    suspend fun acknowledgeScanScopeChange(reason: String) {
+        store.edit { prefs ->
+            if (prefs[KEY_PENDING_SCAN_SCOPE_CHANGE] == reason) {
+                prefs.remove(KEY_PENDING_SCAN_SCOPE_CHANGE)
+            }
         }
     }
 
     private companion object {
         val KEY_SCAN_ROOTS = stringSetPreferencesKey("scan_roots")
         val KEY_IGNORE_DIRS = stringSetPreferencesKey("ignore_dirs")
+        val KEY_PENDING_SCAN_SCOPE_CHANGE = stringPreferencesKey("pending_scan_scope_change")
         val KEY_THEME_MODE = intPreferencesKey("theme_mode")
         val KEY_ANALYSIS_SCHEDULING_MODE = intPreferencesKey("analysis_scheduling_mode")
         val KEY_FACE_GROUPING_STRICTNESS = intPreferencesKey("face_grouping_strictness")

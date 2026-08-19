@@ -198,6 +198,51 @@ class EnhancementOutboxDaoTest {
     }
 
     @Test
+    fun failedOutboxCanBeReadAndMarkedForUserRetry() = runBlocking {
+        val scanId = "scan-failed-outbox"
+        insertCompletedScan(scanId)
+        val dao = database.enhancementOutboxDao()
+        dao.enqueueAll(
+            listOf(
+                entry(scanId).copy(
+                    status = EnhancementOutboxEntity.STATUS_FAILED,
+                    lastError = "handoff_failed",
+                    updatedAt = 10L,
+                ),
+            ),
+        )
+
+        assertEquals(1, dao.countFailed())
+        val failed = dao.getFailedForUserRetry(limit = 10)
+        assertEquals(listOf("/photo.jpg"), failed.map { it.filePath })
+        assertEquals(1, dao.markRetriedForUser(failed.map { it.outboxId }, now = 11L))
+        assertEquals(0, dao.countFailed())
+        assertEquals(0, dao.markRetriedForUser(failed.map { it.outboxId }, now = 12L))
+    }
+
+    @Test
+    fun unsupportedUserRetryFailureRemainsVisible() = runBlocking {
+        val scanId = "scan-unsupported-outbox"
+        insertCompletedScan(scanId)
+        val dao = database.enhancementOutboxDao()
+        dao.enqueueAll(
+            listOf(
+                entry(scanId).copy(
+                    status = EnhancementOutboxEntity.STATUS_FAILED,
+                    updatedAt = 20L,
+                ),
+            ),
+        )
+        val failed = dao.getFailedForUserRetry(limit = 1)
+        assertEquals(1, dao.recordUserRetryFailure(failed.map { it.outboxId }, "unsupported_scope", 21L))
+        assertEquals(1, dao.countFailed())
+        assertEquals(
+            "unsupported_scope",
+            dao.getFailedForUserRetry(limit = 1).single().lastError,
+        )
+    }
+
+    @Test
     fun cancellationReleasesLiveLeaseImmediately() = runBlocking {
         val scanId = "scan-release"
         insertCompletedScan(scanId)

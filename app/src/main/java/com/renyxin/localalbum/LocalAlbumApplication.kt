@@ -34,6 +34,8 @@ class LocalAlbumApplication : Application(), ImageLoaderFactory {
         com.renyxin.localalbum.data.worker.ScanServiceController.ensureChannels(this)
         TrashCleanupWorker.schedule(this)
         DeletionRetryWorker.enqueue(this)
+        com.renyxin.localalbum.data.worker.ThumbnailCacheMaintenanceWorker.enqueue(this)
+        container.thumbnailWakeDispatcher.replay()
         // 注册 MediaStore ContentObserver，监听图片/视频变更并触发防抖增量扫描
         container.registerContentObserver()
         // 进程重启后仅恢复 Room 中尚未确认的 changed-set，不创建伪增量全量扫描

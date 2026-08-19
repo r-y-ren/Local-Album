@@ -2,12 +2,12 @@ package com.renyxin.localalbum.core.thumbnail
 
 /** 缩略图尺寸与调度策略的单一事实来源。 */
 object ThumbnailSpec {
-    const val SIZE_GRID = "grid"
-    const val SIZE_PREVIEW = "preview"
+    const val SIZE_GRID = ThumbnailIdentity.SIZE_GRID
+    const val SIZE_PREVIEW = ThumbnailIdentity.SIZE_PREVIEW
 
     const val GRID_PX = 256
     const val PREVIEW_PX = 1280
-    const val CACHE_FORMAT_VERSION = 4
+    const val CACHE_FORMAT_VERSION = ThumbnailIdentity.CURRENT_FORMAT_VERSION
 
     const val PRIORITY_BACKGROUND = 0
     const val PRIORITY_PREFETCH = 50
@@ -38,9 +38,13 @@ object ThumbnailSpec {
     }
 
     fun isCurrentCachePath(sizeClass: String, path: String): Boolean =
-        sizeClass != SIZE_PREVIEW || path.endsWith("_${SIZE_PREVIEW}_v$CACHE_FORMAT_VERSION.webp")
+        path.endsWith("_${sizeClass}_v$CACHE_FORMAT_VERSION.webp")
 
-    fun sourceVersion(modifiedAtMs: Long, fileSize: Long): String = "$modifiedAtMs:$fileSize"
+    fun sourceVersion(
+        modifiedAtMs: Long,
+        fileSize: Long,
+        fingerprintHead: String? = null,
+    ): String = SourceVersionCodec.encode(modifiedAtMs, fileSize, fingerprintHead)
 }
 
 data class ThumbnailCacheRecord(

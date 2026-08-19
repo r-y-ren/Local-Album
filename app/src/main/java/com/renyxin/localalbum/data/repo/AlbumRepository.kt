@@ -24,13 +24,12 @@ import com.renyxin.localalbum.core.search.KeywordSearchProfile
 import com.renyxin.localalbum.core.search.SemanticSearcher
 import com.renyxin.localalbum.data.backup.DatabaseExporter
 import com.renyxin.localalbum.data.backup.DatabaseImporter
-import com.renyxin.localalbum.data.backup.PostRestoreTaskPolicy
-import com.renyxin.localalbum.data.backup.PostRestoreTaskSeeder
 import com.renyxin.localalbum.data.db.AppDatabase
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.entity.CoreScanState
 import com.renyxin.localalbum.data.db.entity.EnhancementState
 import com.renyxin.localalbum.data.db.entity.IndexAvailability
+import com.renyxin.localalbum.data.db.entity.LibraryPipelineState
 import com.renyxin.localalbum.data.db.entity.ScanLifecycle
 import com.renyxin.localalbum.data.db.entity.ScanRunEntity
 import com.renyxin.localalbum.data.db.dao.FaceDao
@@ -39,6 +38,7 @@ import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.dao.DirectorySummary
 import com.renyxin.localalbum.data.db.entity.AlbumSnapshotDirectoryEntity
 import com.renyxin.localalbum.data.db.entity.FaceEntity
+import com.renyxin.localalbum.data.db.entity.HomeMediaSnapshotEntity
 import com.renyxin.localalbum.data.db.entity.MaintenanceRunEntity
 import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.worker.DuplicateMaintenanceWorker
@@ -179,23 +179,25 @@ private enum class ScanRequest {
     RECONCILIATION,
 }
 
-private enum class ScanExecutionResult {
-    COMPLETED,
-    SKIPPED,
-    FAILED,
+private sealed interface ScanExecutionResult {
+    data object Completed : ScanExecutionResult
+    data object Deferred : ScanExecutionResult
+    data object Skipped : ScanExecutionResult
+    data class Failed(val scanId: String?, val error: String) : ScanExecutionResult
 }
 
 /**
  * Result of a durable changed-set recovery attempt.
  *
- * [DEFERRED] is deliberately different from [FAILED]: a live lease, retry backoff, or
- * temporarily unavailable scan root is still valid durable work and must remain in Room for a
- * later WorkManager attempt.
+ * [Deferred] is deliberately different from [Failed]: a live lease, retry backoff, or temporarily
+ * unavailable scan root is still valid durable work and must remain in Room for a later WorkManager
+ * attempt. A failure carries the exact reserved identity so only that run can become terminal after
+ * the WorkManager retry budget is exhausted.
  */
-internal enum class PersistedScanDrainResult {
-    COMPLETED,
-    DEFERRED,
-    FAILED,
+internal sealed interface PersistedScanDrainResult {
+    data object Completed : PersistedScanDrainResult
+    data object Deferred : PersistedScanDrainResult
+    data class Failed(val scanId: String?, val error: String) : PersistedScanDrainResult
 }
 
 class AlbumRepository(
@@ -218,13 +220,13 @@ class AlbumRepository(
     private val recommendationDiversifier: RecommendationDiversifier = RecommendationDiversifier(),
     private val recommendationFileRotator: RecommendationFileRotator = RecommendationFileRotator(),
     private val hybridIndexer: HybridIndexer? = null,
+    private val libraryPipelineCoordinator: LibraryPipelineCoordinator? = null,
     private val thumbnailScheduler: ThumbnailScheduler? = null,
     private val deletionService: PersistentDeletionService? = null,
     private val mediaDeletionCoordinator: MediaDeletionCoordinator? = null,
     private val keywordSearchProfile: KeywordSearchProfile = KeywordSearchProfile.FULL,
     private val semanticSearchEnabled: Boolean = true,
     private val semanticProviderFactory: (() -> com.renyxin.localalbum.core.plugin.capability.SemanticEmbedProvider?)? = null,
-    private val postRestoreTaskPolicy: PostRestoreTaskPolicy? = null,
     private val allowFaceClusterMaintenance: Boolean = true,
     context: android.content.Context? = null,
 ) {
@@ -293,39 +295,24 @@ class AlbumRepository(
      *  防止 ContentObserver 触发的增量扫描与用户手动扫描并发执行导致数据/FTS/状态竞态。 */
     private val scanMutex = Mutex()
 
-    /** Observer-only entry: consumes the durable changed-set and never traverses scan roots. */
-    suspend fun incrementalRescanIfIdle(): Boolean = runAutomaticScanIfIdle()
-
-    /** Foreground compensation is explicitly a reconciliation because observer coverage was absent. */
-    suspend fun reconcileIfIdle(): Boolean = withContext(Dispatchers.IO) {
-        hybridIndexer?.requestReconciliation()
-        runAutomaticScanIfIdle()
+    /** Observer-only wake-up; the persisted pipeline decides when the journal may be consumed. */
+    suspend fun incrementalRescanIfIdle(): Boolean = withContext(Dispatchers.IO) {
+        libraryPipelineCoordinator?.wake()
+        true
     }
 
-    /** Compatibility entry remains a reconciliation, never a disguised incremental scan. */
+    /** Foreground recovery never creates a full reconciliation request. */
+    suspend fun reconcileIfIdle(): Boolean = withContext(Dispatchers.IO) {
+        libraryPipelineCoordinator?.wake()
+        true
+    }
+
     suspend fun rescanIfIdle(): Boolean = reconcileIfIdle()
 
     private suspend fun runAutomaticScanIfIdle(): Boolean =
         withContext(Dispatchers.IO) {
-            if (!scanMutex.tryLock()) {
-                // Waiting closes the race between the active scan's final journal check and unlock.
-                Log.d(TAG, "自动扫描已持久化，等待当前扫描释放锁后复核队列")
-                scanMutex.lock()
-            }
-            try {
-                val indexer = hybridIndexer ?: return@withContext false
-                val effectiveRequest = when {
-                    indexer.hasPendingReconciliation() -> ScanRequest.RECONCILIATION
-                    indexer.hasClaimableMediaChanges() -> ScanRequest.INCREMENTAL
-                    else -> {
-                        Log.d(TAG, "持锁扫描已消费自动请求，跳过空扫描")
-                        return@withContext true
-                    }
-                }
-                rescanAndDrainLocked(effectiveRequest)
-            } finally {
-                scanMutex.unlock()
-            }
+            libraryPipelineCoordinator?.wake()
+            true
         }
 
     /**
@@ -338,26 +325,29 @@ class AlbumRepository(
     internal suspend fun drainPersistedScanRequests(): PersistedScanDrainResult =
         withContext(Dispatchers.IO) {
             scanMutex.withLock {
-                val indexer = hybridIndexer
-                    ?: return@withLock PersistedScanDrainResult.FAILED
-                val request = when {
-                    indexer.hasPendingReconciliation() -> ScanRequest.RECONCILIATION
-                    indexer.hasClaimableMediaChanges() -> ScanRequest.INCREMENTAL
-                    // A live lease or retry delay remains durable; keep the Worker in backoff.
-                    indexer.hasOutstandingMediaChanges() ->
-                        return@withLock PersistedScanDrainResult.DEFERRED
-                    else -> return@withLock PersistedScanDrainResult.COMPLETED
+                val coordinator = libraryPipelineCoordinator
+                    ?: return@withLock PersistedScanDrainResult.Failed(
+                        scanId = null,
+                        error = "pipeline_coordinator_missing",
+                    )
+                val stage = coordinator.admittedScanStage()
+                val request = when (stage) {
+                    com.renyxin.localalbum.data.db.entity.LibraryPipelineStage.INITIAL_SCAN,
+                    com.renyxin.localalbum.data.db.entity.LibraryPipelineStage.REBUILD_SCAN,
+                    -> ScanRequest.RECONCILIATION
+                    com.renyxin.localalbum.data.db.entity.LibraryPipelineStage.INCREMENTAL_SCAN ->
+                        ScanRequest.INCREMENTAL
+                    else -> return@withLock PersistedScanDrainResult.Completed
                 }
-                if (!rescanAndDrainLocked(request)) {
-                    return@withLock PersistedScanDrainResult.FAILED
-                }
-                if (
-                    indexer.hasPendingReconciliation() ||
-                    indexer.hasOutstandingMediaChanges()
-                ) {
-                    PersistedScanDrainResult.DEFERRED
-                } else {
-                    PersistedScanDrainResult.COMPLETED
+                when (val result = rescanLocked(request)) {
+                    is ScanExecutionResult.Failed -> PersistedScanDrainResult.Failed(
+                        scanId = result.scanId,
+                        error = result.error,
+                    )
+                    ScanExecutionResult.Deferred -> PersistedScanDrainResult.Deferred
+                    ScanExecutionResult.Completed,
+                    ScanExecutionResult.Skipped,
+                    -> PersistedScanDrainResult.Completed
                 }
             }
         }
@@ -383,8 +373,28 @@ class AlbumRepository(
         .map { it.enhancementState }
         .stateIn(scope, SharingStarted.Eagerly, EnhancementState.NOT_SCHEDULED)
 
+    /** UI 的唯一流水线阶段事实，直接投影持久 Room 控制行。 */
+    val libraryPipelineState: StateFlow<LibraryPipelineState> =
+        (database?.libraryPipelineDao()?.observe()?.map(LibraryPipelineState::from)
+            ?: flowOf(LibraryPipelineState()))
+            .stateIn(scope, SharingStarted.Eagerly, LibraryPipelineState())
+
     private val _albumSyncState = MutableStateFlow<AlbumSyncState>(AlbumSyncState.Restoring)
     val albumSyncState: StateFlow<AlbumSyncState> = _albumSyncState.asStateFlow()
+
+    /** Live failure counts come directly from Room so retries update settings without polling. */
+    val failedThumbnailCount: Flow<Int> =
+        database?.thumbnailTaskDao()?.observeFailedCount() ?: flowOf(0)
+
+    val failedAnalysisTaskCount: Flow<Int> =
+        database?.analysisTaskDao()?.observeFailedCount() ?: flowOf(0)
+
+    val failedEnhancementOutboxCount: Flow<Int> =
+        database?.enhancementOutboxDao()?.observeFailedCount() ?: flowOf(0)
+
+    /** Persisted stage admission; UI must not approximate this with an in-memory scan flag. */
+    val userTaskRetryAllowed: Flow<Boolean> =
+        libraryPipelineCoordinator?.userTaskRetryAllowed ?: flowOf(false)
 
     @Volatile
     private var albumCacheRestored = false
@@ -431,12 +441,18 @@ class AlbumRepository(
         initialLoadSize = 100,
     )
 
-    val pagedMedia: Flow<PagingData<MediaItem>> = Pager(
-        config = mediaPagingConfig,
-        pagingSourceFactory = { mediaDao.pagingSource() },
-    ).flow
-        .map { pagingData -> pagingData.map { it.toMediaItem() } }
-        .cachedIn(scope)
+    val pagedMedia: Flow<PagingData<MediaItem>> = (
+        database?.let { db ->
+            Pager(
+                config = mediaPagingConfig,
+                pagingSourceFactory = { db.homeMediaSnapshotDao().pagingSource() },
+            ).flow.map { pagingData -> pagingData.map { it.toMediaItem() } }
+        } ?: Pager(
+            // Compatibility for narrow unit-test constructors that intentionally omit AppDatabase.
+            config = mediaPagingConfig,
+            pagingSourceFactory = { mediaDao.pagingSource() },
+        ).flow.map { pagingData -> pagingData.map { it.toMediaItem() } }
+    ).cachedIn(scope)
 
     /** 收藏页独立分页，不能从全量媒体 Flow 过滤。 */
     val pagedFavorites: Flow<PagingData<MediaItem>> = Pager(
@@ -448,6 +464,9 @@ class AlbumRepository(
 
     suspend fun requestThumbnail(item: MediaItem, sizeClass: String, priority: Int): String? =
         thumbnailScheduler?.request(item, sizeClass, priority)
+
+    suspend fun requestThumbnails(requests: List<ThumbnailRequest>): List<String?> =
+        thumbnailScheduler?.requestBatch(requests) ?: List(requests.size) { null }
 
     val trashedCount: StateFlow<Int> = mediaDao.getTrashedCountFlow()
         .stateIn(scope, SharingStarted.Eagerly, 0)
@@ -583,31 +602,54 @@ class AlbumRepository(
     }
 
     // ---- 扫描 ----
+    /** Normal user refresh checks only the durable incremental journal. */
     suspend fun rescan(): Boolean = withContext(Dispatchers.IO) {
-        Log.i(TAG, "rescan: 手动 reconciliation 等待 scanMutex…")
-        scanMutex.withLock { rescanAndDrainLocked(ScanRequest.RECONCILIATION) }
+        libraryPipelineCoordinator?.wake()
+        true
     }
 
-    /** Drains notifications that arrived while a full/reconciliation/incremental run held the lock. */
-    private suspend fun rescanAndDrainLocked(initialRequest: ScanRequest): Boolean {
-        var request = initialRequest
-        while (true) {
-            when (rescanLocked(request)) {
-                ScanExecutionResult.FAILED -> return false
-                ScanExecutionResult.SKIPPED -> return true
-                ScanExecutionResult.COMPLETED -> Unit
-            }
-            val indexer = hybridIndexer ?: return true
-            request = when {
-                indexer.hasPendingReconciliation() -> ScanRequest.RECONCILIATION
-                indexer.hasClaimableMediaChanges() -> ScanRequest.INCREMENTAL
-                else -> return true
-            }
-        }
+    /** Only this explicit action is allowed to request a complete root traversal. */
+    suspend fun requestFullRebuild() = withContext(Dispatchers.IO) {
+        libraryPipelineCoordinator?.requestExplicitRebuild()
     }
+
+    suspend fun retryFailedThumbnails(): FailedTaskRetryResult = withContext(Dispatchers.IO) {
+        libraryPipelineCoordinator?.retryFailedThumbnails()
+            ?: FailedTaskRetryResult(admitted = false)
+    }
+
+    suspend fun retryFailedAnalysis(): FailedTaskRetryResult = withContext(Dispatchers.IO) {
+        libraryPipelineCoordinator?.retryFailedAnalysis()
+            ?: FailedTaskRetryResult(admitted = false)
+    }
+
+    suspend fun retryFailedEnhancementOutbox(): EnhancementOutboxRetryResult =
+        withContext(Dispatchers.IO) {
+            libraryPipelineCoordinator?.retryFailedEnhancementOutbox()
+                ?: EnhancementOutboxRetryResult(admitted = false)
+        }
 
     /** 调用方必须持有 [scanMutex]。 */
     private suspend fun rescanLocked(request: ScanRequest): ScanExecutionResult {
+        val coordinator = libraryPipelineCoordinator
+        val admittedStage = coordinator?.admittedScanStage()
+        if (coordinator != null && admittedStage?.isScan != true) {
+            Log.d(TAG, "serialized pipeline rejected scan while stage=$admittedStage")
+            return ScanExecutionResult.Skipped
+        }
+        val pipelineRequest = when (admittedStage) {
+            com.renyxin.localalbum.data.db.entity.LibraryPipelineStage.INITIAL_SCAN -> ScanRequest.RECONCILIATION
+            com.renyxin.localalbum.data.db.entity.LibraryPipelineStage.REBUILD_SCAN -> ScanRequest.RECONCILIATION
+            com.renyxin.localalbum.data.db.entity.LibraryPipelineStage.INCREMENTAL_SCAN -> ScanRequest.INCREMENTAL
+            else -> request
+        }
+        if (pipelineRequest == ScanRequest.INCREMENTAL && hybridIndexer != null &&
+            hybridIndexer.countOutstandingMediaChanges() > 0 &&
+            !hybridIndexer.hasClaimableMediaChanges()
+        ) {
+            Log.d(TAG, "incremental journal exists but is lease/retry delayed; deferring before run reservation")
+            return ScanExecutionResult.Deferred
+        }
         restoreFromDbIfNeeded()
         val hadCachedAlbums = _albumTree.value.isNotEmpty()
         _albumSyncState.value = AlbumSyncState.Checking(hadCachedAlbums)
@@ -615,25 +657,33 @@ class AlbumRepository(
         Log.i(TAG, "rescan: 获得 scanMutex，设置 Scanning 状态")
 
         var serviceAcquired = false
+        var activeScanId: String? = null
         appContext?.let(com.renyxin.localalbum.data.worker.RecommendationRefreshWorker::cancel)
         return try {
-            // settingsRepository.state 可能因 combine 源未发射而等待；超时后使用默认设置。
-            val settings = withTimeoutOrNull(5000L) {
-                settingsRepository.state.first()
+            // Scope mutations use the same mutex. Reading settings and reserving the durable run in
+            // one critical section gives a linear order: an earlier mutation is consumed by this run;
+            // a later mutation sees activeRunId and remains queued for explicit rebuilding.
+            val admitted = withTimeoutOrNull(5000L) {
+                settingsRepository.withStableScanSettings { settings ->
+                    settings to if (settings.scanRoots.isEmpty()) {
+                        null
+                    } else {
+                        coordinator?.getOrCreateAdmittedScanRun()
+                    }
+                }
             }
+            val settings = admitted?.first
             if (settings == null) {
-                Log.e(TAG, "rescan: settingsRepository.state.first() 超时(5s)，使用默认设置")
+                Log.e(TAG, "rescan: 稳定扫描设置读取超时(5s)，保持持久阶段等待")
             } else {
-                Log.i(TAG, "rescan: 获取设置成功，scanRoots=${settings.scanRoots}")
+                Log.i(TAG, "rescan: 获取稳定设置成功，scanRoots=${settings.scanRoots}")
             }
 
             val roots = settings?.scanRoots ?: emptyList()
             val allowNomedia = settings?.showNomediaDirectories ?: false
             val ignorePatterns = settings?.ignoreDirNames ?: emptyList()
             if (roots.isEmpty()) {
-                Log.w(TAG, "rescan: scanRoots 为空，确认空对账域并保留已提交快照")
-                hybridIndexer?.acknowledgeEmptyReconciliationDomain()
-                database?.scanRunDao()?.releaseWaitingForCoreEnhancements()
+                Log.w(TAG, "rescan: scanRoots 为空，持久流水线等待可用配置")
                 _scanState.value = ScanState.Idle
                 _albumSyncState.value = if (_albumTree.value.isEmpty()) {
                     AlbumSyncState.FirstBuild
@@ -642,17 +692,18 @@ class AlbumRepository(
                         database?.albumSnapshotDao()?.getMeta()?.updatedAtMs ?: 0L,
                     )
                 }
-                return ScanExecutionResult.SKIPPED
+                return ScanExecutionResult.Deferred
             }
 
+            val reservedRun = admitted?.second
+            activeScanId = reservedRun?.scanId
             appContext?.let { ScanServiceController.acquire(it, "正在扫描媒体…") }
             serviceAcquired = true
 
             val indexer = hybridIndexer
                 ?: error("HybridIndexer 未注入，已拒绝执行高风险全量扫描兜底")
             val isFirstScan = mediaDao.getCount() == 0
-            val requiresReconciliation = request == ScanRequest.RECONCILIATION ||
-                indexer.hasPendingReconciliation()
+            val requiresReconciliation = pipelineRequest == ScanRequest.RECONCILIATION
             _albumSyncState.value = AlbumSyncState.Updating(hadCachedAlbums)
             _scanState.value = ScanState.Scanning(
                 when {
@@ -664,19 +715,14 @@ class AlbumRepository(
 
             var publishedCoreResult: com.renyxin.localalbum.core.index.ScanCommitResult? = null
             suspend fun publishCore(result: com.renyxin.localalbum.core.index.ScanCommitResult) {
-                // CoreScanComplete can only follow the matching full or patched snapshot publication.
-                if (result.scanType == ScanRunEntity.TYPE_INCREMENTAL) {
-                    publishIncrementalAlbumSnapshot(result.affectedDirectoryPaths)
-                } else {
-                    publishCommittedAlbumSnapshot()
-                    indexer.acknowledgePublishedReconciliation(result.startedAtMs)
-                }
+                // Canonical data is committed, but the home projection remains unchanged until all
+                // grid thumbnails reach READY/permanent-placeholder terminal state.
                 indexer.publishCoreComplete(result)
-                if (result.scanType != ScanRunEntity.TYPE_INCREMENTAL) {
-                    // Restore-created outbox remains WAITING_FOR_CORE until a real device
-                    // reconciliation/full snapshot has been successfully published.
-                    database?.scanRunDao()?.releaseWaitingForCoreEnhancements()
-                }
+                coordinator?.onCoreScanCompleted(
+                    scanId = result.scanId,
+                    generation = database?.scanRunDao()?.getById(result.scanId)?.generation ?: 0L,
+                    changedCount = result.inserted + result.updated + result.deleted,
+                )
                 publishedCoreResult = result
             }
 
@@ -684,21 +730,10 @@ class AlbumRepository(
             // Automatic enhancement can therefore finish its already-running bounded section, but
             // no new model/CPU section can begin after this scan has requested the core lane.
             EnhancementResourceGate.withCoreScan(
-                onRequested = {
-                    // Persist the reason before cancelling consumers. PREEMPTED is automatically
-                    // recoverable; a concurrent user PAUSED state is never overwritten.
-                    database?.scanRunDao()?.preemptAllActiveEnhancements()
-                    // Cancel long-running automatic consumers before waiting for the gate. Their
-                    // durable cancellation handlers release leases; interactive thumbnails use a
-                    // separate bounded lane and remain responsive.
-                    appContext?.let {
-                        com.renyxin.localalbum.data.worker.AnalysisWorker.cancelForCorePreemption(it)
-                        com.renyxin.localalbum.data.worker.ThumbnailWorker.cancelBackground(it)
-                        com.renyxin.localalbum.data.worker.EnhancementHandoffWorker.cancel(it)
-                    }
-                },
+                // Serialized admission means scanning never preempts a live enhancement stage.
+                onRequested = {},
             ) {
-                if (isFirstScan) {
+                if (admittedStage == com.renyxin.localalbum.data.db.entity.LibraryPipelineStage.INITIAL_SCAN || isFirstScan) {
                     indexer.fullScan(
                         roots = roots,
                         allowNomedia = allowNomedia,
@@ -711,6 +746,7 @@ class AlbumRepository(
                                 total,
                             )
                         },
+                        reservedRun = reservedRun,
                         onCoreReady = ::publishCore,
                     )
                 } else if (requiresReconciliation) {
@@ -718,6 +754,7 @@ class AlbumRepository(
                         roots = roots,
                         allowNomedia = allowNomedia,
                         ignorePatterns = ignorePatterns,
+                        reservedRun = reservedRun,
                         onCoreReady = ::publishCore,
                     )
                 } else {
@@ -725,6 +762,7 @@ class AlbumRepository(
                         roots = roots,
                         allowNomedia = allowNomedia,
                         ignorePatterns = ignorePatterns,
+                        reservedRun = reservedRun,
                         onCoreReady = ::publishCore,
                     )
                 }
@@ -744,7 +782,7 @@ class AlbumRepository(
                     )
                 }
             }
-            ScanExecutionResult.COMPLETED
+            ScanExecutionResult.Completed
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             // 不把取消伪装成完成；HybridIndexer 已将当前 ScanRun 标记为 CANCELLED。
             Log.i(TAG, "扫描已取消，继续保留上次完整相册快照")
@@ -752,16 +790,18 @@ class AlbumRepository(
             _albumSyncState.value = AlbumSyncState.Paused(_albumTree.value.isNotEmpty())
             throw cancelled
         } catch (error: Throwable) {
-            Log.e(TAG, "扫描失败", error)
+            Log.e(TAG, "扫描失败；保留同一持久运行等待 WorkManager 重试", error)
             val message = error.message ?: "扫描失败"
+            val errorType = error.javaClass.simpleName.ifBlank { "scan_failed" }
             _scanState.value = ScanState.Failed(message)
             _albumSyncState.value = AlbumSyncState.Failed(message, _albumTree.value.isNotEmpty())
-            ScanExecutionResult.FAILED
+            ScanExecutionResult.Failed(scanId = activeScanId, error = errorType)
         } finally {
-            // Core preemption is transient even when the scan fails or is cancelled. User PAUSED
-            // runs are excluded by the DAO transition and remain paused across restarts.
+            // Releasing transient preemption must not schedule another scanner here. Success already
+            // appended the next pipeline stage; failure must retain WorkManager backoff; cancellation
+            // waits for an explicit/startup wake. User PAUSED runs remain untouched by the DAO.
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                resumeTransientlyPreemptedEnhancements()
+                resumeTransientlyPreemptedEnhancements(wakePipeline = false)
             }
             if (serviceAcquired) {
                 appContext?.let { ScanServiceController.release(it) }
@@ -769,32 +809,13 @@ class AlbumRepository(
         }
     }
 
-    private suspend fun resumeTransientlyPreemptedEnhancements() {
-        // A following core/maintenance owner will perform its own release. Interactive AI is short
-        // lived and must not suppress the only durable queue wake-up after core publication.
+    private suspend fun resumeTransientlyPreemptedEnhancements(wakePipeline: Boolean) {
+        // A following core/maintenance owner will perform its own release. Once both process-local
+        // gates are free, restore only the durable lifecycle marker; the persisted library stage is
+        // the sole authority allowed to choose handoff, thumbnail, or analysis work.
         if (EnhancementResourceGate.isCoreRequested || EnhancementResourceGate.isMaintenanceRequested) return
         database?.scanRunDao()?.resumePreemptedEnhancements()
-        appContext?.let { context ->
-            if (database?.enhancementOutboxDao()?.hasRunnableEntries() == true) {
-                com.renyxin.localalbum.data.worker.EnhancementHandoffWorker.enqueue(context)
-            }
-            val taskDao = database?.analysisTaskDao()
-            val hasScanOwnedAnalysis = taskDao?.countActiveScanOwnedEnhancementTasks()?.let { it > 0 } == true
-            val activeUserTasks = taskDao?.countActiveUserTasks() ?: 0
-            val hasResumableUserAnalysis = com.renyxin.localalbum.data.worker.AnalysisWorker
-                .userTaskAdmission(
-                    userPaused = AnalysisResumePrefs.isUserPaused(context),
-                    resumePending = AnalysisResumePrefs.isPending(context),
-                    activeUserTasks = activeUserTasks,
-                )
-            if (hasResumableUserAnalysis) AnalysisResumePrefs.setPending(context, true)
-            if (hasScanOwnedAnalysis || hasResumableUserAnalysis) {
-                com.renyxin.localalbum.data.worker.AnalysisWorker.enqueue(context)
-            }
-            if (database?.thumbnailTaskDao()?.countAutomaticRunnable()?.let { it > 0 } == true) {
-                com.renyxin.localalbum.data.worker.ThumbnailWorker.enqueueBackground(context)
-            }
-        }
+        if (wakePipeline) libraryPipelineCoordinator?.wake()
     }
 
     /**
@@ -824,7 +845,7 @@ class AlbumRepository(
                 // withExclusiveMaintenance has released both lanes before returning/throwing.
                 // Only PREEMPTED runs are re-released; a durable user pause remains authoritative.
                 kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                    resumeTransientlyPreemptedEnhancements()
+                    resumeTransientlyPreemptedEnhancements(wakePipeline = true)
                 }
             }
         }
@@ -851,45 +872,6 @@ class AlbumRepository(
     }
 
     /**
-     * Phase 1: 启动时若存在中断未完成的分析，自动续跑。
-     *
-     * [PluginAnalysisPipeline.runFullScan] 内部断点续跑会跳过已完成阶段，仅推理 pending 部分，
-     * 故可安全地对全量路径调用。仅在 [AnalysisResumePrefs.isPending] 为 true 时执行，
-     * 避免每次冷启动都跑重负载。
-     *
-     * 注意：续跑属重负载，后续可加约束（充电/非低电量）调度；当前仅在中断时触发。
-     */
-    suspend fun resumeAnalysisIfNeeded() = withContext(Dispatchers.IO) {
-        val ctx = appContext ?: return@withContext
-        val indexer = hybridIndexer ?: run {
-            AnalysisResumePrefs.setPending(ctx, false)
-            return@withContext
-        }
-        val scanDao = database?.scanRunDao()
-        val taskDao = database?.analysisTaskDao()
-        val hasDurableEnhancement = scanDao?.getEnhancementScanIds()?.isNotEmpty() == true
-        val hasScanOwnedTasks = taskDao?.countActiveScanOwnedEnhancementTasks()?.let { it > 0 } == true
-        val activeUserTasks = taskDao?.countActiveUserTasks() ?: 0
-        val hasResumableUserTasks = com.renyxin.localalbum.data.worker.AnalysisWorker
-            .userTaskAdmission(
-                userPaused = AnalysisResumePrefs.isUserPaused(ctx),
-                resumePending = AnalysisResumePrefs.isPending(ctx),
-                activeUserTasks = activeUserTasks,
-            )
-        if (hasResumableUserTasks) AnalysisResumePrefs.setPending(ctx, true)
-        if (!hasDurableEnhancement && !hasScanOwnedTasks && !hasResumableUserTasks) {
-            if (activeUserTasks == 0) AnalysisResumePrefs.setPending(ctx, false)
-            return@withContext
-        }
-        scanMutex.withLock {
-            Log.i(TAG, "resumeAnalysisIfNeeded: 恢复持久化分析任务领取")
-            indexer.resumePendingAnalysis()
-            // User work keeps its marker until the final bounded Stage window has converged.
-            if (activeUserTasks == 0) AnalysisResumePrefs.setPending(ctx, false)
-        }
-    }
-
-    /**
      * Phase 1: 分析完成度统计，供 UI 显示「已分析 x/y」。
      *
      * @return (已完成去重文件数, 媒体总数)
@@ -910,9 +892,20 @@ class AlbumRepository(
 
     // ---- 删除/回收站 ----
     suspend fun deleteMediaItems(paths: List<String>) = withContext(Dispatchers.IO) {
-        if (paths.isEmpty()) return@withContext
-        mediaDao.moveToTrash(paths, System.currentTimeMillis())
-        removeFromMemoryTree(paths.toSet())
+        val distinct = paths.distinct()
+        if (distinct.isEmpty()) return@withContext
+        val deletedAt = System.currentTimeMillis()
+        if (database != null) {
+            database.withTransaction {
+                distinct.chunked(MediaDeletionCoordinator.CHUNK_SIZE).forEach { chunk ->
+                    mediaDao.moveToTrash(chunk, deletedAt)
+                    database.homeMediaSnapshotDao().deleteByPaths(chunk)
+                }
+            }
+        } else {
+            mediaDao.moveToTrash(distinct, deletedAt)
+        }
+        removeFromMemoryTree(distinct.toSet())
         refreshStats()
     }
 
@@ -945,16 +938,21 @@ class AlbumRepository(
     }
 
     suspend fun restoreFromTrash(paths: List<String>) = withContext(Dispatchers.IO) {
-        if (paths.isEmpty()) return@withContext
-        // 显式 restore 是唯一清除删除意图的操作；与可见状态在同一 Room 事务提交。
-        if (database != null && deletionService != null) {
+        val distinct = paths.distinct()
+        if (distinct.isEmpty()) return@withContext
+        // 显式 restore 是唯一清除删除意图的操作；canonical、删除意图与已发布主页
+        // 在同一 Room 事务提交。初始主页门禁尚未开放时，DAO 不会提前插入快照。
+        if (database != null) {
             database.withTransaction {
-                deletionService.restore(paths)
-                mediaDao.restoreFromTrash(paths)
+                distinct.chunked(MediaDeletionCoordinator.CHUNK_SIZE).forEach { chunk ->
+                    deletionService?.restore(chunk)
+                    mediaDao.restoreFromTrash(chunk)
+                    database.homeMediaSnapshotDao().restoreFromCanonical(chunk)
+                }
             }
         } else {
-            deletionService?.restore(paths)
-            mediaDao.restoreFromTrash(paths)
+            deletionService?.restore(distinct)
+            mediaDao.restoreFromTrash(distinct)
         }
         loadFromDb()
     }
@@ -1143,14 +1141,13 @@ class AlbumRepository(
         DatabaseExporter(mediaDao, faceDao, embeddingDao, database)
     }
 
-    /** 数据库导入器（Phase 4.2）；可再生任务策略由 edition composition root 提供。 */
+    /** 数据库导入器（Phase 4.2）；导入只恢复数据并持久化显式校验需求。 */
     private val databaseImporter: DatabaseImporter? by lazy {
         DatabaseImporter(
             mediaDao = mediaDao,
             faceDao = faceDao,
             embeddingDao = embeddingDao,
             database = database,
-            postRestoreTaskSeeder = postRestoreTaskPolicy?.let(::PostRestoreTaskSeeder),
         )
     }
 
@@ -1208,32 +1205,13 @@ class AlbumRepository(
                 r
             }
             if (result.success) {
-                // 对账扫描在锁外执行：scanMutex 不可重入，且 rescan 自身会持锁。
-                // 导入后自动触发一次增量扫描，清理"幽灵记录"并补充设备上未纳入备份的新文件。
-                // 注意：roots 为空时 rescan 会清空数据库（见 rescan 内分支），必须跳过，
-                // 否则刚导入的数据会被立即清掉。恢复 outbox 必须在这次核心对账完成后
-                // 才释放，避免恢复任务与 reconciliation 争用模型/CPU 资源。
-                val roots = withTimeoutOrNull(5000L) {
-                    settingsRepository.state.first()
-                }?.scanRoots ?: emptyList()
-                val reconciliationSucceeded = if (roots.isNotEmpty()) {
-                    Log.i(TAG, "importDatabase: 导入成功，触发对账增量扫描…")
-                    rescan()
-                } else {
-                    Log.w(TAG, "importDatabase: 未配置扫描根目录，确认空对账域")
-                    scanMutex.withLock {
-                        hybridIndexer?.acknowledgeEmptyReconciliationDomain()
-                        database?.scanRunDao()?.releaseWaitingForCoreEnhancements()
-                    }
-                    true
-                }
-                if (reconciliationSucceeded) {
-                    if (database?.enhancementOutboxDao()?.hasRunnableEntries() == true) {
-                        appContext?.let(com.renyxin.localalbum.data.worker.EnhancementHandoffWorker::enqueue)
-                    }
-                } else {
-                    Log.w(TAG, "importDatabase: 对账失败，恢复 outbox 保留待下次启动恢复")
-                }
+                // Import is not authority to traverse every configured root. The seeder persists a
+                // reconciliation advisory and WAITING_FOR_CORE work; only explicit user confirmation
+                // may turn that advisory into a complete rebuild. This also keeps the imported home
+                // projection stable instead of replacing it during the import call.
+                libraryPipelineCoordinator?.markRebuildRequired("backup_import_requires_validation")
+                libraryPipelineCoordinator?.wake()
+                Log.i(TAG, "importDatabase: 导入成功，已排队显式校验请求；未自动遍历扫描根")
             }
             result
         }
@@ -1251,16 +1229,36 @@ class AlbumRepository(
 
     // ---- 收藏 ----
     suspend fun toggleFavorite(path: String) = withContext(Dispatchers.IO) {
-        // P1-4: 使用轻量查询替代 getAll() 全量加载
-        val current = mediaDao.getFavoriteByPath(path) ?: false
-        mediaDao.setFavorite(path, !current)
-        updateFavoriteInMemory(path, !current)
+        // canonical 与主页 read model 原子更新；AI/缩略图写回仍不会触发主页失效。
+        val favorite = if (database != null) {
+            database.withTransaction {
+                val next = !(mediaDao.getFavoriteByPath(path) ?: false)
+                mediaDao.setFavorite(path, next)
+                database.homeMediaSnapshotDao().setFavorite(path, next)
+                next
+            }
+        } else {
+            val next = !(mediaDao.getFavoriteByPath(path) ?: false)
+            mediaDao.setFavorite(path, next)
+            next
+        }
+        updateFavoriteInMemory(path, favorite)
     }
 
     suspend fun batchSetFavorite(paths: List<String>, favorite: Boolean) = withContext(Dispatchers.IO) {
-        if (paths.isEmpty()) return@withContext
-        mediaDao.batchSetFavorite(paths, favorite)
-        paths.forEach { updateFavoriteInMemory(it, favorite) }
+        val distinct = paths.distinct()
+        if (distinct.isEmpty()) return@withContext
+        if (database != null) {
+            database.withTransaction {
+                distinct.chunked(MediaDeletionCoordinator.CHUNK_SIZE).forEach { chunk ->
+                    mediaDao.batchSetFavorite(chunk, favorite)
+                    database.homeMediaSnapshotDao().setFavoriteByPaths(chunk, favorite)
+                }
+            }
+        } else {
+            mediaDao.batchSetFavorite(distinct, favorite)
+        }
+        distinct.forEach { updateFavoriteInMemory(it, favorite) }
     }
 
     // ---- 按场景类型查询 ----
@@ -1313,7 +1311,8 @@ class AlbumRepository(
      */
     suspend fun keepOneDeleteRest(groupId: String, keepPath: String? = null): List<String> =
         withContext(Dispatchers.IO) {
-            val dao = duplicateDao ?: return@withContext emptyList()
+            val db = database ?: return@withContext emptyList()
+            val dao = db.duplicateMaintenanceDao()
             val run = dao.getActiveRun(MaintenanceRunEntity.TASK_DUPLICATE_EXACT)
                 ?: return@withContext emptyList()
             val group = dao.getValidGroup(run.generation, groupId) ?: return@withContext emptyList()
@@ -1327,8 +1326,11 @@ class AlbumRepository(
             while (true) {
                 val batch = dao.getDeletionPathsAfter(run.generation, groupId, keep, cursor, 200)
                 if (batch.isEmpty()) break
-                mediaDao.moveToTrash(batch, System.currentTimeMillis())
-                dao.deleteMembers(run.generation, groupId, batch)
+                db.withTransaction {
+                    mediaDao.moveToTrash(batch, System.currentTimeMillis())
+                    db.homeMediaSnapshotDao().deleteByPaths(batch)
+                    dao.deleteMembers(run.generation, groupId, batch)
+                }
                 removeFromMemoryTree(batch.toSet())
                 removed += batch
                 cursor = batch.last()
@@ -1800,6 +1802,33 @@ class AlbumRepository(
         isCorrupted = isCorrupted,
         faceClusterId = faceClusterId,
         ocrText = ocrText,
+    )
+
+    /** Home projection intentionally excludes AI fields so AI writes never invalidate timeline Paging. */
+    private fun HomeMediaSnapshotEntity.toMediaItem() = MediaItem(
+        id = java.util.UUID.nameUUIDFromBytes(filePath.toByteArray()).toString(),
+        filePath = filePath,
+        fileName = fileName,
+        type = mediaType,
+        capturedAt = Instant.ofEpochMilli(capturedAtMs),
+        modifiedAt = Instant.ofEpochMilli(modifiedAtMs),
+        fileSize = fileSize,
+        isFavorite = isFavorite,
+        width = width,
+        height = height,
+        mimeType = mimeType,
+        durationMs = durationMs,
+        latitude = latitude,
+        longitude = longitude,
+        make = make,
+        model = model,
+        aperture = aperture,
+        focalLength = focalLength,
+        iso = iso,
+        exposureTime = exposureTime,
+        orientation = orientation,
+        thumbnailPath = thumbnailPath,
+        isCorrupted = isCorrupted,
     )
 }
 

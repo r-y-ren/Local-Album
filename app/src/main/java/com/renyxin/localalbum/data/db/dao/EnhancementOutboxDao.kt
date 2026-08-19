@@ -97,6 +97,23 @@ abstract class EnhancementOutboxDao {
     protected abstract suspend fun findClaimableIds(now: Long, limit: Int): List<Long>
 
     @Query(
+        """SELECT outboxId FROM enhancement_outbox
+           WHERE scanId = :scanId AND status = 'PENDING' AND nextRetryAt <= :now
+             AND EXISTS(
+                 SELECT 1 FROM scan_runs run
+                 WHERE run.scanId = :scanId AND run.coreScanState = 'COMPLETED'
+                   AND run.indexAvailability = 'PUBLISHED'
+                   AND run.enhancementState IN ('NOT_SCHEDULED', 'QUEUED', 'RUNNING')
+             )
+           ORDER BY createdAt ASC, outboxId ASC LIMIT :limit""",
+    )
+    protected abstract suspend fun findClaimableIdsForScan(
+        scanId: String,
+        now: Long,
+        limit: Int,
+    ): List<Long>
+
+    @Query(
         """UPDATE enhancement_outbox
            SET status = 'RUNNING', leaseUntil = :leaseUntil, leaseToken = :leaseToken,
                attemptCount = attemptCount + 1, updatedAt = :now
@@ -125,6 +142,21 @@ abstract class EnhancementOutboxDao {
     ): List<EnhancementOutboxEntity> {
         recoverExpiredLeases(now)
         val ids = findClaimableIds(now, limit)
+        if (ids.isEmpty()) return emptyList()
+        markClaimed(ids, leaseToken, now + leaseDurationMs, now)
+        return getByLeaseToken(leaseToken)
+    }
+
+    @Transaction
+    open suspend fun claimBatchForScan(
+        scanId: String,
+        now: Long,
+        limit: Int,
+        leaseToken: String,
+        leaseDurationMs: Long,
+    ): List<EnhancementOutboxEntity> {
+        recoverExpiredLeases(now)
+        val ids = findClaimableIdsForScan(scanId, now, limit)
         if (ids.isEmpty()) return emptyList()
         markClaimed(ids, leaseToken, now + leaseDurationMs, now)
         return getByLeaseToken(leaseToken)
@@ -188,8 +220,57 @@ abstract class EnhancementOutboxDao {
     @Query("SELECT COUNT(*) FROM enhancement_outbox WHERE scanId = :scanId AND status IN ('PENDING', 'RUNNING')")
     abstract suspend fun countActiveForScan(scanId: String): Int
 
+    @Query(
+        """SELECT EXISTS(SELECT 1 FROM enhancement_outbox
+           WHERE scanId = :scanId AND status = 'PENDING' AND nextRetryAt <= :now)""",
+    )
+    abstract suspend fun hasClaimableForScan(scanId: String, now: Long): Boolean
+
+    @Query(
+        """UPDATE enhancement_outbox
+           SET status = 'DONE', leaseUntil = 0, leaseToken = NULL,
+               lastError = NULL, updatedAt = :now
+           WHERE scanId = :scanId AND status IN ('PENDING', 'RUNNING', 'FAILED')""",
+    )
+    abstract suspend fun completeForScan(scanId: String, now: Long): Int
+
     @Query("SELECT COUNT(*) FROM enhancement_outbox WHERE scanId = :scanId AND status = 'FAILED'")
     abstract suspend fun countFailedForScan(scanId: String): Int
+
+    @Query("SELECT COUNT(*) FROM enhancement_outbox WHERE status = 'FAILED'")
+    abstract suspend fun countFailed(): Int
+
+    @Query("SELECT COUNT(*) FROM enhancement_outbox WHERE status = 'FAILED'")
+    abstract fun observeFailedCount(): kotlinx.coroutines.flow.Flow<Int>
+
+    @Query(
+        """SELECT * FROM enhancement_outbox
+           WHERE status = 'FAILED'
+           ORDER BY updatedAt ASC, outboxId ASC
+           LIMIT :limit""",
+    )
+    abstract suspend fun getFailedForUserRetry(limit: Int): List<EnhancementOutboxEntity>
+
+    /** Marks only rows that were expanded into independent user-owned tasks. */
+    @Query(
+        """UPDATE enhancement_outbox
+           SET status = 'DONE', leaseUntil = 0, leaseToken = NULL,
+               lastError = NULL, updatedAt = :now
+           WHERE outboxId IN (:outboxIds) AND status = 'FAILED'""",
+    )
+    abstract suspend fun markRetriedForUser(outboxIds: List<Long>, now: Long): Int
+
+    /** Keeps an unsupported failed handoff visible instead of silently dropping its requested work. */
+    @Query(
+        """UPDATE enhancement_outbox
+           SET lastError = :error, updatedAt = :now
+           WHERE outboxId IN (:outboxIds) AND status = 'FAILED'""",
+    )
+    abstract suspend fun recordUserRetryFailure(
+        outboxIds: List<Long>,
+        error: String,
+        now: Long,
+    ): Int
 
     @Query("SELECT DISTINCT scanId FROM enhancement_outbox WHERE status IN ('PENDING', 'RUNNING')")
     abstract suspend fun getActiveScanIds(): List<String>

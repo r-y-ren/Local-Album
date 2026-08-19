@@ -58,8 +58,9 @@ class PersistentDeletionService(
                 completed += item.path
             }
         }
-        // 物理失败路径永不进入 purge。
-        coordinator.purge(completed)
+        // 物理失败路径永不进入 purge。持久删除均源于显式用户删除/回收站策略，
+        // 成功项必须与 canonical 关联数据一起从当前主页快照原子移除。
+        coordinator.purge(completed, removeFromHomeSnapshot = true)
         return completed
     }
 

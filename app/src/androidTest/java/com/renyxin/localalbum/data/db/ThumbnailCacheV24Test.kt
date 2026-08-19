@@ -7,6 +7,8 @@ import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.renyxin.localalbum.core.model.MediaType
+import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.db.entity.ThumbnailCacheEntryEntity
 import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
 import kotlinx.coroutines.runBlocking
@@ -71,10 +73,24 @@ class ThumbnailCacheV24Test {
 
     @Test
     fun 唯一任务提升优先级且领取高优先级优先() = runBlocking {
+        database.mediaDao().insertAll(
+            listOf(
+                media("/a", modifiedAtMs = 1L, fileSize = 1L),
+                media("/b", modifiedAtMs = 1L, fileSize = 2L),
+            ),
+        )
         val dao = database.thumbnailTaskDao()
-        dao.enqueueOrPromote(ThumbnailTaskEntity(filePath = "/a", sourceVersion = "1", mediaType = "IMAGE", priority = 0, createdAt = 1, updatedAt = 1))
-        dao.enqueueOrPromote(ThumbnailTaskEntity(filePath = "/a", sourceVersion = "1", mediaType = "IMAGE", priority = 100, createdAt = 2, updatedAt = 2))
-        dao.enqueueOrPromote(ThumbnailTaskEntity(filePath = "/b", sourceVersion = "1", mediaType = "IMAGE", priority = 50, createdAt = 1, updatedAt = 1))
+        dao.enqueueInteractive(
+            listOf(
+                ThumbnailTaskEntity(filePath = "/a", sourceVersion = "1:1", mediaType = "IMAGE", priority = 0, createdAt = 1, updatedAt = 1),
+            ),
+        )
+        dao.enqueueInteractive(
+            listOf(
+                ThumbnailTaskEntity(filePath = "/a", sourceVersion = "1:1", mediaType = "IMAGE", priority = 100, createdAt = 2, updatedAt = 2),
+                ThumbnailTaskEntity(filePath = "/b", sourceVersion = "1:2", mediaType = "IMAGE", priority = 50, createdAt = 1, updatedAt = 1),
+            ),
+        )
         val claimed = dao.claimBatch(10, 2, "lease", 1000)
         assertEquals(listOf("/a", "/b"), claimed.map { it.filePath })
     }
@@ -87,9 +103,21 @@ class ThumbnailCacheV24Test {
         dao.upsert(ThumbnailCacheEntryEntity("/leased", "grid", "v1", "/cache/leased", 10, 2, 1, leaseUntil = 2000))
         assertNotNull(dao.getReady("/old", "grid", "v1"))
         assertNull(dao.getReady("/old", "grid", "v2"))
-        assertEquals(0, dao.touchThrottled("/old", "grid", "v1", 1000, 0))
-        assertEquals(1, dao.touchThrottled("/old", "grid", "v1", 1000, 10))
-        val candidates = dao.evictionCandidatesAfter(1000, 900, Long.MIN_VALUE, "", "", "", 10)
+        assertEquals(0, dao.touchThrottled("/old", "IMAGE", "v1", "grid", 5, 1000, 0))
+        assertEquals(1, dao.touchThrottled("/old", "IMAGE", "v1", "grid", 5, 1000, 10))
+        val candidates = dao.evictionCandidatesAfter(
+            1000,900,Long.MIN_VALUE,"","","","",Int.MIN_VALUE,10,
+        )
         assertEquals(emptyList<String>(), candidates.map { it.filePath })
     }
+
+    private fun media(path: String, modifiedAtMs: Long, fileSize: Long) = MediaEntity(
+        filePath = path,
+        fileName = path.substringAfterLast('/'),
+        mediaType = MediaType.IMAGE,
+        capturedAtMs = modifiedAtMs,
+        modifiedAtMs = modifiedAtMs,
+        parentPath = "/",
+        fileSize = fileSize,
+    )
 }

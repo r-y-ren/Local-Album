@@ -13,10 +13,12 @@ import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.db.entity.ScanRunEntity
 import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
 import com.renyxin.localalbum.data.db.entity.ScanStagingEntity
+import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -353,11 +355,90 @@ class ScanRunDaoTest {
     }
 
     @Test
+    fun reservedCoreRunResumesWithoutChangingIdentityOrGeneration() = runBlocking {
+        val dao = database.scanRunDao()
+        val run = ScanRunEntity(
+            scanId = "reserved-core",
+            generation = 13L,
+            scanType = ScanRunEntity.TYPE_INCREMENTAL,
+            status = ScanRunEntity.STATUS_ABORTED,
+            mediaStoreCompleted = true,
+            fileSystemCompleted = true,
+            completedAt = 99L,
+            errorType = "process_restarted",
+            coreScanState = CoreScanState.PAUSED.name,
+        )
+        dao.insert(run)
+
+        assertEquals(
+            1,
+            dao.resumeReservedCoreRun(run.scanId, run.generation, run.scanType),
+        )
+        val resumed = requireNotNull(dao.getById(run.scanId))
+        assertEquals(run.scanId, resumed.scanId)
+        assertEquals(run.generation, resumed.generation)
+        assertEquals(ScanRunEntity.STATUS_RUNNING, resumed.status)
+        assertEquals(CoreScanState.DISCOVERING.name, resumed.coreScanState)
+        assertFalse(resumed.mediaStoreCompleted)
+        assertFalse(resumed.fileSystemCompleted)
+        assertEquals(0L, resumed.completedAt)
+        assertEquals(null, resumed.errorType)
+        assertEquals(0, dao.resumeReservedCoreRun(run.scanId, run.generation + 1L, run.scanType))
+        assertEquals(0, dao.resumeReservedCoreRun(run.scanId, run.generation, ScanRunEntity.TYPE_FULL))
+    }
+
+    @Test
+    fun pipelineEnhancementRecoveryIsScopedAndPreservesUserPause() = runBlocking {
+        val dao = database.scanRunDao()
+        listOf(
+            ScanRunEntity(
+                scanId = "pipeline-running",
+                generation = 14L,
+                scanType = ScanRunEntity.TYPE_FULL,
+                status = ScanRunEntity.STATUS_COMPLETED,
+                coreScanState = CoreScanState.COMPLETED.name,
+                enhancementState = EnhancementState.RUNNING.name,
+            ),
+            ScanRunEntity(
+                scanId = "pipeline-preempted",
+                generation = 15L,
+                scanType = ScanRunEntity.TYPE_FULL,
+                status = ScanRunEntity.STATUS_COMPLETED,
+                coreScanState = CoreScanState.COMPLETED.name,
+                enhancementState = EnhancementState.PREEMPTED.name,
+            ),
+            ScanRunEntity(
+                scanId = "pipeline-paused",
+                generation = 16L,
+                scanType = ScanRunEntity.TYPE_FULL,
+                status = ScanRunEntity.STATUS_COMPLETED,
+                coreScanState = CoreScanState.COMPLETED.name,
+                enhancementState = EnhancementState.PAUSED.name,
+            ),
+        ).forEach { dao.insert(it) }
+
+        assertEquals(1, dao.recoverPipelineEnhancement("pipeline-preempted"))
+        assertEquals(
+            EnhancementState.QUEUED.name,
+            dao.getById("pipeline-preempted")?.enhancementState,
+        )
+        assertEquals(
+            EnhancementState.RUNNING.name,
+            dao.getById("pipeline-running")?.enhancementState,
+        )
+        assertEquals(0, dao.recoverPipelineEnhancement("pipeline-paused"))
+        assertEquals(
+            EnhancementState.PAUSED.name,
+            dao.getById("pipeline-paused")?.enhancementState,
+        )
+    }
+
+    @Test
     fun enhancementLifecyclePausesRecoversAndTerminatesIndependently() = runBlocking {
         val scanDao = database.scanRunDao()
         val run = ScanRunEntity(
             scanId = "scan-enhancement",
-            generation = 13L,
+            generation = 17L,
             scanType = ScanRunEntity.TYPE_FULL,
             status = ScanRunEntity.STATUS_COMPLETED,
             coreScanState = CoreScanState.COMPLETED.name,
@@ -407,7 +488,7 @@ class ScanRunDaoTest {
         scanDao.insert(
             ScanRunEntity(
                 scanId = "scan-new",
-                generation = 14L,
+                generation = 18L,
                 scanType = ScanRunEntity.TYPE_INCREMENTAL,
                 status = ScanRunEntity.STATUS_COMPLETED,
                 coreScanState = CoreScanState.COMPLETED.name,
@@ -634,7 +715,7 @@ class ScanRunDaoTest {
         scanDao.insert(
             ScanRunEntity(
                 scanId = "scan-recovery",
-                generation = 14L,
+                generation = 19L,
                 scanType = ScanRunEntity.TYPE_FULL,
                 status = ScanRunEntity.STATUS_COMPLETED,
                 coreScanState = CoreScanState.COMPLETED.name,
@@ -793,18 +874,28 @@ class ScanRunDaoTest {
                 enhancementState = EnhancementState.QUEUED.name,
             ),
         )
+        database.mediaDao().insertAll(
+            listOf(
+                media("/interactive.jpg", modifiedAtMs = 1L, fileSize = 100L),
+                media("/automatic.jpg", modifiedAtMs = 2L, fileSize = 200L),
+            ),
+        )
         val dao = database.thumbnailTaskDao()
-        dao.enqueueAll(
+        dao.enqueueInteractive(
             listOf(
                 ThumbnailTaskEntity(
                     filePath = "/interactive.jpg",
-                    sourceVersion = "v1",
+                    sourceVersion = "1:100",
                     mediaType = "IMAGE",
                     priority = 100,
                 ),
+            ),
+        )
+        dao.enqueueAll(
+            listOf(
                 ThumbnailTaskEntity(
                     filePath = "/automatic.jpg",
-                    sourceVersion = "v1",
+                    sourceVersion = "2:200",
                     mediaType = "IMAGE",
                     scanId = scanId,
                 ),
@@ -814,14 +905,14 @@ class ScanRunDaoTest {
         val interactive = dao.claimInteractiveBatch(1L, 10, "thumb-ui", 10_000L)
         assertEquals(listOf("/interactive.jpg"), interactive.map { it.filePath })
         assertEquals(1, dao.releaseLease("thumb-ui", 2L))
-        val automatic = dao.claimAutomaticBatch(3L, 10, "thumb-bg", 10_000L)
+        val automatic = dao.claimAutomaticBatch(3L, 10, "thumb-bg", 10_000L, scanId)
         assertEquals(listOf("/automatic.jpg"), automatic.map { it.filePath })
         assertEquals(1, dao.countInteractiveActive())
         assertEquals(1, dao.countAutomaticRunnable())
     }
 
     @Test
-    fun interruptedThumbnailRecoveryIsImmediateAndStrictlyLaneScoped() = runBlocking {
+    fun processBoundaryThumbnailRecoveryIsImmediateForBothLanes() = runBlocking {
         val scanId = "scan-thumbnail-interrupted"
         database.scanRunDao().insert(
             ScanRunEntity(
@@ -834,18 +925,28 @@ class ScanRunDaoTest {
                 enhancementState = EnhancementState.QUEUED.name,
             ),
         )
+        database.mediaDao().insertAll(
+            listOf(
+                media("/interactive-interrupted.jpg", modifiedAtMs = 3L, fileSize = 300L),
+                media("/automatic-interrupted.jpg", modifiedAtMs = 4L, fileSize = 400L),
+            ),
+        )
         val dao = database.thumbnailTaskDao()
-        dao.enqueueAll(
+        dao.enqueueInteractive(
             listOf(
                 ThumbnailTaskEntity(
                     filePath = "/interactive-interrupted.jpg",
-                    sourceVersion = "v1",
+                    sourceVersion = "3:300",
                     mediaType = "IMAGE",
                     priority = 100,
                 ),
+            ),
+        )
+        dao.enqueueAll(
+            listOf(
                 ThumbnailTaskEntity(
                     filePath = "/automatic-interrupted.jpg",
-                    sourceVersion = "v1",
+                    sourceVersion = "4:400",
                     mediaType = "IMAGE",
                     scanId = scanId,
                 ),
@@ -858,24 +959,318 @@ class ScanRunDaoTest {
         )
         assertEquals(
             listOf("/automatic-interrupted.jpg"),
-            dao.claimAutomaticBatch(1L, 10, "dead-bg", 100_000L).map { it.filePath },
+            dao.claimAutomaticBatch(1L, 10, "dead-bg", 100_000L, scanId).map { it.filePath },
         )
 
-        assertEquals(1, dao.recoverInterruptedAutomaticLeases(2L))
-        assertTrue(dao.claimInteractiveBatch(3L, 10, "must-not-steal-ui", 100L).isEmpty())
+        assertEquals(2, dao.recoverThumbnailProcessBoundary("new-process",2L))
         assertEquals(
             listOf("/automatic-interrupted.jpg"),
-            dao.claimAutomaticBatch(3L, 10, "recovered-bg", 100_000L).map { it.filePath },
+            dao.claimAutomaticBatch(3L, 10, "recovered-bg", 100_000L, scanId).map { it.filePath },
         )
-
-        assertEquals(1, dao.recoverInterruptedInteractiveLeases(4L))
-        assertTrue(dao.claimAutomaticBatch(5L, 10, "must-not-steal-bg", 100L).isEmpty())
         assertEquals(
             listOf("/interactive-interrupted.jpg"),
-            dao.claimInteractiveBatch(5L, 10, "recovered-ui", 100L).map { it.filePath },
+            dao.claimInteractiveBatch(3L, 10, "recovered-ui", 100L).map { it.filePath },
         )
         assertEquals(1, dao.releaseLease("recovered-bg", 6L))
         assertEquals(1, dao.releaseLease("recovered-ui", 6L))
+    }
+
+    @Test
+    fun fullThumbnailSeedPreservesLiveInteractiveLeaseAndGateConverges() = runBlocking {
+        val scanId = "scan-full-seed-live-ui"
+        val path = "/full-seed-live-ui.jpg"
+        val leaseToken = "full-seed-ui-owner"
+        database.mediaDao().insertAll(listOf(media(path, modifiedAtMs = 40L, fileSize = 400L)))
+        database.scanRunDao().insert(
+            ScanRunEntity(
+                scanId = scanId,
+                generation = 34L,
+                scanType = ScanRunEntity.TYPE_FULL,
+                status = ScanRunEntity.STATUS_COMPLETED,
+                coreScanState = CoreScanState.COMPLETED.name,
+                indexAvailability = IndexAvailability.PUBLISHED.name,
+                enhancementState = EnhancementState.QUEUED.name,
+            ),
+        )
+        val dao = database.thumbnailTaskDao()
+        dao.enqueueInteractive(
+            listOf(
+                ThumbnailTaskEntity(
+                    filePath = path,
+                    sourceVersion = "40:400",
+                    mediaType = MediaType.IMAGE.name,
+                    priority = ThumbnailSpec.PRIORITY_VISIBLE,
+                ),
+            ),
+        )
+        val live = dao.claimInteractiveBatch(10L, 1, leaseToken, 100_000L).single()
+
+        assertEquals(1, dao.seedAllGrid(scanId, ThumbnailSpec.PRIORITY_BACKGROUND, now = 20L))
+        val seeded = requireNotNull(dao.getById(live.taskId))
+        assertEquals(ThumbnailTaskEntity.STATUS_RUNNING, seeded.status)
+        assertNull(seeded.scanId)
+        assertEquals(leaseToken, seeded.leaseToken)
+        assertEquals(live.leaseUntil, seeded.leaseUntil)
+        assertEquals(leaseToken, dao.getById(live.taskId)?.leaseToken)
+
+        val blockedGate = dao.thumbnailGateSnapshot(scanId)
+        assertEquals(1, blockedGate.total)
+        assertEquals(0, blockedGate.terminal)
+        assertEquals(1, blockedGate.remaining)
+        assertEquals(1, dao.markDone(live.taskId, leaseToken, 22L))
+        val completedGate = dao.thumbnailGateSnapshot(scanId)
+        assertEquals(1, completedGate.total)
+        assertEquals(1, completedGate.terminal)
+        assertEquals(0, completedGate.remaining)
+    }
+
+    @Test
+    fun incrementalOutboxSeedPreservesLiveInteractiveLeaseAndGateConverges() = runBlocking {
+        val scanId = "scan-incremental-seed-live-ui"
+        val path = "/incremental-seed-live-ui.jpg"
+        val sourceVersion = "50:500"
+        val leaseToken = "incremental-seed-ui-owner"
+        database.mediaDao().insertAll(listOf(media(path, modifiedAtMs = 50L, fileSize = 500L)))
+        database.scanRunDao().insert(
+            ScanRunEntity(
+                scanId = scanId,
+                generation = 35L,
+                scanType = ScanRunEntity.TYPE_INCREMENTAL,
+                status = ScanRunEntity.STATUS_COMPLETED,
+                coreScanState = CoreScanState.COMPLETED.name,
+                indexAvailability = IndexAvailability.PUBLISHED.name,
+                enhancementState = EnhancementState.QUEUED.name,
+            ),
+        )
+        database.enhancementOutboxDao().enqueueAll(
+            listOf(
+                EnhancementOutboxEntity(
+                    scanId = scanId,
+                    profileId = "test-profile",
+                    filePath = path,
+                    sourceVersion = sourceVersion,
+                    mediaType = MediaType.IMAGE.name,
+                    pipelineScope = "test-scope",
+                    enqueueAnalysis = false,
+                    enqueueThumbnail = true,
+                    parentPath = "/",
+                ),
+            ),
+        )
+        val dao = database.thumbnailTaskDao()
+        dao.enqueueInteractive(
+            listOf(
+                ThumbnailTaskEntity(
+                    filePath = path,
+                    sourceVersion = sourceVersion,
+                    mediaType = MediaType.IMAGE.name,
+                    priority = ThumbnailSpec.PRIORITY_VISIBLE,
+                ),
+            ),
+        )
+        val live = dao.claimInteractiveBatch(10L, 1, leaseToken, 100_000L).single()
+
+        assertEquals(
+            1,
+            dao.seedGridFromOutbox(scanId, ThumbnailSpec.PRIORITY_BACKGROUND, now = 20L),
+        )
+        val seeded = requireNotNull(dao.getById(live.taskId))
+        assertEquals(ThumbnailTaskEntity.STATUS_RUNNING, seeded.status)
+        assertNull(seeded.scanId)
+        assertEquals(leaseToken, seeded.leaseToken)
+        assertEquals(live.leaseUntil, seeded.leaseUntil)
+        assertEquals(leaseToken, dao.getById(live.taskId)?.leaseToken)
+
+        val blockedGate = dao.thumbnailGateSnapshot(scanId)
+        assertEquals(1, blockedGate.total)
+        assertEquals(0, blockedGate.terminal)
+        assertEquals(1, blockedGate.remaining)
+
+        // Simulate process death after seeding. Only the interactive lane may recover this retained
+        // owner; the old token becomes invalid and the durable task is reclaimable by a successor.
+        assertTrue(dao.recoverThumbnailProcessBoundary("incremental-resume",22L) >= 1)
+        assertEquals(0, dao.markDone(live.taskId, leaseToken, 23L))
+        val resumed = dao.claimInteractiveBatch(
+            now = 24L,
+            limit = 1,
+            leaseToken = "incremental-seed-ui-resumed",
+            leaseDurationMs = 100_000L,
+        ).single()
+        assertEquals(live.taskId, resumed.taskId)
+        assertEquals(1, dao.markDone(resumed.taskId, "incremental-seed-ui-resumed", 25L))
+        val completedGate = dao.thumbnailGateSnapshot(scanId)
+        assertEquals(1, completedGate.total)
+        assertEquals(1, completedGate.terminal)
+        assertEquals(0, completedGate.remaining)
+    }
+
+    @Test
+    fun failedScanOwnedThumbnailRetryBecomesInteractiveClaimable() = runBlocking {
+        val scanId = "scan-failed-thumbnail"
+        database.scanRunDao().insert(
+            ScanRunEntity(
+                scanId = scanId,
+                generation = 32L,
+                scanType = ScanRunEntity.TYPE_INCREMENTAL,
+                status = ScanRunEntity.STATUS_COMPLETED,
+                coreScanState = CoreScanState.COMPLETED.name,
+                indexAvailability = IndexAvailability.PUBLISHED.name,
+                enhancementState = EnhancementState.QUEUED.name,
+            ),
+        )
+        val dao = database.thumbnailTaskDao()
+        dao.enqueueAll(
+            listOf(
+                ThumbnailTaskEntity(
+                    filePath = "/failed-thumbnail.jpg",
+                    sourceVersion = "v1",
+                    mediaType = "IMAGE",
+                    scanId = scanId,
+                ),
+            ),
+        )
+
+        val claimed = dao.claimAutomaticBatch(
+            now = 1L,
+            limit = 10,
+            leaseToken = "failed-thumbnail-lease",
+            leaseDurationMs = 10_000L,
+            scanId = scanId,
+        )
+        assertEquals(1, claimed.size)
+        assertEquals(
+            1,
+            dao.markFailed(
+                taskId = claimed.single().taskId,
+                leaseToken = "failed-thumbnail-lease",
+                error = "decode_failed",
+                nextRetryAt = 2L,
+                maxAttempts = 1,
+                now = 2L,
+            ),
+        )
+        assertEquals(1, dao.countFailed())
+
+        val retried = dao.retryAllFailedInteractive(
+            priority = ThumbnailSpec.PRIORITY_VISIBLE,
+            now = 3L,
+        )
+        assertEquals(1, retried.accepted)
+        assertTrue(retried.shouldWake)
+        assertEquals(0, dao.countFailed())
+        assertEquals(1, dao.countInteractiveClaimable(3L))
+        val interactive = dao.claimInteractiveBatch(
+            now = 3L,
+            limit = 10,
+            leaseToken = "retried-thumbnail-lease",
+            leaseDurationMs = 10_000L,
+        )
+        assertEquals(1, interactive.size)
+        assertNull(interactive.single().scanId)
+        assertEquals(ThumbnailSpec.PRIORITY_VISIBLE, interactive.single().priority)
+        assertEquals(1, dao.releaseLease("retried-thumbnail-lease", 4L))
+    }
+
+    @Test
+    fun failedScanOwnedAnalysisRetryBecomesUserClaimable() = runBlocking {
+        val scanId = "scan-failed-analysis"
+        database.scanRunDao().insert(
+            ScanRunEntity(
+                scanId = scanId,
+                generation = 33L,
+                scanType = ScanRunEntity.TYPE_INCREMENTAL,
+                status = ScanRunEntity.STATUS_COMPLETED,
+                coreScanState = CoreScanState.COMPLETED.name,
+                indexAvailability = IndexAvailability.PUBLISHED.name,
+                enhancementState = EnhancementState.QUEUED.name,
+            ),
+        )
+        val dao = database.analysisTaskDao()
+        val retiredScope = "pipeline:v1|plan=retired|policy=retired@1"
+        dao.enqueueAllForScan(
+            listOf(
+                AnalysisTaskEntity(
+                    filePath = "/failed-analysis.jpg",
+                    sourceVersion = "v1",
+                ),
+                AnalysisTaskEntity(
+                    filePath = "/retired-failed-analysis.jpg",
+                    sourceVersion = "v1",
+                    pipelineScope = retiredScope,
+                ),
+            ),
+            scanId,
+        )
+
+        val claimed = dao.claimBatch(
+            now = 1L,
+            limit = 10,
+            leaseToken = "failed-analysis-lease",
+            leaseDurationMs = 10_000L,
+            includeUserTasks = false,
+            admittedScanId = scanId,
+            admitAnyScan = false,
+        )
+        assertEquals(listOf("/failed-analysis.jpg"), claimed.map { it.filePath })
+        assertEquals(
+            1,
+            dao.markFailed(
+                taskIds = claimed.map { it.taskId },
+                leaseToken = "failed-analysis-lease",
+                error = "analysis_failed",
+                nextRetryAt = 2L,
+                maxAttempts = 1,
+                now = 2L,
+            ),
+        )
+        val retiredClaimed = dao.claimBatch(
+            now = 1L,
+            limit = 10,
+            leaseToken = "retired-failed-analysis-lease",
+            leaseDurationMs = 10_000L,
+            scope = retiredScope,
+            includeUserTasks = false,
+            admittedScanId = scanId,
+            admitAnyScan = false,
+        )
+        assertEquals(listOf("/retired-failed-analysis.jpg"), retiredClaimed.map { it.filePath })
+        assertEquals(
+            1,
+            dao.markFailed(
+                taskIds = retiredClaimed.map { it.taskId },
+                leaseToken = "retired-failed-analysis-lease",
+                error = "retired_analysis_failed",
+                nextRetryAt = 2L,
+                maxAttempts = 1,
+                now = 2L,
+            ),
+        )
+        assertEquals(2, dao.countFailed())
+
+        assertEquals(
+            1,
+            dao.retryFailedAsUserForScopes(
+                scopes = listOf(AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE),
+                priority = AnalysisTaskEntity.PRIORITY_USER,
+                now = 3L,
+            ),
+        )
+        assertEquals(1, dao.countFailed())
+        assertEquals(1, dao.countFailedForScopes(listOf(retiredScope)))
+        assertEquals(1, dao.countActiveUserTasks())
+        val user = dao.claimBatch(
+            now = 3L,
+            limit = 10,
+            leaseToken = "retried-analysis-lease",
+            leaseDurationMs = 10_000L,
+            includeUserTasks = true,
+            admittedScanId = null,
+            admitAnyScan = false,
+        )
+        assertEquals(listOf("/failed-analysis.jpg"), user.map { it.filePath })
+        assertNull(user.single().scanId)
+        assertEquals(AnalysisTaskEntity.PRIORITY_USER, user.single().priority)
+        assertEquals(1, dao.markDone(user.map { it.taskId }, "retried-analysis-lease", 4L))
     }
 
     private fun media(path: String, modifiedAtMs: Long, fileSize: Long) = MediaEntity(

@@ -51,6 +51,7 @@ import com.renyxin.localalbum.data.repo.AlbumRepository
 import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.data.repo.SettingsRepository
 import com.renyxin.localalbum.data.source.MediaSource
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -103,13 +104,27 @@ private const val PLUGIN_LOAD_RETRY_DELAY_MS = 1_000L
  */
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
-    private val processStartedAtMs = System.currentTimeMillis()
 
     val editionFeatures: EditionFeatures = EditionConfiguration.features
     val database = AppDatabase.getDatabase(context)
 
+    /** 本 Application 进程唯一的租约所有者前缀；容器发布给任何 Worker 前先完成旧进程恢复。 */
+    val thumbnailProcessEpoch: String = UUID.randomUUID().toString()
+
+    private val thumbnailColdStartRecovered: Unit = kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+        database.thumbnailTaskDao().recoverThumbnailProcessBoundary(
+            processEpoch = thumbnailProcessEpoch,
+            now = System.currentTimeMillis(),
+        )
+    }
+
     private val settingsStore = SettingsStore(context.applicationContext)
-    val settingsRepository = SettingsRepository(settingsStore)
+    val settingsRepository = SettingsRepository(settingsStore) { reason ->
+        // The callback runs only after construction, when a user actually changes scan scope.
+        // Wake resumes an already-authorized initial scan, but NEEDS_REBUILD remains user-gated.
+        libraryPipelineCoordinator.markScanScopeChanged(reason)
+        libraryPipelineCoordinator.wake()
+    }
 
     private val mediaSource = MediaSource(context.applicationContext)
 
@@ -379,22 +394,15 @@ class AppContainer(context: Context) {
     }
 
     /**
-     * Phase 1: 启动时若存在中断未完成的分析，自动续跑（跳过已完成阶段）。
-     * 仅在 [AnalysisResumePrefs.isPending] 为 true 时执行，避免每次冷启动都跑重负载。
-     * 应在 Application.onCreate 中、插件加载之后调用。
+     * Compatibility startup hook. The durable coordinator restores scan-owned work from the current
+     * stage and admits explicit null-scanId user tasks only while the library is idle.
      */
     fun maybeResumeAnalysis() {
         appScope.launch {
             try {
-                // Only runs created by an earlier process are stale. This avoids racing a
-                // WorkManager-triggered scan that starts during Application initialization.
-                database.scanRunDao().abortStaleRunning(
-                    now = System.currentTimeMillis(),
-                    startedBefore = processStartedAtMs,
-                )
-                albumRepository.resumeAnalysisIfNeeded()
+                libraryPipelineCoordinator.wake()
             } catch (e: Exception) {
-                android.util.Log.e("AppContainer", "续跑分析失败", e)
+                android.util.Log.e("AppContainer", "续跑持久图库流水线失败", e)
             }
         }
     }
@@ -576,10 +584,18 @@ class AppContainer(context: Context) {
         android.util.Log.i("AppContainer", "后台协程资源已释放")
     }
 
+    val thumbnailWakeDispatcher = com.renyxin.localalbum.data.repo.ThumbnailWakeDispatcher(
+        context = appContext,
+        taskDao = database.thumbnailTaskDao(),
+        scope = appScope,
+        processEpoch = thumbnailProcessEpoch.also { thumbnailColdStartRecovered },
+    )
+
     private val thumbnailScheduler = com.renyxin.localalbum.data.repo.ThumbnailScheduler(
         context = appContext,
         taskDao = database.thumbnailTaskDao(),
         cacheDao = database.thumbnailCacheDao(),
+        dispatcher = thumbnailWakeDispatcher,
     )
 
     val mediaDeletionCoordinator = com.renyxin.localalbum.data.repo.MediaDeletionCoordinator(
@@ -611,6 +627,13 @@ class AppContainer(context: Context) {
         mediaDeletionCoordinator = mediaDeletionCoordinator,
     )
 
+    val libraryPipelineCoordinator = com.renyxin.localalbum.data.repo.LibraryPipelineCoordinator(
+        context = appContext,
+        database = database,
+        indexer = hybridIndexer,
+        analysisPipeline = { pluginAnalysisPipeline },
+    )
+
     val albumRepository = AlbumRepository(
         settingsRepository = settingsRepository,
         mediaDao = database.mediaDao(),
@@ -631,6 +654,7 @@ class AppContainer(context: Context) {
             },
         ),
         hybridIndexer = hybridIndexer,
+        libraryPipelineCoordinator = libraryPipelineCoordinator,
         thumbnailScheduler = thumbnailScheduler,
         deletionService = deletionService,
         mediaDeletionCoordinator = mediaDeletionCoordinator,
@@ -641,11 +665,6 @@ class AppContainer(context: Context) {
         } else {
             null
         },
-        postRestoreTaskPolicy = com.renyxin.localalbum.data.backup.PostRestoreTaskPolicy(
-            profileId = editionFeatures.editionId,
-            pipelineScope = pluginAnalysisPipeline.pipelineScope,
-            enqueueAutomaticAnalysis = pluginAnalysisPipeline.requiredStageIds.isNotEmpty(),
-        ),
         allowFaceClusterMaintenance = editionFeatures.allowFaceClusterMaintenance,
         context = appContext,
     )
@@ -683,9 +702,8 @@ class AppContainer(context: Context) {
      * 注册 MediaStore ContentObserver，将图片/视频变更导入增量扫描链路。
      *
      * 回调契约（顺序不可换）：先把变更集持久化到 Room（[HybridIndexer.recordMediaChanges]），
-     * 再调度 [com.renyxin.localalbum.data.worker.ScanWorker]，最后尝试空闲时的即时增量重扫。
-     * 「先持久化」保证扫描锁忙或进程被杀时变更集不丢失，下次启动由
-     * [maybeResumePendingScanChanges] 恢复。
+     * 再通知持久协调器。若缩略图或分析正在运行，通知不会追加任何 Worker，只让 journal
+     * 等待当前阶段完整结束；「先持久化」保证进程被杀时变更集不丢失。
      *
      * 生命周期：由 `LocalAlbumApplication.onCreate` 与每次回前台（首个 Activity onStart）调用；
      * 重复注册会被 [HybridIndexer.registerContentObserver] 内部拒绝；所有 Activity 停止时
@@ -694,42 +712,29 @@ class AppContainer(context: Context) {
     fun registerContentObserver() {
         hybridIndexer.registerContentObserver(onChanges = { changes ->
             appScope.launch {
-                // Persist first: a busy scan lock or process death must not discard the changed set.
+                // Persist first. Busy stages do not receive another WorkRequest; the journal waits.
                 hybridIndexer.recordMediaChanges(changes)
-                com.renyxin.localalbum.data.worker.ScanWorker.schedule(appContext)
-                albumRepository.incrementalRescanIfIdle()
+                libraryPipelineCoordinator.onMediaChangesRecorded()
             }
         })
     }
 
     /**
-     * 进程重启后的启动恢复入口（`LocalAlbumApplication.onCreate` 中调用）。
+     * 进程重启后的唯一恢复入口（`LocalAlbumApplication.onCreate` 中调用）。
      *
-     * 恢复顺序契约：
-     * 1. 若存在待和解快照或未确认的变更集，调度 ScanWorker；
-     * 2. 将 PREEMPTED（被抢占的瞬时态）增强收敛回可续跑态——用户主动 PAUSED 不在此触碰；
-     * 3. 若配置了 retired policy scope（lite v2 停用旧自动 Scene/Quality），先结算
-     *    未决的旧 scope 任务，否则它们会永远 PENDING 并卡住 EnhancementState 的终态；
-     *    结算需持有自动增强资源闸（EnhancementResourceGate），拿不到则本轮放弃（等下次启动）；
-     * 4. 逐条恢复各持久化增强队列：enhancement outbox → 分析任务 → 自动/交互缩略图任务。
-     *
-     * 幂等性：所有检查均为「存在才调度」，可安全地在每次冷启动重复调用。
+     * 旧版本策略任务只做一次兼容性数据库收敛；之后只唤醒持久图库协调器。协调器根据
+     * `library_pipeline.stage` 恢复同一扫描、缩略图或识别阶段，禁止启动代码直接唤醒任意
+     * 自动队列并绕过阶段门禁。重复调用完全幂等，不会创建新的完整扫描。
      */
     fun maybeResumePendingScanChanges() {
         appScope.launch {
-            if (hybridIndexer.hasPendingReconciliation() || hybridIndexer.hasOutstandingMediaChanges()) {
-                com.renyxin.localalbum.data.worker.ScanWorker.schedule(appContext)
-            }
-            // A process can die after core preemption was persisted but before that core attempt
-            // reaches its cleanup path. PREEMPTED is transient; user PAUSED is intentionally not
-            // touched here.
-            database.scanRunDao().resumePreemptedEnhancements()
+            libraryPipelineCoordinator.ensureState()
+            settingsRepository.replayPendingScanScopeChange()
             // Policy v2 disables unapproved Lite automatic Scene/Quality. Converge v1 tasks before
-            // deciding whether an AnalysisWorker is still needed; otherwise an unclaimable old
-            // scope would remain PENDING forever and keep EnhancementState non-terminal.
+            // the persisted stage resumes; otherwise retired tasks can remain pending forever.
             if (pluginAnalysisPipeline.retiredAutomaticScopeSelectors.isNotEmpty()) {
                 val unsettledScanIds = database.scanRunDao().getUnsettledEnhancementScanIds().toSet()
-                val settled = EnhancementResourceGate.tryWithAutomaticEnhancement {
+                EnhancementResourceGate.tryWithAutomaticEnhancement {
                     val now = System.currentTimeMillis()
                     pluginAnalysisPipeline.retiredAutomaticScopeSelectors.forEach { selector ->
                         database.analysisTaskDao().supersedeRetiredPolicyScopes(
@@ -743,32 +748,8 @@ class AppContainer(context: Context) {
                     com.renyxin.localalbum.data.worker.EnhancementHandoffWorker
                         .settleEnhancementScans(database, unsettledScanIds, now)
                 }
-                if (settled == null) return@launch
             }
-            // Restore each durable enhancement queue independently. A process may die after
-            // handoff has drained the outbox but before analysis or thumbnail work finishes.
-            if (database.enhancementOutboxDao().hasRunnableEntries()) {
-                com.renyxin.localalbum.data.worker.EnhancementHandoffWorker.enqueue(appContext)
-            }
-            val analysisTaskDao = database.analysisTaskDao()
-            val hasScanOwnedAnalysis = analysisTaskDao.countActiveScanOwnedEnhancementTasks() > 0
-            val activeUserTasks = analysisTaskDao.countActiveUserTasks()
-            val hasResumableUserAnalysis = com.renyxin.localalbum.data.worker.AnalysisWorker
-                .userTaskAdmission(
-                    userPaused = AnalysisResumePrefs.isUserPaused(appContext),
-                    resumePending = AnalysisResumePrefs.isPending(appContext),
-                    activeUserTasks = activeUserTasks,
-                )
-            if (hasResumableUserAnalysis) AnalysisResumePrefs.setPending(appContext, true)
-            if (hasScanOwnedAnalysis || hasResumableUserAnalysis) {
-                com.renyxin.localalbum.data.worker.AnalysisWorker.enqueue(appContext)
-            }
-            if (database.thumbnailTaskDao().countAutomaticRunnable() > 0) {
-                com.renyxin.localalbum.data.worker.ThumbnailWorker.enqueueBackground(appContext)
-            }
-            if (database.thumbnailTaskDao().countInteractiveActive() > 0) {
-                com.renyxin.localalbum.data.worker.ThumbnailWorker.enqueue(appContext)
-            }
+            libraryPipelineCoordinator.wake()
         }
     }
 
@@ -786,22 +767,20 @@ class AppContainer(context: Context) {
     private var startupRestoreCompleted = false
 
     /**
-     * 首次前台严格执行“快照恢复 → 后台校准”，避免扫描先抢到互斥锁而阻塞相册首屏。
-     * 后续回前台仍沿用节流；恢复入口幂等，因此与 Compose 初始化并发也安全。
+     * Foreground resume only restores the durable stage. It never requests full reconciliation and
+     * never preempts an active thumbnail/analysis phase. Missed changes are handled by persisted
+     * MediaStore watermarks/journal; ambiguous coverage is exposed as NEEDS_REBUILD.
      */
     fun maybeRescanOnForeground() {
         val now = System.currentTimeMillis()
-        if (startupRestoreCompleted && now - lastForegroundRescanMs < FOREGROUND_RESCAN_THROTTLE_MS) {
-            android.util.Log.d("AppContainer", "回前台节流：距上次扫描不足 ${FOREGROUND_RESCAN_THROTTLE_MS}ms，跳过")
-            return
-        }
+        if (startupRestoreCompleted && now - lastForegroundRescanMs < FOREGROUND_RESCAN_THROTTLE_MS) return
         lastForegroundRescanMs = now
         appScope.launch {
             if (!startupRestoreCompleted) {
                 albumRepository.restoreFromDbIfNeeded()
                 startupRestoreCompleted = true
             }
-            albumRepository.reconcileIfIdle()
+            libraryPipelineCoordinator.wake()
         }
     }
 

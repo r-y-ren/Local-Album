@@ -3,284 +3,252 @@ package com.renyxin.localalbum.data.worker
 import android.content.Context
 import android.util.Log
 import androidx.work.CoroutineWorker
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import androidx.work.workDataOf
-import androidx.room.withTransaction
 import com.renyxin.localalbum.LocalAlbumApplication
 import com.renyxin.localalbum.core.concurrent.EnhancementResourceGate
-import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
-import com.renyxin.localalbum.data.db.dao.MediaDao
+import com.renyxin.localalbum.core.model.MediaType
+import com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity
+import com.renyxin.localalbum.data.db.AppDatabase
+import com.renyxin.localalbum.data.db.dao.ThumbnailPublicationResult
+import com.renyxin.localalbum.data.db.dao.ThumbnailTaskDao
 import com.renyxin.localalbum.data.db.entity.ThumbnailCacheEntryEntity
+import com.renyxin.localalbum.data.db.entity.ThumbnailLaneWakeEntity
 import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
 import com.renyxin.localalbum.data.repo.ThumbnailCacheTrimmer
+import com.renyxin.localalbum.data.repo.ThumbnailWakeDispatcher
 import com.renyxin.localalbum.data.source.MediaSource
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
-/**
- * 基于持久化任务、领取租约和失败退避的缩略图 Worker。
- *
- * 每次执行只处理有限任务；损坏文件超过重试阈值后进入 FAILED，Worker 必然收敛。
- */
-class ThumbnailWorker(
-    context: Context,
-    params: WorkerParameters,
-) : CoroutineWorker(context, params) {
+/** 固定双 lane pump；任务 level、延迟和运行租约全部由 Room 保存。 */
+class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context,params) {
+    override suspend fun doWork(): Result {
+        val app = applicationContext as? LocalAlbumApplication ?: return Result.failure()
+        val container = app.container
+        val database = container.database
+        val dao = database.thumbnailTaskDao()
+        val laneId = inputData.getString(KEY_LANE_ID) ?: return Result.success()
+        val revision = inputData.getLong(KEY_DISPATCH_REVISION,-1L)
+        val dispatchToken = inputData.getString(KEY_DISPATCH_TOKEN) ?: return Result.success()
+        val runToken = ThumbnailTaskDao.processOwnedToken(
+            container.thumbnailProcessEpoch,
+            UUID.randomUUID().toString(),
+        )
+        val now = System.currentTimeMillis()
+
+        // 必须先消费 exact ENQUEUED token；通用 level repair 会回收过期投递并清 token，
+        // 若放在 CAS 前会把当前合法 Work 自己变成 stale。
+        if (dao.startRun(
+                laneId,revision,dispatchToken,runToken,now + RUN_LEASE_MS,now,
+            ) != 1
+        ) return Result.success()
+        // CAS 成功后再做幂等 repair。RUNNING lease 会保护当前 run token，同时回收过期 task lease。
+        dao.recomputeLaneLevel(laneId,now)
+
+        var processed = 0
+        var failed = 0
+        return try {
+            val admittedScanId = if (laneId == ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID) {
+                database.libraryPipelineDao().get()?.takeIf { pipeline ->
+                    pipeline.stage in setOf(
+                        "INITIAL_THUMBNAILS","INCREMENTAL_THUMBNAILS","REBUILD_THUMBNAILS",
+                    )
+                }?.activeRunId
+            } else null
+            if (laneId == ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID && admittedScanId == null) {
+                finalize(database,laneId,runToken,container)
+                return Result.success()
+            }
+            var batches = 0
+            while (batches < MAX_BATCHES_PER_RUN && !isStopped) {
+                val batchWork: suspend () -> Boolean = {
+                    val batchNow = System.currentTimeMillis()
+                    dao.renewRunLease(laneId,runToken,batchNow + RUN_LEASE_MS,batchNow)
+                    val leaseToken = ThumbnailTaskDao.processOwnedToken(
+                        container.thumbnailProcessEpoch,
+                        UUID.randomUUID().toString(),
+                    )
+                    val tasks = dao.claimLaneBatch(
+                        laneId,batchNow,BATCH_SIZE,leaseToken,TASK_LEASE_MS,
+                    ).let { claimed ->
+                        if (admittedScanId == null) claimed else claimed.filter { it.scanId == admittedScanId }
+                    }
+                    if (tasks.isEmpty()) false else {
+                        try {
+                            tasks.forEach { task ->
+                                val error = processTask(task,leaseToken,database,MediaSource(applicationContext))
+                                if (error == null) processed++ else {
+                                    val completed = System.currentTimeMillis()
+                                    dao.markFailed(
+                                        task.taskId,leaseToken,error.take(MAX_ERROR_LENGTH),
+                                        completed + retryDelayMs(task.attemptCount),MAX_ATTEMPTS,completed,
+                                    )
+                                    failed++
+                                }
+                            }
+                        } catch (cancelled: CancellationException) {
+                            withContext(NonCancellable) { dao.releaseLease(leaseToken,System.currentTimeMillis()) }
+                            throw cancelled
+                        }
+                        true
+                    }
+                }
+                val completed = if (laneId == ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID) {
+                    if (EnhancementResourceGate.isCoreRequested) false
+                    else EnhancementResourceGate.tryWithAutomaticEnhancement { batchWork() } ?: false
+                } else {
+                    EnhancementResourceGate.withInteractiveThumbnail { batchWork() }
+                }
+                if (!completed) break
+                batches++
+            }
+            val final = finalize(database,laneId,runToken,container)
+            Log.i(TAG,"lane=$laneId processed=$processed failed=$failed next=${final?.deliveryState}")
+            // finalize 写回 PENDING/DELAYED 后仅 kick 一次；业务 retry 不使用 Result.retry。
+            if (final?.deliveryState in setOf(
+                    ThumbnailLaneWakeEntity.STATE_PENDING,
+                    ThumbnailLaneWakeEntity.STATE_DELAYED,
+                )
+            ) container.thumbnailWakeDispatcher.kick(laneId)
+            Result.success()
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) {
+                // batch 内层已释放当前 task token；这里 exact finalize lane，覆盖闸门等待或
+                // batch 间取消，确保同进程取消不会留下 RUNNING zombie。
+                val final = dao.finalizeRun(laneId,runToken,System.currentTimeMillis())
+                if (final?.deliveryState != ThumbnailLaneWakeEntity.STATE_QUIESCENT) {
+                    container.thumbnailWakeDispatcher.kick(laneId)
+                }
+            }
+            throw cancelled
+        } catch (error: Throwable) {
+            Log.e(TAG,"thumbnail pump failed",error)
+            val final = withContext(NonCancellable) {
+                dao.finalizeRun(laneId,runToken,System.currentTimeMillis())
+            }
+            if (final?.deliveryState != ThumbnailLaneWakeEntity.STATE_QUIESCENT) {
+                container.thumbnailWakeDispatcher.kick(laneId)
+            }
+            Result.success()
+        }
+    }
+
+    private suspend fun finalize(
+        database: AppDatabase,
+        laneId: String,
+        runToken: String,
+        container: com.renyxin.localalbum.AppContainer,
+    ): ThumbnailLaneWakeEntity? {
+        ThumbnailCacheTrimmer(database.thumbnailCacheDao()).trim()
+        if (laneId == ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID) {
+            database.libraryPipelineDao().get()?.activeRunId?.let {
+                container.libraryPipelineCoordinator.onThumbnailQueueChanged(it)
+            }
+        } else {
+            container.libraryPipelineCoordinator.onInteractiveThumbnailQueueChanged()
+        }
+        return database.thumbnailTaskDao().finalizeRun(laneId,runToken,System.currentTimeMillis())
+    }
+
+    /** null 成功；错误摘要不含隐私路径。 */
+    private suspend fun processTask(
+        task: ThumbnailTaskEntity,
+        leaseToken: String,
+        database: AppDatabase,
+        mediaSource: MediaSource,
+    ): String? {
+        val identity = runCatching {
+            ThumbnailIdentity(
+                task.filePath,task.mediaType,task.sourceVersion,task.sizeClass,task.formatVersion,
+            )
+        }.getOrElse { return "invalid_identity" }
+        val media = database.mediaDao().getByFilePathLight(task.filePath)
+        if (media == null || media.isTrashed || media.mediaType.name != task.mediaType) {
+            database.thumbnailTaskDao().supersedeClaimedTask(task.taskId,leaseToken)
+            return null
+        }
+        val cacheDao = database.thumbnailCacheDao()
+        val existing = cacheDao.getReadyExact(
+            identity.canonicalPath,identity.mediaType,identity.sourceVersion,
+            identity.sizeClass,identity.formatVersion,
+        )
+        if (existing != null && File(existing.path).isFile && File(existing.path).length() > 0L) {
+            val publication = database.thumbnailTaskDao().publishGeneratedThumbnail(
+                task,leaseToken,existing.copy(lastAccessAt=System.currentTimeMillis()),System.currentTimeMillis(),
+            )
+            return if (publication == ThumbnailPublicationResult.LEASE_LOST) null else null
+        }
+        val publicationNonce = UUID.randomUUID().toString()
+        var staged: String? = null
+        var installed: String? = null
+        return runCatching {
+            val generated = mediaSource.generateThumbnailSync(
+                File(identity.canonicalPath),MediaType.valueOf(identity.mediaType),identity,
+                task.taskId,leaseToken,publicationNonce,
+            ) ?: error("decode_or_source_validation_failed")
+            staged = generated.stagedPath
+            installed = mediaSource.installGeneratedThumbnail(
+                generated.stagedPath,identity,task.taskId,leaseToken,publicationNonce,
+            ) ?: error("atomic_install_failed")
+            val final = File(requireNotNull(installed))
+            val timestamp = System.currentTimeMillis()
+            val result = database.thumbnailTaskDao().publishGeneratedThumbnail(
+                task,leaseToken,
+                ThumbnailCacheEntryEntity(
+                    filePath=identity.canonicalPath,mediaType=identity.mediaType,
+                    sourceVersion=identity.sourceVersion,sizeClass=identity.sizeClass,
+                    formatVersion=identity.formatVersion,path=final.absolutePath,
+                    byteSize=final.length(),lastAccessAt=timestamp,createdAt=timestamp,
+                ),
+                timestamp,
+            )
+            if (result != ThumbnailPublicationResult.PUBLISHED) {
+                // final 是本 lease/private nonce 唯一拥有；失败删除不会触碰任何其他发布者。
+                final.delete()
+            }
+        }.onFailure {
+            staged?.let { path -> File(path).delete() }
+            installed?.let { path ->
+                val ready = cacheDao.getReadyExact(
+                    identity.canonicalPath,identity.mediaType,identity.sourceVersion,
+                    identity.sizeClass,identity.formatVersion,
+                )
+                if (ready?.path != path) File(path).delete()
+            }
+        }.exceptionOrNull()?.let { it.message ?: it::class.java.simpleName }
+    }
 
     companion object {
         private const val TAG = "ThumbnailWorker"
-        private const val INTERACTIVE_WORK_NAME = "thumbnail_interactive_queue"
-        private const val BACKGROUND_WORK_NAME = "thumbnail_background_queue"
+        const val KEY_LANE_ID = "thumbnail_lane_id"
+        const val KEY_DISPATCH_REVISION = "thumbnail_dispatch_revision"
+        const val KEY_DISPATCH_TOKEN = "thumbnail_dispatch_token"
         private const val BATCH_SIZE = 4
         private const val MAX_BATCHES_PER_RUN = 8
         private const val MAX_ATTEMPTS = 4
-        private const val LEASE_DURATION_MS = 10 * 60 * 1000L
-        private const val BASE_RETRY_DELAY_MS = 60 * 1000L
+        private const val TASK_LEASE_MS = 10 * 60_000L
+        private const val RUN_LEASE_MS = 12 * 60_000L
         private const val MAX_ERROR_LENGTH = 240
 
-        /** Interactive requests bypass the post-core delay but remain in one bounded queue. */
-        fun enqueue(context: Context) = enqueueInternal(context, background = false)
+        internal fun retryDelayMs(attemptCount: Int): Long =
+            60_000L * (1L shl (attemptCount - 1).coerceIn(0,10))
 
-        /** Automatic pre-generation is released only by the post-core handoff Worker. */
-        fun enqueueBackground(context: Context) = enqueueInternal(context, background = true)
-
-        private fun enqueueInternal(context: Context, background: Boolean) {
-            val request = OneTimeWorkRequestBuilder<ThumbnailWorker>()
-                .setInputData(workDataOf(KEY_BACKGROUND to background))
-                .apply {
-                    if (background) setInitialDelay(BACKGROUND_INITIAL_DELAY_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
-                }
-                .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(
-                if (background) BACKGROUND_WORK_NAME else INTERACTIVE_WORK_NAME,
-                ExistingWorkPolicy.APPEND_OR_REPLACE,
-                request,
-            )
-            Log.i(TAG, "缩略图持久任务已调度: background=$background")
+        /** Compatibility entry points now only kick fixed level-triggered lanes. */
+        fun enqueueBackground(context: Context) = dispatcher(context)?.kick(ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID)
+        fun appendBackgroundSuccessor(context: Context) = enqueueBackground(context)
+        suspend fun replayInteractiveWake(context: Context, @Suppress("UNUSED_PARAMETER") taskDao: com.renyxin.localalbum.data.db.dao.ThumbnailTaskDao): Boolean {
+            dispatcher(context)?.kick(ThumbnailLaneWakeEntity.INTERACTIVE_LANE_ID)
+            return true
         }
-
-        internal fun retryDelayMs(attemptCount: Int): Long {
-            val exponent = (attemptCount - 1).coerceIn(0, 10)
-            return BASE_RETRY_DELAY_MS * (1L shl exponent)
-        }
-
-        private const val KEY_BACKGROUND = "background"
-        private const val BACKGROUND_INITIAL_DELAY_MS = 2_000L
-        private const val INTERACTIVE_BATCH_SIZE = 2
-
         fun cancelBackground(context: Context) {
-            WorkManager.getInstance(context.applicationContext).cancelUniqueWork(BACKGROUND_WORK_NAME)
+            WorkManager.getInstance(context.applicationContext)
+                .cancelUniqueWork(ThumbnailWakeDispatcher.AUTOMATIC_WORK_NAME)
         }
-    }
-
-    override suspend fun doWork(): Result {
-        val app = applicationContext as? LocalAlbumApplication ?: return Result.failure()
-        val database = app.container.database
-        val mediaDao = database.mediaDao()
-        val taskDao = database.thumbnailTaskDao()
-        val cacheDao = database.thumbnailCacheDao()
-        val mediaSource = MediaSource(applicationContext)
-        val background = inputData.getBoolean(KEY_BACKGROUND, false)
-
-        return try {
-            val coreActive = app.container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested
-            // Visible tasks are allowed through a separate one-permit lane. Automatic scan-owned
-            // tasks must wait for the strict core/automatic barrier.
-            if (background && coreActive) return Result.retry()
-            val touchedScanIds = linkedSetOf<String>()
-            var processed = 0
-            var failed = 0
-            var batches = 0
-            var interruptedLaneLeasesRecovered = false
-
-            while (batches < MAX_BATCHES_PER_RUN) {
-                if (isStopped) break
-                val runBatch: suspend () -> Boolean = runBatch@{
-                    val now = System.currentTimeMillis()
-                    // This closure runs only after automatic-lane admission. A RUNNING scan-owned
-                    // lease therefore belongs to an interrupted process, while independent
-                    // interactive leases remain untouched.
-                    if (!interruptedLaneLeasesRecovered) {
-                        if (background) {
-                            taskDao.recoverInterruptedAutomaticLeases(now)
-                        } else {
-                            taskDao.recoverInterruptedInteractiveLeases(now)
-                        }
-                        interruptedLaneLeasesRecovered = true
-                    }
-                    val leaseToken = UUID.randomUUID().toString()
-                    val tasks = if (background) {
-                        taskDao.claimAutomaticBatch(
-                            now = now,
-                            limit = BATCH_SIZE,
-                            leaseToken = leaseToken,
-                            leaseDurationMs = LEASE_DURATION_MS,
-                        )
-                    } else {
-                        taskDao.claimInteractiveBatch(
-                            now = now,
-                            limit = INTERACTIVE_BATCH_SIZE,
-                            leaseToken = leaseToken,
-                            leaseDurationMs = LEASE_DURATION_MS,
-                        )
-                    }
-                    if (tasks.isEmpty()) return@runBatch false
-                    if (background) touchedScanIds += tasks.mapNotNull { it.scanId }
-                    try {
-                        tasks.forEach { task ->
-                            val outcome = processTask(task, database, mediaDao, mediaSource)
-                            val completedAt = System.currentTimeMillis()
-                            if (outcome == null) {
-                                taskDao.markDone(task.taskId, leaseToken, completedAt)
-                                processed++
-                            } else {
-                                val nextRetryAt = completedAt + retryDelayMs(task.attemptCount)
-                                taskDao.markFailed(
-                                    taskId = task.taskId,
-                                    leaseToken = leaseToken,
-                                    error = outcome.take(MAX_ERROR_LENGTH),
-                                    nextRetryAt = nextRetryAt,
-                                    maxAttempts = MAX_ATTEMPTS,
-                                    now = completedAt,
-                                )
-                                failed++
-                            }
-                        }
-                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                            taskDao.releaseLease(leaseToken, System.currentTimeMillis())
-                        }
-                        throw cancelled
-                    }
-                    true
-                }
-                val completedBatch = if (background) {
-                    EnhancementResourceGate.tryWithAutomaticEnhancement { runBatch() }
-                } else {
-                    EnhancementResourceGate.withInteractiveThumbnail { runBatch() }
-                }
-                if (completedBatch == null || completedBatch == false) break
-                batches++
-            }
-
-            val finalizeWork: suspend () -> Result = {
-                // Terminal state, cache trimming and active-count reads touch tables replaced by an
-                // import. Keep them in the same kind of lane as task processing.
-                finalizeEnhancementStates(database, touchedScanIds)
-                val evicted = ThumbnailCacheTrimmer(cacheDao).trim()
-                val active = if (background) {
-                    taskDao.countAutomaticRunnable()
-                } else {
-                    taskDao.countInteractiveActive()
-                }
-                Log.i(TAG, "缩略图任务完成: 成功 $processed，失败 $failed，可运行 $active，清理 $evicted")
-                if (active > 0) {
-                    // unique work 在当前 Worker 结束前仍处于占用状态，不能靠再次 enqueue 续跑；
-                    // Result.retry 由 WorkManager 在退避后可靠恢复队列。
-                    Result.retry()
-                } else {
-                    Result.success(
-                        workDataOf(
-                            "processed" to processed,
-                            "failed" to failed,
-                            "active" to active,
-                            "evicted" to evicted,
-                        ),
-                    )
-                }
-            }
-            if (background) {
-                EnhancementResourceGate.tryWithAutomaticEnhancement { finalizeWork() }
-                    ?: Result.retry()
-            } else {
-                EnhancementResourceGate.withInteractiveThumbnail { finalizeWork() }
-            }
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (e: Exception) {
-            Log.e(TAG, "缩略图任务执行失败", e)
-            Result.retry()
-        }
-    }
-
-    private suspend fun finalizeEnhancementStates(
-        database: com.renyxin.localalbum.data.db.AppDatabase,
-        scanIds: Set<String>,
-    ) {
-        val now = System.currentTimeMillis()
-        scanIds.forEach { scanId ->
-            val active = database.thumbnailTaskDao().countActiveForScan(scanId) +
-                database.analysisTaskDao().countActiveForScan(scanId) +
-                database.enhancementOutboxDao().countActiveForScan(scanId)
-            if (active == 0) {
-                val failed = database.thumbnailTaskDao().countFailedForScan(scanId) +
-                    database.analysisTaskDao().countFailedForScan(scanId) +
-                    database.enhancementOutboxDao().countFailedForScan(scanId)
-                database.scanRunDao().markEnhancementTerminal(
-                    scanId = scanId,
-                    state = if (failed > 0) {
-                        com.renyxin.localalbum.data.db.entity.EnhancementState.COMPLETED_WITH_FAILURES.name
-                    } else {
-                        com.renyxin.localalbum.data.db.entity.EnhancementState.COMPLETED.name
-                    },
-                    now = now,
-                )
-            }
-        }
-    }
-
-    /** 返回 null 表示成功，否则返回不含完整隐私路径的错误摘要。 */
-    private suspend fun processTask(
-        task: ThumbnailTaskEntity,
-        database: com.renyxin.localalbum.data.db.AppDatabase,
-        mediaDao: MediaDao,
-        mediaSource: MediaSource,
-    ): String? {
-        val file = File(task.filePath)
-        if (!file.exists() || !file.isFile) return "source_missing"
-        val media = mediaDao.getByFilePathLight(task.filePath) ?: return null
-        val currentVersion = ThumbnailSpec.sourceVersion(media.modifiedAtMs, media.fileSize)
-        if (currentVersion != task.sourceVersion || media.isTrashed) return null
-        val cacheDao = database.thumbnailCacheDao()
-        val existing = cacheDao.getReady(task.filePath, task.sizeClass, task.sourceVersion)
-        if (existing != null &&
-            File(existing.path).isFile &&
-            ThumbnailSpec.isCurrentCachePath(task.sizeClass, existing.path)
-        ) {
-            cacheDao.touchThrottled(
-                task.filePath,
-                task.sizeClass,
-                task.sourceVersion,
-                System.currentTimeMillis(),
-                System.currentTimeMillis() - ThumbnailSpec.TOUCH_THROTTLE_MS,
-            )
-            return null
-        }
-        return runCatching {
-            val thumbnail = mediaSource.generateThumbnailSync(file, media.mediaType, task.sizeClass)
-                ?: error("decode_failed")
-            val generated = File(thumbnail)
-            val now = System.currentTimeMillis()
-            database.withTransaction {
-                cacheDao.upsert(
-                    ThumbnailCacheEntryEntity(
-                        filePath = task.filePath,
-                        sizeClass = task.sizeClass,
-                        sourceVersion = task.sourceVersion,
-                        path = thumbnail,
-                        byteSize = generated.length(),
-                        lastAccessAt = now,
-                        createdAt = now,
-                    ),
-                )
-                // 旧字段固定代表 grid；preview 绝不覆盖该语义。
-                if (task.sizeClass == ThumbnailSpec.SIZE_GRID) {
-                    mediaDao.updateThumbnail(task.filePath, thumbnail)
-                }
-            }
-        }.exceptionOrNull()?.let { it.message ?: it::class.java.simpleName }
+        private fun dispatcher(context: Context): com.renyxin.localalbum.data.repo.ThumbnailWakeDispatcher? =
+            (context.applicationContext as? LocalAlbumApplication)?.container?.thumbnailWakeDispatcher
     }
 }

@@ -1,5 +1,8 @@
 package com.renyxin.localalbum.ui
 
+import com.renyxin.localalbum.data.db.entity.LibraryPipelineStage
+import com.renyxin.localalbum.data.db.entity.LibraryPipelineState
+import com.renyxin.localalbum.ui.components.ProgressOverlayMode
 import com.renyxin.localalbum.ui.components.resolveProgressOverlayMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -37,53 +40,119 @@ class ProgressUiVisibilityTest {
         )
     }
 
-    // ---- resolveProgressOverlayMode 三态判定 ----
-
     @Test
-    fun `analysis running takes priority over scan and waiting`() {
+    fun `real automatic analysis running shows analysis card`() {
         assertEquals(
-            com.renyxin.localalbum.ui.components.ProgressOverlayMode.ANALYSIS,
+            ProgressOverlayMode.ANALYSIS,
             resolveProgressOverlayMode(
+                pipelineState = pipeline(LibraryPipelineStage.INITIAL_ANALYSIS, hasBaseline = true),
                 analysisRunning = true,
-                scanActive = true,
-                analysisPending = true,
             ),
         )
     }
 
     @Test
-    fun `scan active shows scan card when pipeline idle`() {
+    fun `ready stage keeps explicit user analysis progress visible`() {
         assertEquals(
-            com.renyxin.localalbum.ui.components.ProgressOverlayMode.SCAN,
+            ProgressOverlayMode.ANALYSIS,
             resolveProgressOverlayMode(
-                analysisRunning = false,
-                scanActive = true,
-                analysisPending = true,
+                pipelineState = pipeline(LibraryPipelineStage.READY, hasBaseline = true),
+                analysisRunning = true,
             ),
         )
     }
 
     @Test
-    fun `pending enhancement keeps overlay visible between batches`() {
+    fun `failed stage keeps explicit retry analysis progress visible`() {
         assertEquals(
-            com.renyxin.localalbum.ui.components.ProgressOverlayMode.WAITING,
+            ProgressOverlayMode.ANALYSIS,
             resolveProgressOverlayMode(
-                analysisRunning = false,
-                scanActive = false,
-                analysisPending = true,
+                pipelineState = pipeline(LibraryPipelineStage.FAILED, hasBaseline = true),
+                analysisRunning = true,
             ),
         )
     }
 
     @Test
-    fun `nothing active hides overlay`() {
+    fun `real analysis batch gap shows waiting card`() {
         assertEquals(
-            com.renyxin.localalbum.ui.components.ProgressOverlayMode.HIDDEN,
+            ProgressOverlayMode.WAITING,
             resolveProgressOverlayMode(
+                pipelineState = pipeline(LibraryPipelineStage.INCREMENTAL_ANALYSIS, hasBaseline = true),
                 analysisRunning = false,
-                scanActive = false,
-                analysisPending = false,
             ),
         )
     }
+
+    @Test
+    fun `initial thumbnails never masquerade as AI waiting`() {
+        assertEquals(
+            ProgressOverlayMode.THUMBNAILS,
+            resolveProgressOverlayMode(
+                pipelineState = pipeline(LibraryPipelineStage.INITIAL_THUMBNAILS, hasBaseline = false),
+                analysisRunning = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `stale analysis running cannot override thumbnail stage`() {
+        assertEquals(
+            ProgressOverlayMode.THUMBNAILS,
+            resolveProgressOverlayMode(
+                pipelineState = pipeline(LibraryPipelineStage.INCREMENTAL_THUMBNAILS, hasBaseline = true),
+                analysisRunning = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `stale analysis running cannot override publish stage`() {
+        assertEquals(
+            ProgressOverlayMode.THUMBNAILS,
+            resolveProgressOverlayMode(
+                pipelineState = pipeline(LibraryPipelineStage.REBUILD_PUBLISH, hasBaseline = true),
+                analysisRunning = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `scan stage takes its meaning from durable pipeline`() {
+        assertEquals(
+            ProgressOverlayMode.SCAN,
+            resolveProgressOverlayMode(
+                pipelineState = pipeline(LibraryPipelineStage.REBUILD_SCAN, hasBaseline = true),
+                analysisRunning = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `lite analysis transition with empty automatic plan never shows AI waiting`() {
+        listOf(
+            LibraryPipelineStage.INITIAL_ANALYSIS,
+            LibraryPipelineStage.INCREMENTAL_ANALYSIS,
+            LibraryPipelineStage.REBUILD_ANALYSIS,
+        ).forEach { stage ->
+            assertEquals(
+                stage.name,
+                ProgressOverlayMode.HIDDEN,
+                resolveProgressOverlayMode(
+                    pipelineState = pipeline(stage, hasBaseline = true),
+                    analysisRunning = false,
+                    automaticAnalysisEnabled = false,
+                ),
+            )
+        }
+    }
+
+    private fun pipeline(
+        stage: LibraryPipelineStage,
+        hasBaseline: Boolean,
+    ) = LibraryPipelineState(
+        stage = stage,
+        hasPublishedBaseline = hasBaseline,
+        publishedGeneration = if (hasBaseline) 1L else 0L,
+    )
 }

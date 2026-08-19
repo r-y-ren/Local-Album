@@ -22,7 +22,6 @@ import com.renyxin.localalbum.data.db.entity.ScanRunEntity
 import com.renyxin.localalbum.data.db.entity.ScanStagingEntity
 import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.worker.AnalysisWorker
-import com.renyxin.localalbum.data.worker.EnhancementHandoffWorker
 import com.renyxin.localalbum.data.db.entity.MediaFts
 import com.renyxin.localalbum.data.repo.DeletionFailurePolicy
 import com.renyxin.localalbum.data.source.MediaSource
@@ -107,10 +106,8 @@ class HybridIndexer(
      *    [IllegalStateException]——核心终态提交绝不容忍静默丢失；
      * 2. 依次记录 [ScanMilestone.SNAPSHOT_PUBLISHED] 与 [ScanMilestone.CORE_SCAN_COMPLETED]
      *    两段 telemetry 里程碑（elapsedMs 均相对 result.startedAtMs）；
-     * 3. 若本次扫描有增强 outbox 条目（result.enhancementOutboxCount > 0），标记增强已入队。
-     *    核心资源 gate 仍被持有时不提前启动 EnhancementHandoffWorker；由 gate 释放后的统一恢复
-     *    入口唤醒，避免首个 unique work 在正常核心互斥期间进入 WorkManager 失败退避。
-     *    非 gate 调用中的入队失败不回滚核心发布，持久 outbox 保持 PENDING，待恢复逻辑重试。
+     * 3. 若本次扫描有增强 outbox 条目，只标记持久增强已排队。这里绝不唤醒 handoff、
+     *    缩略图或分析 Worker；严格串行图库协调器会在对应持久阶段消费这些条目。
      *
      * @param result 本次扫描核心阶段的提交结果（scanId、起止计数、outbox 计数等）
      */
@@ -141,23 +138,11 @@ class HybridIndexer(
         )
         if (result.enhancementOutboxCount > 0) {
             requireScanRunDao().markEnhancementQueued(result.scanId)
-            if (EnhancementResourceGate.isCoreRequested) {
-                Log.i(
-                    TAG,
-                    "enhancement handoff deferred until core gate release: " +
-                        "scanIdHash=${result.scanId.hashCode()} outbox=${result.enhancementOutboxCount}",
-                )
-            } else {
-                try {
-                    EnhancementHandoffWorker.enqueue(context)
-                } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                    throw cancelled
-                } catch (error: Throwable) {
-                    // The durable outbox remains PENDING. A process restart/foreground resume can
-                    // enqueue the handoff Worker again without rolling core publication back.
-                    Log.e(TAG, "增强交接 Worker 入队失败，持久 outbox 保留待恢复", error)
-                }
-            }
+            Log.i(
+                TAG,
+                "enhancement handoff persisted for serialized pipeline: " +
+                    "scanIdHash=${result.scanId.hashCode()} outbox=${result.enhancementOutboxCount}",
+            )
         }
     }
 
@@ -280,9 +265,6 @@ class HybridIndexer(
         AnalysisWorker.publishQueueReplacement(context, hasRunnableTasks = runnable > 0)
     }
 
-    /** 启动时由 WorkManager 继续领取持久任务。 */
-    fun resumePendingAnalysis() = AnalysisWorker.enqueue(context)
-
     /** 当前已注册的 ContentObserver，用于注销时引用 */
     @Volatile
     private var registeredObserver: MediaContentObserver? = null
@@ -331,6 +313,16 @@ class HybridIndexer(
 
     suspend fun hasPendingReconciliation(): Boolean =
         requireMediaChangeDao().hasReconciliationHint(profileId)
+
+    suspend fun consumeReconciliationHintAsAdvisory(): Boolean {
+        val dao = requireMediaChangeDao()
+        val pending = dao.hasReconciliationHint(profileId)
+        if (pending) dao.clearReconciliationHint(profileId)
+        return pending
+    }
+
+    suspend fun countOutstandingMediaChanges(): Int =
+        requireMediaChangeDao().countOutstandingMediaChanges(profileId)
 
     suspend fun hasOutstandingMediaChanges(): Boolean =
         requireMediaChangeDao().hasOutstandingMediaChanges(profileId)
@@ -386,10 +378,11 @@ class HybridIndexer(
         allowNomedia: Boolean = false,
         ignorePatterns: List<String> = emptyList(),
         progress: ((processed: Int, total: Int) -> Unit)? = null,
+        reservedRun: ScanRunEntity? = null,
         onCoreReady: suspend (ScanCommitResult) -> Unit = { result -> finalizeCoreRun(result) },
     ): Int {
         val normalizedRoots = ScanRootPolicy.normalize(roots)
-        return executeScanRun(ScanRunEntity.TYPE_FULL, normalizedRoots) { scanId, generation, startedAtMs ->
+        return executeScanRun(ScanRunEntity.TYPE_FULL, normalizedRoots, reservedRun) { scanId, generation, startedAtMs ->
             val result = scanViaStaging(
                 scanType = ScanRunEntity.TYPE_FULL,
                 scanId = scanId,
@@ -410,10 +403,11 @@ class HybridIndexer(
         roots: List<String>,
         allowNomedia: Boolean = false,
         ignorePatterns: List<String> = emptyList(),
+        reservedRun: ScanRunEntity? = null,
         onCoreReady: suspend (ScanCommitResult) -> Unit = { result -> finalizeCoreRun(result) },
     ): IncrementalResult {
         val normalizedRoots = ScanRootPolicy.normalize(roots)
-        return executeScanRun(ScanRunEntity.TYPE_RECONCILIATION, normalizedRoots) {
+        return executeScanRun(ScanRunEntity.TYPE_RECONCILIATION, normalizedRoots, reservedRun) {
                 scanId, generation, startedAtMs ->
             val result = scanViaStaging(
                 scanType = ScanRunEntity.TYPE_RECONCILIATION,
@@ -440,10 +434,11 @@ class HybridIndexer(
         roots: List<String>,
         allowNomedia: Boolean = false,
         ignorePatterns: List<String> = emptyList(),
+        reservedRun: ScanRunEntity? = null,
         onCoreReady: suspend (ScanCommitResult) -> Unit = { result -> finalizeCoreRun(result) },
     ): IncrementalResult {
         val normalizedRoots = ScanRootPolicy.normalize(roots)
-        return executeScanRun(ScanRunEntity.TYPE_INCREMENTAL, normalizedRoots) {
+        return executeScanRun(ScanRunEntity.TYPE_INCREMENTAL, normalizedRoots, reservedRun) {
                 scanId, generation, startedAtMs ->
             val drained = drainChangedSet(
                 scanId = scanId,
@@ -545,6 +540,8 @@ class HybridIndexer(
                     generation = generation,
                     scanId = scanId,
                 )
+                // Ambiguous identities are persisted as a rebuild advisory. The pipeline never
+                // turns them into an automatic root traversal; only explicit rebuild may do that.
                 if (committed.reconciliationRequired) requestReconciliation()
                 inserted += committed.inserted
                 updated += committed.updated
@@ -834,7 +831,19 @@ class HybridIndexer(
             existing.isCorrupted != fresh.isCorrupted
 
     private fun sourceVersion(entity: MediaEntity): String =
-        "${entity.modifiedAtMs}:${entity.fileSize}"
+        com.renyxin.localalbum.core.thumbnail.SourceVersionCodec.encode(
+            entity.modifiedAtMs,
+            entity.fileSize,
+            entity.fingerprintHead,
+        )
+
+    internal fun thumbnailIdentityChanged(existing: MediaEntity, fresh: MediaEntity): Boolean =
+        com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity.canonicalizePath(existing.filePath) !=
+            com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity.canonicalizePath(fresh.filePath) ||
+            existing.mediaType != fresh.mediaType ||
+            existing.modifiedAtMs != fresh.modifiedAtMs ||
+            existing.fileSize != fresh.fileSize ||
+            existing.fingerprintHead != fresh.fingerprintHead
 
     private suspend fun scanViaStaging(
         scanType: String,
@@ -912,8 +921,13 @@ class HybridIndexer(
                         mediaType = indexed.identity.mediaType.name,
                         mediaStoreId = indexed.identity.mediaStoreId,
                         contentUri = indexed.identity.canonicalContentUri(),
-                        filePath = item.filePath,
-                        sourceVersion = "${item.modifiedAt.toEpochMilli()}:${item.fileSize}",
+                        filePath = com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity
+                            .canonicalizePath(item.filePath),
+                        sourceVersion = com.renyxin.localalbum.core.thumbnail.SourceVersionCodec.encode(
+                            item.modifiedAt.toEpochMilli(),
+                            item.fileSize,
+                            computeFingerprintHead(item.filePath),
+                        ),
                         observedAtMs = now,
                         scanGeneration = generation,
                     )
@@ -997,41 +1011,35 @@ class HybridIndexer(
         generation: Long,
         scanId: String,
     ): BatchCommitCount {
-        val fresh = items.map { it.toEntity() }
+        val fresh = items.map { item ->
+            item.toEntity().copy(
+                filePath = com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity
+                    .canonicalizePath(item.filePath),
+            )
+        }
         val paths = fresh.map { it.filePath }
         val existingByPath = mediaDao.getByFilePathsLight(paths).associateBy { it.filePath }
         val tombstones = deletionTombstoneDao?.getByPaths(paths).orEmpty().associateBy { it.filePath }
+        val identityChangedPaths = fresh.mapNotNull { entity ->
+            existingByPath[entity.filePath]
+                ?.takeIf { thumbnailIdentityChanged(it, entity) }
+                ?.filePath
+        }.toSet()
         val upserts = fresh.map { entity ->
             val existing = existingByPath[entity.filePath]
             val tombstone = tombstones[entity.filePath]
-            if (existing == null) entity.copy(
-                isTrashed = tombstone != null,
-                deletedAtMs = tombstone?.deletedAtMs ?: 0,
-                scanGeneration = generation,
-            ) else entity.copy(
-                isFavorite = existing.isFavorite,
-                isTrashed = existing.isTrashed,
-                thumbnailPath = existing.thumbnailPath,
-                sceneType = existing.sceneType,
-                perceptualHash = existing.perceptualHash,
-                ocrText = existing.ocrText,
-                qualityScore = existing.qualityScore,
-                deletedAtMs = existing.deletedAtMs,
-                isCorrupted = existing.isCorrupted,
-                faceClusterId = existing.faceClusterId,
-                scanGeneration = generation,
-            ).let { preserved ->
-                // active/completed tombstone 均代表尚未显式 restore 的用户删除意图。
-                if (tombstone == null) preserved else preserved.copy(
-                    isTrashed = true,
-                    deletedAtMs = maxOf(preserved.deletedAtMs, tombstone.deletedAtMs),
-                )
-            }
+            preserveIndexedState(
+                fresh = entity,
+                existing = existing,
+                tombstone = tombstone,
+                generation = generation,
+                clearRegenerable = entity.filePath in identityChangedPaths,
+            )
         }
         val insertedCount = upserts.count { existingByPath[it.filePath] == null }
         val changed = upserts.filter { entity ->
             val old = existingByPath[entity.filePath]
-            old == null || old.modifiedAtMs != entity.modifiedAtMs || old.fileSize != entity.fileSize || old.fingerprintHead != entity.fingerprintHead
+            old == null || thumbnailIdentityChanged(old, entity)
         }
         val affectedDirectoryPaths = changed.asSequence()
             .flatMap { entity ->
@@ -1046,7 +1054,13 @@ class HybridIndexer(
             .toCollection(linkedSetOf())
         val now = System.currentTimeMillis()
         suspend fun commit() {
-            if (changed.isNotEmpty()) analysisStateDao?.deleteByPaths(changed.map { it.filePath })
+            if (identityChangedPaths.isNotEmpty()) {
+                val invalidated = identityChangedPaths.toList()
+                analysisStateDao?.deleteByPaths(invalidated)
+                faceDao?.deleteByFilePaths(invalidated)
+                embeddingDao?.deleteByFilePaths(invalidated)
+                featureStoreDao?.deleteByFilePaths(invalidated)
+            }
             mediaDao.insertAll(upserts)
             mediaDao.deleteFtsEntries(upserts.map { it.filePath })
             mediaDao.insertFtsAll(upserts.map {
@@ -1081,15 +1095,36 @@ class HybridIndexer(
     private suspend fun <T> executeScanRun(
         scanType: String,
         roots: List<String>,
+        reservedRun: ScanRunEntity? = null,
         block: suspend (scanId: String, generation: Long, startedAtMs: Long) -> T,
     ): T = withContext(Dispatchers.IO) {
         validateScanRoots(roots)
         val dao = requireScanRunDao()
-        dao.abortStaleRunning(System.currentTimeMillis())
-        val now = System.currentTimeMillis()
-        val generation = maxOf(now, (dao.getMaxGeneration() ?: 0L) + 1L)
-        val scanId = java.util.UUID.randomUUID().toString()
-        val startedAtMs = System.currentTimeMillis()
+        val run = if (reservedRun == null) {
+            dao.abortStaleRunning(System.currentTimeMillis())
+            val now = System.currentTimeMillis()
+            ScanRunEntity(
+                scanId = java.util.UUID.randomUUID().toString(),
+                generation = maxOf(now, (dao.getMaxGeneration() ?: 0L) + 1L),
+                scanType = scanType,
+                startedAt = now,
+            ).also { created -> dao.insert(created) }
+        } else {
+            require(reservedRun.scanType == scanType) {
+                "Reserved scan type ${reservedRun.scanType} does not match $scanType"
+            }
+            check(
+                dao.resumeReservedCoreRun(
+                    reservedRun.scanId,
+                    reservedRun.generation,
+                    scanType,
+                ) == 1,
+            ) { "Reserved core run is not resumable: ${reservedRun.scanId}" }
+            reservedRun
+        }
+        val scanId = run.scanId
+        val generation = run.generation
+        val startedAtMs = run.startedAt
         scanTelemetry.record(
             ScanMeasurementEvent(
                 scanId = scanId,
@@ -1098,15 +1133,10 @@ class HybridIndexer(
                 elapsedMs = 0L,
             ),
         )
-        dao.insert(
-            ScanRunEntity(
-                scanId = scanId,
-                generation = generation,
-                scanType = scanType,
-            ),
-        )
         dao.markCoreState(scanId, com.renyxin.localalbum.data.db.entity.CoreScanState.DISCOVERING.name)
         try {
+            // Full/reconciliation enumeration is replayed idempotently under the same run identity.
+            // Incremental journal acknowledgements remain leased until publication and are likewise replay-safe.
             requireScanStagingDao().deleteByScanId(scanId)
             block(scanId, generation, startedAtMs)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -1116,7 +1146,8 @@ class HybridIndexer(
                 System.currentTimeMillis(),
                 "cancelled",
             )
-            requireScanStagingDao().deleteByScanId(scanId)
+            // Keep partial staging under the same reserved identity. Resume may replay enumeration
+            // idempotently and merge those rows instead of allocating another run/generation.
             throw cancelled
         } catch (error: Throwable) {
             dao.markTerminal(

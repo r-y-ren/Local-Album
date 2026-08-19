@@ -4,11 +4,14 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
-/** 持久化缩略图任务；唯一缓存键由 filePath、sizeClass 和 sourceVersion 组成。 */
+/** 持久化缩略图任务；唯一键严格等于完整 [ThumbnailIdentity]。 */
 @Entity(
     tableName = "thumbnail_tasks",
     indices = [
-        Index(value = ["filePath", "sizeClass", "sourceVersion"], unique = true),
+        Index(
+            value = ["filePath", "mediaType", "sourceVersion", "sizeClass", "formatVersion"],
+            unique = true,
+        ),
         Index(value = ["status", "nextRetryAt", "priority"]),
         Index(value = ["scanId", "status"]),
         Index(value = ["leaseUntil"]),
@@ -21,6 +24,7 @@ data class ThumbnailTaskEntity(
     val sizeClass: String = SIZE_GRID,
     val sourceVersion: String,
     val mediaType: String,
+    val formatVersion: Int = com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity.CURRENT_FORMAT_VERSION,
     val priority: Int = PRIORITY_BACKGROUND,
     val status: String = STATUS_PENDING,
     val attemptCount: Int = 0,

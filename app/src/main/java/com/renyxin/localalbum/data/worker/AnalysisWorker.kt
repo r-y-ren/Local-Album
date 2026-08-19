@@ -48,6 +48,10 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         val scanRunDao = database.scanRunDao()
         val pipeline = container.pluginAnalysisPipeline
         val claimableScopes = pipeline.claimableTaskScopes
+        val libraryState = database.libraryPipelineDao().get()
+        val libraryStage = com.renyxin.localalbum.data.db.entity.LibraryPipelineStage
+            .fromPersisted(libraryState?.stage.orEmpty())
+        val admittedScanId = libraryState?.activeRunId?.takeIf { libraryStage.isAnalysis }
         val requestedMode = AnalysisSchedulingMode.fromPersistedValue(
             SettingsStore(applicationContext).analysisSchedulingMode.first(),
         )
@@ -76,10 +80,16 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
         val leasedGroups = mutableListOf<LeasedTaskGroup>()
         val touchedScanIds = linkedSetOf<String>()
-        // Snapshot explicit-user admission before a scan-owned Stage can publish generic pipeline
-        // status. A dedicated pause bit distinguishes an old/import queue from an explicit cancel.
+        admittedScanId?.let(touchedScanIds::add)
+        // Explicit user work is independent, but it must not delay or preempt a persisted automatic
+        // scan/thumbnail/analysis phase. It resumes when the library pipeline returns to an idle
+        // terminal state.
         val activeUserTasksAtStart = dao.countActiveUserTasks()
-        val includeUserTasks = userTaskAdmission(
+        val userStageAllowed = libraryStage ==
+            com.renyxin.localalbum.data.db.entity.LibraryPipelineStage.READY ||
+            libraryStage == com.renyxin.localalbum.data.db.entity.LibraryPipelineStage.NEEDS_REBUILD ||
+            libraryStage == com.renyxin.localalbum.data.db.entity.LibraryPipelineStage.FAILED
+        val includeUserTasks = userStageAllowed && userTaskAdmission(
             userPaused = AnalysisResumePrefs.isUserPaused(applicationContext),
             resumePending = AnalysisResumePrefs.isPending(applicationContext),
             activeUserTasks = activeUserTasksAtStart,
@@ -87,11 +97,23 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         if (includeUserTasks && activeUserTasksAtStart > 0) {
             AnalysisResumePrefs.setPending(applicationContext, true)
         }
+        if (admittedScanId == null && !includeUserTasks) return Result.success()
         try {
             if (container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested) return Result.retry()
             val diagnosticNow = System.currentTimeMillis()
-            val activeAtStart = activeTaskCount(dao, claimableScopes, includeUserTasks)
-            val claimableAtStart = claimableTaskCount(dao, claimableScopes, diagnosticNow, includeUserTasks)
+            val activeAtStart = activeTaskCount(
+                dao,
+                claimableScopes,
+                includeUserTasks,
+                admittedScanId,
+            )
+            val claimableAtStart = claimableTaskCount(
+                dao,
+                claimableScopes,
+                diagnosticNow,
+                includeUserTasks,
+                admittedScanId,
+            )
             Log.i(
                 TAG,
                 "analysis diagnostic: attempt=$runAttemptCount claimableScopes=${claimableScopes.size} " +
@@ -104,9 +126,13 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 try {
                     // Recovery, leasing, inference and lease cleanup all occur while this lane is
                     // held. Backup maintenance cannot replace tables between those operations.
-                    scanRunDao.recoverRunningEnhancements()
+                    admittedScanId?.let { scanRunDao.recoverRunningEnhancement(it) }
                     val recoveryNow = System.currentTimeMillis()
-                    dao.recoverInterruptedLeases(recoveryNow)
+                    dao.recoverInterruptedLeasesForAdmission(
+                        admittedScanId = admittedScanId,
+                        includeUserTasks = includeUserTasks,
+                        now = recoveryNow,
+                    )
                     pipeline.retiredAutomaticScopeSelectors.forEach { selector ->
                         dao.supersedeRetiredPolicyScopes(
                             pipelinePrefix = selector.pipelinePrefix,
@@ -116,15 +142,17 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                             now = recoveryNow,
                         )
                     }
-                    // Include runs queued before this process started, even when their tasks were
-                    // completed or superseded during recovery and no new lease is claimed below.
-                    touchedScanIds += scanRunDao.getUnsettledEnhancementScanIds()
-
                     // Pick exactly one immediately claimable durable identity per Worker run.
                     // A prior scope whose failures are waiting for nextRetryAt must not starve a later
                     // Stage that can run now. Aggregate compatibility scopes still retain precedence.
                     val activeScope = claimableScopes.firstOrNull { scope ->
-                        dao.countClaimable(recoveryNow, scope, includeUserTasks) > 0
+                        dao.countClaimable(
+                            now = recoveryNow,
+                            scope = scope,
+                            includeUserTasks = includeUserTasks,
+                            admittedScanId = admittedScanId,
+                            admitAnyScan = false,
+                        ) > 0
                     }
                     if (activeScope != null) {
                         repeat(schedulingProfile.workerLeaseGroups.coerceIn(1, MAX_BATCHES_PER_RUN)) {
@@ -144,6 +172,8 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                                 leaseDurationMs = LEASE_MS,
                                 scope = activeScope,
                                 includeUserTasks = includeUserTasks,
+                                admittedScanId = admittedScanId,
+                                admitAnyScan = false,
                             )
                             if (tasks.isEmpty()) return@repeat
                             leasedGroups += LeasedTaskGroup(token, tasks)
@@ -221,8 +251,19 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
                     finalizeEnhancementStates(scanRunDao, dao, touchedScanIds)
                     val now = System.currentTimeMillis()
-                    val active = activeTaskCount(dao, claimableScopes, includeUserTasks)
-                    val claimable = claimableTaskCount(dao, claimableScopes, now, includeUserTasks)
+                    val active = activeTaskCount(
+                        dao,
+                        claimableScopes,
+                        includeUserTasks,
+                        admittedScanId,
+                    )
+                    val claimable = claimableTaskCount(
+                        dao,
+                        claimableScopes,
+                        now,
+                        includeUserTasks,
+                        admittedScanId,
+                    )
                     if (includeUserTasks) {
                         AnalysisResumePrefs.setPending(
                             applicationContext,
@@ -239,7 +280,7 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     )
                     when (decision) {
                         ContinuationDecision.ENQUEUE_SUCCESSOR -> {
-                            enqueue(applicationContext)
+                            appendSuccessor(applicationContext)
                             Result.success()
                         }
                         ContinuationDecision.RETRY_BACKOFF -> Result.retry()
@@ -270,11 +311,20 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     } catch (stateError: Throwable) {
                         Log.e(TAG, "保存增强终态失败", stateError)
                     }
-                    val active = activeTaskCount(dao, claimableScopes, includeUserTasks)
+                    val active = activeTaskCount(
+                        dao,
+                        claimableScopes,
+                        includeUserTasks,
+                        admittedScanId,
+                    )
                     if (active > 0) Result.retry() else Result.success()
                 }
             }
-            return laneResult ?: Result.retry()
+            val result = laneResult ?: Result.retry()
+            if (admittedScanId != null) {
+                container.libraryPipelineCoordinator.finishAnalysisIfIdle(admittedScanId)
+            }
+            return result
         } catch (cancelled: CancellationException) {
             ScanServiceController.clearEnhancementProgress(applicationContext)
             throw cancelled
@@ -320,14 +370,31 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         dao: com.renyxin.localalbum.data.db.dao.AnalysisTaskDao,
         scopes: List<String>,
         includeUserTasks: Boolean,
-    ): Int = scopes.sumOf { scope -> dao.countRunnable(scope, includeUserTasks) }
+        admittedScanId: String?,
+    ): Int = scopes.sumOf { scope ->
+        dao.countRunnable(
+            scope = scope,
+            includeUserTasks = includeUserTasks,
+            admittedScanId = admittedScanId,
+            admitAnyScan = false,
+        )
+    }
 
     private suspend fun claimableTaskCount(
         dao: com.renyxin.localalbum.data.db.dao.AnalysisTaskDao,
         scopes: List<String>,
         now: Long,
         includeUserTasks: Boolean,
-    ): Int = scopes.sumOf { scope -> dao.countClaimable(now, scope, includeUserTasks) }
+        admittedScanId: String?,
+    ): Int = scopes.sumOf { scope ->
+        dao.countClaimable(
+            now = now,
+            scope = scope,
+            includeUserTasks = includeUserTasks,
+            admittedScanId = admittedScanId,
+            admitAnyScan = false,
+        )
+    }
 
     private suspend fun markFailed(
         dao: com.renyxin.localalbum.data.db.dao.AnalysisTaskDao,
@@ -385,10 +452,17 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         private const val LEASE_MS = 30 * 60 * 1000L
         private const val LEASE_RENEW_INTERVAL_MS = 5 * 60 * 1000L
 
-        fun enqueue(context: Context) {
+        /** External/coordinator admission is level-triggered; one active or pending consumer suffices. */
+        fun enqueue(context: Context) = enqueue(context, ExistingWorkPolicy.KEEP)
+
+        /** Ordinary bounded continuation appends behind the currently running consumer. */
+        internal fun appendSuccessor(context: Context) =
+            enqueue(context, ExistingWorkPolicy.APPEND_OR_REPLACE)
+
+        private fun enqueue(context: Context, policy: ExistingWorkPolicy) {
             WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                 WORK_NAME,
-                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                policy,
                 OneTimeWorkRequestBuilder<AnalysisWorker>().build(),
             )
         }

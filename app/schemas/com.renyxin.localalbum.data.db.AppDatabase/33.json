@@ -1,0 +1,4235 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 33,
+    "identityHash": "bbf96411a67d68f251a1173a70d16bf7",
+    "entities": [
+      {
+        "tableName": "media_items",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`filePath` TEXT NOT NULL, `fileName` TEXT NOT NULL, `mediaType` TEXT NOT NULL, `capturedAtMs` INTEGER NOT NULL, `modifiedAtMs` INTEGER NOT NULL, `indexedAtMs` INTEGER NOT NULL, `parentPath` TEXT NOT NULL, `fileSize` INTEGER NOT NULL, `isFavorite` INTEGER NOT NULL, `isTrashed` INTEGER NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, `mimeType` TEXT NOT NULL, `durationMs` INTEGER NOT NULL, `latitude` REAL, `longitude` REAL, `make` TEXT, `model` TEXT, `aperture` TEXT, `focalLength` TEXT, `iso` TEXT, `exposureTime` TEXT, `orientation` INTEGER NOT NULL, `sceneType` TEXT, `thumbnailPath` TEXT, `fingerprintHead` TEXT, `perceptualHash` INTEGER NOT NULL DEFAULT 0, `ocrText` TEXT, `qualityScore` REAL NOT NULL DEFAULT 0.0, `deletedAtMs` INTEGER NOT NULL, `isCorrupted` INTEGER NOT NULL DEFAULT 0, `faceClusterId` TEXT, `scanGeneration` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`filePath`))",
+        "fields": [
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileName",
+            "columnName": "fileName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaType",
+            "columnName": "mediaType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capturedAtMs",
+            "columnName": "capturedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modifiedAtMs",
+            "columnName": "modifiedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "indexedAtMs",
+            "columnName": "indexedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentPath",
+            "columnName": "parentPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileSize",
+            "columnName": "fileSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isFavorite",
+            "columnName": "isFavorite",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isTrashed",
+            "columnName": "isTrashed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mimeType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "latitude",
+            "columnName": "latitude",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "longitude",
+            "columnName": "longitude",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "make",
+            "columnName": "make",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "model",
+            "columnName": "model",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "aperture",
+            "columnName": "aperture",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "focalLength",
+            "columnName": "focalLength",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "iso",
+            "columnName": "iso",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "exposureTime",
+            "columnName": "exposureTime",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "orientation",
+            "columnName": "orientation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sceneType",
+            "columnName": "sceneType",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "thumbnailPath",
+            "columnName": "thumbnailPath",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "fingerprintHead",
+            "columnName": "fingerprintHead",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "perceptualHash",
+            "columnName": "perceptualHash",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "ocrText",
+            "columnName": "ocrText",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "qualityScore",
+            "columnName": "qualityScore",
+            "affinity": "REAL",
+            "notNull": true,
+            "defaultValue": "0.0"
+          },
+          {
+            "fieldPath": "deletedAtMs",
+            "columnName": "deletedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCorrupted",
+            "columnName": "isCorrupted",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "faceClusterId",
+            "columnName": "faceClusterId",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "scanGeneration",
+            "columnName": "scanGeneration",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "filePath"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_media_items_capturedAtMs",
+            "unique": false,
+            "columnNames": [
+              "capturedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_capturedAtMs` ON `${TABLE_NAME}` (`capturedAtMs`)"
+          },
+          {
+            "name": "index_media_items_parentPath",
+            "unique": false,
+            "columnNames": [
+              "parentPath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_parentPath` ON `${TABLE_NAME}` (`parentPath`)"
+          },
+          {
+            "name": "index_media_items_isFavorite",
+            "unique": false,
+            "columnNames": [
+              "isFavorite"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_isFavorite` ON `${TABLE_NAME}` (`isFavorite`)"
+          },
+          {
+            "name": "index_media_items_isTrashed",
+            "unique": false,
+            "columnNames": [
+              "isTrashed"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_isTrashed` ON `${TABLE_NAME}` (`isTrashed`)"
+          },
+          {
+            "name": "index_media_items_mediaType",
+            "unique": false,
+            "columnNames": [
+              "mediaType"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_mediaType` ON `${TABLE_NAME}` (`mediaType`)"
+          },
+          {
+            "name": "index_media_items_sceneType",
+            "unique": false,
+            "columnNames": [
+              "sceneType"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_sceneType` ON `${TABLE_NAME}` (`sceneType`)"
+          },
+          {
+            "name": "index_media_items_fileSize",
+            "unique": false,
+            "columnNames": [
+              "fileSize"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_fileSize` ON `${TABLE_NAME}` (`fileSize`)"
+          },
+          {
+            "name": "index_media_items_modifiedAtMs",
+            "unique": false,
+            "columnNames": [
+              "modifiedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_modifiedAtMs` ON `${TABLE_NAME}` (`modifiedAtMs`)"
+          },
+          {
+            "name": "index_media_items_isCorrupted",
+            "unique": false,
+            "columnNames": [
+              "isCorrupted"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_isCorrupted` ON `${TABLE_NAME}` (`isCorrupted`)"
+          },
+          {
+            "name": "index_media_items_faceClusterId",
+            "unique": false,
+            "columnNames": [
+              "faceClusterId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_faceClusterId` ON `${TABLE_NAME}` (`faceClusterId`)"
+          },
+          {
+            "name": "index_media_items_isTrashed_capturedAtMs",
+            "unique": false,
+            "columnNames": [
+              "isTrashed",
+              "capturedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_isTrashed_capturedAtMs` ON `${TABLE_NAME}` (`isTrashed`, `capturedAtMs`)"
+          },
+          {
+            "name": "index_media_items_isFavorite_isTrashed_capturedAtMs",
+            "unique": false,
+            "columnNames": [
+              "isFavorite",
+              "isTrashed",
+              "capturedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_isFavorite_isTrashed_capturedAtMs` ON `${TABLE_NAME}` (`isFavorite`, `isTrashed`, `capturedAtMs`)"
+          },
+          {
+            "name": "index_media_items_parentPath_isTrashed_capturedAtMs",
+            "unique": false,
+            "columnNames": [
+              "parentPath",
+              "isTrashed",
+              "capturedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_parentPath_isTrashed_capturedAtMs` ON `${TABLE_NAME}` (`parentPath`, `isTrashed`, `capturedAtMs`)"
+          },
+          {
+            "name": "index_media_items_mediaType_isTrashed_capturedAtMs",
+            "unique": false,
+            "columnNames": [
+              "mediaType",
+              "isTrashed",
+              "capturedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_mediaType_isTrashed_capturedAtMs` ON `${TABLE_NAME}` (`mediaType`, `isTrashed`, `capturedAtMs`)"
+          },
+          {
+            "name": "index_media_items_sceneType_isTrashed_capturedAtMs",
+            "unique": false,
+            "columnNames": [
+              "sceneType",
+              "isTrashed",
+              "capturedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_sceneType_isTrashed_capturedAtMs` ON `${TABLE_NAME}` (`sceneType`, `isTrashed`, `capturedAtMs`)"
+          },
+          {
+            "name": "index_media_items_scanGeneration",
+            "unique": false,
+            "columnNames": [
+              "scanGeneration"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_items_scanGeneration` ON `${TABLE_NAME}` (`scanGeneration`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "ftsVersion": "FTS4",
+        "ftsOptions": {
+          "tokenizer": "unicode61",
+          "tokenizerArgs": [],
+          "contentTable": "",
+          "languageIdColumnName": "",
+          "matchInfo": "FTS4",
+          "notIndexedColumns": [],
+          "prefixSizes": [],
+          "preferredOrder": "ASC"
+        },
+        "contentSyncTriggers": [],
+        "tableName": "media_items_fts",
+        "createSql": "CREATE VIRTUAL TABLE IF NOT EXISTS `${TABLE_NAME}` USING FTS4(`filePath` TEXT NOT NULL, `fileName` TEXT NOT NULL, `parentPath` TEXT NOT NULL, `ocrText` TEXT, `make` TEXT, `model` TEXT, tokenize=unicode61)",
+        "fields": [
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileName",
+            "columnName": "fileName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentPath",
+            "columnName": "parentPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ocrText",
+            "columnName": "ocrText",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "make",
+            "columnName": "make",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "model",
+            "columnName": "model",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": []
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "faces",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`faceId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `filePath` TEXT NOT NULL, `clusterId` TEXT, `personName` TEXT, `embedding` TEXT NOT NULL, `boxLeft` REAL NOT NULL, `boxTop` REAL NOT NULL, `boxRight` REAL NOT NULL, `boxBottom` REAL NOT NULL, `thumbnailPath` TEXT, `detectedAtMs` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "faceId",
+            "columnName": "faceId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "clusterId",
+            "columnName": "clusterId",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "personName",
+            "columnName": "personName",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "embedding",
+            "columnName": "embedding",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "boxLeft",
+            "columnName": "boxLeft",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "boxTop",
+            "columnName": "boxTop",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "boxRight",
+            "columnName": "boxRight",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "boxBottom",
+            "columnName": "boxBottom",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "thumbnailPath",
+            "columnName": "thumbnailPath",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "detectedAtMs",
+            "columnName": "detectedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "faceId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_faces_filePath",
+            "unique": false,
+            "columnNames": [
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_faces_filePath` ON `${TABLE_NAME}` (`filePath`)"
+          },
+          {
+            "name": "index_faces_clusterId",
+            "unique": false,
+            "columnNames": [
+              "clusterId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_faces_clusterId` ON `${TABLE_NAME}` (`clusterId`)"
+          },
+          {
+            "name": "index_faces_personName",
+            "unique": false,
+            "columnNames": [
+              "personName"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_faces_personName` ON `${TABLE_NAME}` (`personName`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "media_embeddings",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`filePath` TEXT NOT NULL, `embedding` TEXT NOT NULL, `modelVersion` INTEGER NOT NULL, `generatedAtMs` INTEGER NOT NULL, `source` TEXT NOT NULL, `embeddingBlob` BLOB, `providerId` TEXT NOT NULL, `modelId` TEXT NOT NULL, `dimension` INTEGER NOT NULL, `spaceId` TEXT NOT NULL, `generation` INTEGER NOT NULL, `codecId` TEXT NOT NULL, `formatVersion` INTEGER NOT NULL, PRIMARY KEY(`filePath`))",
+        "fields": [
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "embedding",
+            "columnName": "embedding",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelVersion",
+            "columnName": "modelVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generatedAtMs",
+            "columnName": "generatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "embeddingBlob",
+            "columnName": "embeddingBlob",
+            "affinity": "BLOB",
+            "notNull": false
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelId",
+            "columnName": "modelId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dimension",
+            "columnName": "dimension",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "spaceId",
+            "columnName": "spaceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "codecId",
+            "columnName": "codecId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "formatVersion",
+            "columnName": "formatVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "filePath"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_media_embeddings_modelVersion",
+            "unique": false,
+            "columnNames": [
+              "modelVersion"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_embeddings_modelVersion` ON `${TABLE_NAME}` (`modelVersion`)"
+          },
+          {
+            "name": "index_media_embeddings_spaceId_filePath",
+            "unique": false,
+            "columnNames": [
+              "spaceId",
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_embeddings_spaceId_filePath` ON `${TABLE_NAME}` (`spaceId`, `filePath`)"
+          },
+          {
+            "name": "index_media_embeddings_providerId_modelId_modelVersion",
+            "unique": false,
+            "columnNames": [
+              "providerId",
+              "modelId",
+              "modelVersion"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_embeddings_providerId_modelId_modelVersion` ON `${TABLE_NAME}` (`providerId`, `modelId`, `modelVersion`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "feature_store",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `filePath` TEXT NOT NULL, `pluginId` TEXT NOT NULL, `featureType` TEXT NOT NULL, `dataJson` TEXT NOT NULL, `schemaJson` TEXT NOT NULL, `modelVersion` INTEGER NOT NULL, `generatedAtMs` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pluginId",
+            "columnName": "pluginId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "featureType",
+            "columnName": "featureType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dataJson",
+            "columnName": "dataJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "schemaJson",
+            "columnName": "schemaJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelVersion",
+            "columnName": "modelVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generatedAtMs",
+            "columnName": "generatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_feature_store_filePath_pluginId",
+            "unique": true,
+            "columnNames": [
+              "filePath",
+              "pluginId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_feature_store_filePath_pluginId` ON `${TABLE_NAME}` (`filePath`, `pluginId`)"
+          },
+          {
+            "name": "index_feature_store_pluginId",
+            "unique": false,
+            "columnNames": [
+              "pluginId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_feature_store_pluginId` ON `${TABLE_NAME}` (`pluginId`)"
+          },
+          {
+            "name": "index_feature_store_featureType",
+            "unique": false,
+            "columnNames": [
+              "featureType"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_feature_store_featureType` ON `${TABLE_NAME}` (`featureType`)"
+          },
+          {
+            "name": "index_feature_store_modelVersion",
+            "unique": false,
+            "columnNames": [
+              "modelVersion"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_feature_store_modelVersion` ON `${TABLE_NAME}` (`modelVersion`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "plugin_manifest",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `pluginId` TEXT NOT NULL, `manifestJson` TEXT NOT NULL, `isEnabled` INTEGER NOT NULL, `pipelineStage` TEXT NOT NULL, `orderIndex` INTEGER NOT NULL, `createdAtMs` INTEGER NOT NULL, `updatedAtMs` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pluginId",
+            "columnName": "pluginId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "manifestJson",
+            "columnName": "manifestJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isEnabled",
+            "columnName": "isEnabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pipelineStage",
+            "columnName": "pipelineStage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "orderIndex",
+            "columnName": "orderIndex",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtMs",
+            "columnName": "createdAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_plugin_manifest_pluginId",
+            "unique": true,
+            "columnNames": [
+              "pluginId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_plugin_manifest_pluginId` ON `${TABLE_NAME}` (`pluginId`)"
+          },
+          {
+            "name": "index_plugin_manifest_isEnabled",
+            "unique": false,
+            "columnNames": [
+              "isEnabled"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_plugin_manifest_isEnabled` ON `${TABLE_NAME}` (`isEnabled`)"
+          },
+          {
+            "name": "index_plugin_manifest_pipelineStage",
+            "unique": false,
+            "columnNames": [
+              "pipelineStage"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_plugin_manifest_pipelineStage` ON `${TABLE_NAME}` (`pipelineStage`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "analysis_state",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`filePath` TEXT NOT NULL, `stageId` TEXT NOT NULL, `status` TEXT NOT NULL, `modelVersion` INTEGER NOT NULL, `updatedAtMs` INTEGER NOT NULL, PRIMARY KEY(`filePath`, `stageId`))",
+        "fields": [
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stageId",
+            "columnName": "stageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelVersion",
+            "columnName": "modelVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "filePath",
+            "stageId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_analysis_state_stageId",
+            "unique": false,
+            "columnNames": [
+              "stageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_analysis_state_stageId` ON `${TABLE_NAME}` (`stageId`)"
+          },
+          {
+            "name": "index_analysis_state_status",
+            "unique": false,
+            "columnNames": [
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_analysis_state_status` ON `${TABLE_NAME}` (`status`)"
+          },
+          {
+            "name": "index_analysis_state_modelVersion",
+            "unique": false,
+            "columnNames": [
+              "modelVersion"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_analysis_state_modelVersion` ON `${TABLE_NAME}` (`modelVersion`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "thumbnail_tasks",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`taskId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `filePath` TEXT NOT NULL, `sizeClass` TEXT NOT NULL, `sourceVersion` TEXT NOT NULL, `mediaType` TEXT NOT NULL, `formatVersion` INTEGER NOT NULL, `priority` INTEGER NOT NULL, `status` TEXT NOT NULL, `attemptCount` INTEGER NOT NULL, `nextRetryAt` INTEGER NOT NULL, `leaseUntil` INTEGER NOT NULL, `leaseToken` TEXT, `lastError` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `scanId` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "taskId",
+            "columnName": "taskId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sizeClass",
+            "columnName": "sizeClass",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceVersion",
+            "columnName": "sourceVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaType",
+            "columnName": "mediaType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "formatVersion",
+            "columnName": "formatVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "priority",
+            "columnName": "priority",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextRetryAt",
+            "columnName": "nextRetryAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseUntil",
+            "columnName": "leaseUntil",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseToken",
+            "columnName": "leaseToken",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scanId",
+            "columnName": "scanId",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "taskId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_thumbnail_tasks_filePath_mediaType_sourceVersion_sizeClass_formatVersion",
+            "unique": true,
+            "columnNames": [
+              "filePath",
+              "mediaType",
+              "sourceVersion",
+              "sizeClass",
+              "formatVersion"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_thumbnail_tasks_filePath_mediaType_sourceVersion_sizeClass_formatVersion` ON `${TABLE_NAME}` (`filePath`, `mediaType`, `sourceVersion`, `sizeClass`, `formatVersion`)"
+          },
+          {
+            "name": "index_thumbnail_tasks_status_nextRetryAt_priority",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "nextRetryAt",
+              "priority"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_thumbnail_tasks_status_nextRetryAt_priority` ON `${TABLE_NAME}` (`status`, `nextRetryAt`, `priority`)"
+          },
+          {
+            "name": "index_thumbnail_tasks_scanId_status",
+            "unique": false,
+            "columnNames": [
+              "scanId",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_thumbnail_tasks_scanId_status` ON `${TABLE_NAME}` (`scanId`, `status`)"
+          },
+          {
+            "name": "index_thumbnail_tasks_leaseUntil",
+            "unique": false,
+            "columnNames": [
+              "leaseUntil"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_thumbnail_tasks_leaseUntil` ON `${TABLE_NAME}` (`leaseUntil`)"
+          },
+          {
+            "name": "index_thumbnail_tasks_leaseToken",
+            "unique": false,
+            "columnNames": [
+              "leaseToken"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_thumbnail_tasks_leaseToken` ON `${TABLE_NAME}` (`leaseToken`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "thumbnail_cache_entries",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`filePath` TEXT NOT NULL, `sizeClass` TEXT NOT NULL, `sourceVersion` TEXT NOT NULL, `mediaType` TEXT NOT NULL, `formatVersion` INTEGER NOT NULL, `path` TEXT NOT NULL, `byteSize` INTEGER NOT NULL, `lastAccessAt` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `state` TEXT NOT NULL, `leaseUntil` INTEGER NOT NULL, `deleteAttemptCount` INTEGER NOT NULL, PRIMARY KEY(`filePath`, `mediaType`, `sourceVersion`, `sizeClass`, `formatVersion`))",
+        "fields": [
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sizeClass",
+            "columnName": "sizeClass",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceVersion",
+            "columnName": "sourceVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaType",
+            "columnName": "mediaType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "formatVersion",
+            "columnName": "formatVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "path",
+            "columnName": "path",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "byteSize",
+            "columnName": "byteSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastAccessAt",
+            "columnName": "lastAccessAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseUntil",
+            "columnName": "leaseUntil",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deleteAttemptCount",
+            "columnName": "deleteAttemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "filePath",
+            "mediaType",
+            "sourceVersion",
+            "sizeClass",
+            "formatVersion"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_thumbnail_cache_entries_state_lastAccessAt_filePath_mediaType_sourceVersion_sizeClass_formatVersion",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "lastAccessAt",
+              "filePath",
+              "mediaType",
+              "sourceVersion",
+              "sizeClass",
+              "formatVersion"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_thumbnail_cache_entries_state_lastAccessAt_filePath_mediaType_sourceVersion_sizeClass_formatVersion` ON `${TABLE_NAME}` (`state`, `lastAccessAt`, `filePath`, `mediaType`, `sourceVersion`, `sizeClass`, `formatVersion`)"
+          },
+          {
+            "name": "index_thumbnail_cache_entries_filePath_mediaType_sourceVersion_sizeClass_formatVersion_state",
+            "unique": false,
+            "columnNames": [
+              "filePath",
+              "mediaType",
+              "sourceVersion",
+              "sizeClass",
+              "formatVersion",
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_thumbnail_cache_entries_filePath_mediaType_sourceVersion_sizeClass_formatVersion_state` ON `${TABLE_NAME}` (`filePath`, `mediaType`, `sourceVersion`, `sizeClass`, `formatVersion`, `state`)"
+          },
+          {
+            "name": "index_thumbnail_cache_entries_leaseUntil",
+            "unique": false,
+            "columnNames": [
+              "leaseUntil"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_thumbnail_cache_entries_leaseUntil` ON `${TABLE_NAME}` (`leaseUntil`)"
+          },
+          {
+            "name": "index_thumbnail_cache_entries_path",
+            "unique": true,
+            "columnNames": [
+              "path"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_thumbnail_cache_entries_path` ON `${TABLE_NAME}` (`path`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "analysis_tasks",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`taskId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `filePath` TEXT NOT NULL, `sourceVersion` TEXT NOT NULL, `pipelineScope` TEXT NOT NULL, `priority` INTEGER NOT NULL, `status` TEXT NOT NULL, `attemptCount` INTEGER NOT NULL, `nextRetryAt` INTEGER NOT NULL, `leaseUntil` INTEGER NOT NULL, `leaseToken` TEXT, `lastError` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `scanId` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "taskId",
+            "columnName": "taskId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceVersion",
+            "columnName": "sourceVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pipelineScope",
+            "columnName": "pipelineScope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "priority",
+            "columnName": "priority",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextRetryAt",
+            "columnName": "nextRetryAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseUntil",
+            "columnName": "leaseUntil",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseToken",
+            "columnName": "leaseToken",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scanId",
+            "columnName": "scanId",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "taskId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_analysis_tasks_filePath_sourceVersion_pipelineScope",
+            "unique": true,
+            "columnNames": [
+              "filePath",
+              "sourceVersion",
+              "pipelineScope"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_analysis_tasks_filePath_sourceVersion_pipelineScope` ON `${TABLE_NAME}` (`filePath`, `sourceVersion`, `pipelineScope`)"
+          },
+          {
+            "name": "index_analysis_tasks_scanId_status",
+            "unique": false,
+            "columnNames": [
+              "scanId",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_analysis_tasks_scanId_status` ON `${TABLE_NAME}` (`scanId`, `status`)"
+          },
+          {
+            "name": "index_analysis_tasks_status_nextRetryAt_priority",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "nextRetryAt",
+              "priority"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_analysis_tasks_status_nextRetryAt_priority` ON `${TABLE_NAME}` (`status`, `nextRetryAt`, `priority`)"
+          },
+          {
+            "name": "index_analysis_tasks_leaseUntil",
+            "unique": false,
+            "columnNames": [
+              "leaseUntil"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_analysis_tasks_leaseUntil` ON `${TABLE_NAME}` (`leaseUntil`)"
+          },
+          {
+            "name": "index_analysis_tasks_leaseToken",
+            "unique": false,
+            "columnNames": [
+              "leaseToken"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_analysis_tasks_leaseToken` ON `${TABLE_NAME}` (`leaseToken`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "scan_runs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scanId` TEXT NOT NULL, `generation` INTEGER NOT NULL, `scanType` TEXT NOT NULL, `status` TEXT NOT NULL, `mediaStoreCompleted` INTEGER NOT NULL, `fileSystemCompleted` INTEGER NOT NULL, `startedAt` INTEGER NOT NULL, `completedAt` INTEGER NOT NULL, `errorType` TEXT, `indexAvailability` TEXT NOT NULL, `coreScanState` TEXT NOT NULL, `enhancementState` TEXT NOT NULL, `firstBatchCommittedAt` INTEGER NOT NULL, `indexAvailableAt` INTEGER NOT NULL, `coreCompletedAt` INTEGER NOT NULL, `enhancementStartedAt` INTEGER NOT NULL, `enhancementCompletedAt` INTEGER NOT NULL, PRIMARY KEY(`scanId`))",
+        "fields": [
+          {
+            "fieldPath": "scanId",
+            "columnName": "scanId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scanType",
+            "columnName": "scanType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaStoreCompleted",
+            "columnName": "mediaStoreCompleted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileSystemCompleted",
+            "columnName": "fileSystemCompleted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startedAt",
+            "columnName": "startedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedAt",
+            "columnName": "completedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "errorType",
+            "columnName": "errorType",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "indexAvailability",
+            "columnName": "indexAvailability",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "coreScanState",
+            "columnName": "coreScanState",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enhancementState",
+            "columnName": "enhancementState",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstBatchCommittedAt",
+            "columnName": "firstBatchCommittedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "indexAvailableAt",
+            "columnName": "indexAvailableAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "coreCompletedAt",
+            "columnName": "coreCompletedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enhancementStartedAt",
+            "columnName": "enhancementStartedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enhancementCompletedAt",
+            "columnName": "enhancementCompletedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scanId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_scan_runs_status_startedAt",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "startedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_runs_status_startedAt` ON `${TABLE_NAME}` (`status`, `startedAt`)"
+          },
+          {
+            "name": "index_scan_runs_coreScanState_startedAt",
+            "unique": false,
+            "columnNames": [
+              "coreScanState",
+              "startedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_runs_coreScanState_startedAt` ON `${TABLE_NAME}` (`coreScanState`, `startedAt`)"
+          },
+          {
+            "name": "index_scan_runs_enhancementState_startedAt",
+            "unique": false,
+            "columnNames": [
+              "enhancementState",
+              "startedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_runs_enhancementState_startedAt` ON `${TABLE_NAME}` (`enhancementState`, `startedAt`)"
+          },
+          {
+            "name": "index_scan_runs_generation",
+            "unique": true,
+            "columnNames": [
+              "generation"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_scan_runs_generation` ON `${TABLE_NAME}` (`generation`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "scan_staging",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scanId` TEXT NOT NULL, `filePath` TEXT NOT NULL, `sourceMask` INTEGER NOT NULL, `mediaStoreJson` TEXT, `fileSystemJson` TEXT, PRIMARY KEY(`scanId`, `filePath`))",
+        "fields": [
+          {
+            "fieldPath": "scanId",
+            "columnName": "scanId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceMask",
+            "columnName": "sourceMask",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaStoreJson",
+            "columnName": "mediaStoreJson",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "fileSystemJson",
+            "columnName": "fileSystemJson",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scanId",
+            "filePath"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_scan_staging_scanId_filePath",
+            "unique": false,
+            "columnNames": [
+              "scanId",
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_staging_scanId_filePath` ON `${TABLE_NAME}` (`scanId`, `filePath`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "import_media_staging",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generation` TEXT NOT NULL, `filePath` TEXT NOT NULL, `fileName` TEXT NOT NULL, `mediaType` TEXT NOT NULL, `capturedAtMs` INTEGER NOT NULL, `modifiedAtMs` INTEGER NOT NULL, `indexedAtMs` INTEGER NOT NULL, `parentPath` TEXT NOT NULL, `fileSize` INTEGER NOT NULL, `isFavorite` INTEGER NOT NULL, `isTrashed` INTEGER NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, `mimeType` TEXT NOT NULL, `durationMs` INTEGER NOT NULL, `latitude` REAL, `longitude` REAL, `make` TEXT, `model` TEXT, `aperture` TEXT, `focalLength` TEXT, `iso` TEXT, `exposureTime` TEXT, `orientation` INTEGER NOT NULL, `sceneType` TEXT, `thumbnailPath` TEXT, `fingerprintHead` TEXT, `perceptualHash` INTEGER NOT NULL, `ocrText` TEXT, `qualityScore` REAL NOT NULL, `deletedAtMs` INTEGER NOT NULL, `isCorrupted` INTEGER NOT NULL, `faceClusterId` TEXT, `scanGeneration` INTEGER NOT NULL, PRIMARY KEY(`generation`, `filePath`))",
+        "fields": [
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileName",
+            "columnName": "fileName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaType",
+            "columnName": "mediaType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capturedAtMs",
+            "columnName": "capturedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modifiedAtMs",
+            "columnName": "modifiedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "indexedAtMs",
+            "columnName": "indexedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentPath",
+            "columnName": "parentPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileSize",
+            "columnName": "fileSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isFavorite",
+            "columnName": "isFavorite",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isTrashed",
+            "columnName": "isTrashed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mimeType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "latitude",
+            "columnName": "latitude",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "longitude",
+            "columnName": "longitude",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "make",
+            "columnName": "make",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "model",
+            "columnName": "model",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "aperture",
+            "columnName": "aperture",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "focalLength",
+            "columnName": "focalLength",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "iso",
+            "columnName": "iso",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "exposureTime",
+            "columnName": "exposureTime",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "orientation",
+            "columnName": "orientation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sceneType",
+            "columnName": "sceneType",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "thumbnailPath",
+            "columnName": "thumbnailPath",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "fingerprintHead",
+            "columnName": "fingerprintHead",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "perceptualHash",
+            "columnName": "perceptualHash",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ocrText",
+            "columnName": "ocrText",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "qualityScore",
+            "columnName": "qualityScore",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deletedAtMs",
+            "columnName": "deletedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCorrupted",
+            "columnName": "isCorrupted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "faceClusterId",
+            "columnName": "faceClusterId",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "scanGeneration",
+            "columnName": "scanGeneration",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generation",
+            "filePath"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_import_media_staging_generation",
+            "unique": false,
+            "columnNames": [
+              "generation"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_import_media_staging_generation` ON `${TABLE_NAME}` (`generation`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "import_face_staging",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`stagingId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `generation` TEXT NOT NULL, `faceId` INTEGER NOT NULL, `filePath` TEXT NOT NULL, `clusterId` TEXT, `personName` TEXT, `embedding` TEXT NOT NULL, `boxLeft` REAL NOT NULL, `boxTop` REAL NOT NULL, `boxRight` REAL NOT NULL, `boxBottom` REAL NOT NULL, `thumbnailPath` TEXT, `detectedAtMs` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "stagingId",
+            "columnName": "stagingId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "faceId",
+            "columnName": "faceId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "clusterId",
+            "columnName": "clusterId",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "personName",
+            "columnName": "personName",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "embedding",
+            "columnName": "embedding",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "boxLeft",
+            "columnName": "boxLeft",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "boxTop",
+            "columnName": "boxTop",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "boxRight",
+            "columnName": "boxRight",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "boxBottom",
+            "columnName": "boxBottom",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "thumbnailPath",
+            "columnName": "thumbnailPath",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "detectedAtMs",
+            "columnName": "detectedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "stagingId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_import_face_staging_generation",
+            "unique": false,
+            "columnNames": [
+              "generation"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_import_face_staging_generation` ON `${TABLE_NAME}` (`generation`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "import_embedding_staging",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generation` TEXT NOT NULL, `filePath` TEXT NOT NULL, `embedding` TEXT NOT NULL, `modelVersion` INTEGER NOT NULL, `generatedAtMs` INTEGER NOT NULL, `source` TEXT NOT NULL, `embeddingBlob` BLOB, `providerId` TEXT NOT NULL, `modelId` TEXT NOT NULL, `dimension` INTEGER NOT NULL, `spaceId` TEXT NOT NULL, `vectorGeneration` INTEGER NOT NULL, `codecId` TEXT NOT NULL, `formatVersion` INTEGER NOT NULL, PRIMARY KEY(`generation`, `filePath`))",
+        "fields": [
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "embedding",
+            "columnName": "embedding",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelVersion",
+            "columnName": "modelVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generatedAtMs",
+            "columnName": "generatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "embeddingBlob",
+            "columnName": "embeddingBlob",
+            "affinity": "BLOB",
+            "notNull": false
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelId",
+            "columnName": "modelId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dimension",
+            "columnName": "dimension",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "spaceId",
+            "columnName": "spaceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "vectorGeneration",
+            "columnName": "vectorGeneration",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "codecId",
+            "columnName": "codecId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "formatVersion",
+            "columnName": "formatVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generation",
+            "filePath"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_import_embedding_staging_generation",
+            "unique": false,
+            "columnNames": [
+              "generation"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_import_embedding_staging_generation` ON `${TABLE_NAME}` (`generation`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "import_fts_staging",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`stagingId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `generation` TEXT NOT NULL, `filePath` TEXT NOT NULL, `fileName` TEXT NOT NULL, `parentPath` TEXT NOT NULL, `ocrText` TEXT, `make` TEXT, `model` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "stagingId",
+            "columnName": "stagingId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileName",
+            "columnName": "fileName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentPath",
+            "columnName": "parentPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ocrText",
+            "columnName": "ocrText",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "make",
+            "columnName": "make",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "model",
+            "columnName": "model",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "stagingId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_import_fts_staging_generation",
+            "unique": false,
+            "columnNames": [
+              "generation"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_import_fts_staging_generation` ON `${TABLE_NAME}` (`generation`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "maintenance_runs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`taskType` TEXT NOT NULL, `generation` INTEGER NOT NULL, `status` TEXT NOT NULL, `cursorPath` TEXT, `scannedCount` INTEGER NOT NULL, `eligibleCount` INTEGER NOT NULL, `failedCount` INTEGER NOT NULL, `groupCount` INTEGER NOT NULL, `memberCount` INTEGER NOT NULL, `error` TEXT, `startedAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `completedAt` INTEGER NOT NULL, `isActive` INTEGER NOT NULL, PRIMARY KEY(`taskType`, `generation`))",
+        "fields": [
+          {
+            "fieldPath": "taskType",
+            "columnName": "taskType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cursorPath",
+            "columnName": "cursorPath",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "scannedCount",
+            "columnName": "scannedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eligibleCount",
+            "columnName": "eligibleCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failedCount",
+            "columnName": "failedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "groupCount",
+            "columnName": "groupCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "memberCount",
+            "columnName": "memberCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "error",
+            "columnName": "error",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "startedAt",
+            "columnName": "startedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedAt",
+            "columnName": "completedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isActive",
+            "columnName": "isActive",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "taskType",
+            "generation"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_maintenance_runs_taskType_status_startedAt",
+            "unique": false,
+            "columnNames": [
+              "taskType",
+              "status",
+              "startedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_maintenance_runs_taskType_status_startedAt` ON `${TABLE_NAME}` (`taskType`, `status`, `startedAt`)"
+          },
+          {
+            "name": "index_maintenance_runs_taskType_isActive",
+            "unique": false,
+            "columnNames": [
+              "taskType",
+              "isActive"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_maintenance_runs_taskType_isActive` ON `${TABLE_NAME}` (`taskType`, `isActive`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "duplicate_hash_staging",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generation` INTEGER NOT NULL, `filePath` TEXT NOT NULL, `fileSize` INTEGER NOT NULL, `exactHash` TEXT NOT NULL, `qualityScore` REAL NOT NULL, `modifiedAtMs` INTEGER NOT NULL, PRIMARY KEY(`generation`, `filePath`))",
+        "fields": [
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileSize",
+            "columnName": "fileSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "exactHash",
+            "columnName": "exactHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "qualityScore",
+            "columnName": "qualityScore",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modifiedAtMs",
+            "columnName": "modifiedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generation",
+            "filePath"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_duplicate_hash_staging_generation_fileSize_exactHash",
+            "unique": false,
+            "columnNames": [
+              "generation",
+              "fileSize",
+              "exactHash"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_duplicate_hash_staging_generation_fileSize_exactHash` ON `${TABLE_NAME}` (`generation`, `fileSize`, `exactHash`)"
+          },
+          {
+            "name": "index_duplicate_hash_staging_generation_filePath",
+            "unique": false,
+            "columnNames": [
+              "generation",
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_duplicate_hash_staging_generation_filePath` ON `${TABLE_NAME}` (`generation`, `filePath`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "duplicate_groups",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generation` INTEGER NOT NULL, `groupId` TEXT NOT NULL, `exactHash` TEXT NOT NULL, `memberCount` INTEGER NOT NULL, `totalBytes` INTEGER NOT NULL, `wastedBytes` INTEGER NOT NULL, `recommendedKeepPath` TEXT NOT NULL, `invalidated` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`generation`, `groupId`))",
+        "fields": [
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "groupId",
+            "columnName": "groupId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "exactHash",
+            "columnName": "exactHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "memberCount",
+            "columnName": "memberCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalBytes",
+            "columnName": "totalBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "wastedBytes",
+            "columnName": "wastedBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recommendedKeepPath",
+            "columnName": "recommendedKeepPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "invalidated",
+            "columnName": "invalidated",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generation",
+            "groupId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_duplicate_groups_generation_invalidated_wastedBytes",
+            "unique": false,
+            "columnNames": [
+              "generation",
+              "invalidated",
+              "wastedBytes"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_duplicate_groups_generation_invalidated_wastedBytes` ON `${TABLE_NAME}` (`generation`, `invalidated`, `wastedBytes`)"
+          },
+          {
+            "name": "index_duplicate_groups_generation_exactHash",
+            "unique": false,
+            "columnNames": [
+              "generation",
+              "exactHash"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_duplicate_groups_generation_exactHash` ON `${TABLE_NAME}` (`generation`, `exactHash`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "duplicate_members",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generation` INTEGER NOT NULL, `groupId` TEXT NOT NULL, `filePath` TEXT NOT NULL, `fileSize` INTEGER NOT NULL, `qualityScore` REAL NOT NULL, `modifiedAtMs` INTEGER NOT NULL, `isRecommendedKeep` INTEGER NOT NULL, PRIMARY KEY(`generation`, `groupId`, `filePath`))",
+        "fields": [
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "groupId",
+            "columnName": "groupId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileSize",
+            "columnName": "fileSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "qualityScore",
+            "columnName": "qualityScore",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modifiedAtMs",
+            "columnName": "modifiedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isRecommendedKeep",
+            "columnName": "isRecommendedKeep",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generation",
+            "groupId",
+            "filePath"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_duplicate_members_generation_groupId_filePath",
+            "unique": false,
+            "columnNames": [
+              "generation",
+              "groupId",
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_duplicate_members_generation_groupId_filePath` ON `${TABLE_NAME}` (`generation`, `groupId`, `filePath`)"
+          },
+          {
+            "name": "index_duplicate_members_filePath",
+            "unique": false,
+            "columnNames": [
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_duplicate_members_filePath` ON `${TABLE_NAME}` (`filePath`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "face_cluster_meta",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generation` INTEGER NOT NULL, `clusterId` TEXT NOT NULL, `personName` TEXT, `status` TEXT NOT NULL, `providerScope` TEXT NOT NULL, `modelScope` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`generation`, `clusterId`))",
+        "fields": [
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "clusterId",
+            "columnName": "clusterId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "personName",
+            "columnName": "personName",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerScope",
+            "columnName": "providerScope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelScope",
+            "columnName": "modelScope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generation",
+            "clusterId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_face_cluster_meta_generation_status_clusterId",
+            "unique": false,
+            "columnNames": [
+              "generation",
+              "status",
+              "clusterId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_face_cluster_meta_generation_status_clusterId` ON `${TABLE_NAME}` (`generation`, `status`, `clusterId`)"
+          },
+          {
+            "name": "index_face_cluster_meta_clusterId",
+            "unique": false,
+            "columnNames": [
+              "clusterId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_face_cluster_meta_clusterId` ON `${TABLE_NAME}` (`clusterId`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "face_cluster_prototypes",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generation` INTEGER NOT NULL, `clusterId` TEXT NOT NULL, `prototypeIndex` INTEGER NOT NULL, `embedding` TEXT NOT NULL, `sampleCount` INTEGER NOT NULL, `providerScope` TEXT NOT NULL, `modelScope` TEXT NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`generation`, `clusterId`, `prototypeIndex`))",
+        "fields": [
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "clusterId",
+            "columnName": "clusterId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "prototypeIndex",
+            "columnName": "prototypeIndex",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "embedding",
+            "columnName": "embedding",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sampleCount",
+            "columnName": "sampleCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerScope",
+            "columnName": "providerScope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelScope",
+            "columnName": "modelScope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generation",
+            "clusterId",
+            "prototypeIndex"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_face_cluster_prototypes_generation_providerScope_modelScope_clusterId",
+            "unique": false,
+            "columnNames": [
+              "generation",
+              "providerScope",
+              "modelScope",
+              "clusterId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_face_cluster_prototypes_generation_providerScope_modelScope_clusterId` ON `${TABLE_NAME}` (`generation`, `providerScope`, `modelScope`, `clusterId`)"
+          },
+          {
+            "name": "index_face_cluster_prototypes_generation_clusterId",
+            "unique": false,
+            "columnNames": [
+              "generation",
+              "clusterId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_face_cluster_prototypes_generation_clusterId` ON `${TABLE_NAME}` (`generation`, `clusterId`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "semantic_index_meta",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`spaceId` TEXT NOT NULL, `providerId` TEXT NOT NULL, `modelId` TEXT NOT NULL, `modelVersion` INTEGER NOT NULL, `dimension` INTEGER NOT NULL, `codecId` TEXT NOT NULL, `formatVersion` INTEGER NOT NULL, `activeGeneration` INTEGER NOT NULL, `isActive` INTEGER NOT NULL, `status` TEXT NOT NULL, `vectorCount` INTEGER NOT NULL, `indexedCount` INTEGER NOT NULL, `deletedCount` INTEGER NOT NULL, `indexKind` TEXT NOT NULL, `builtAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`spaceId`))",
+        "fields": [
+          {
+            "fieldPath": "spaceId",
+            "columnName": "spaceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelId",
+            "columnName": "modelId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelVersion",
+            "columnName": "modelVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dimension",
+            "columnName": "dimension",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "codecId",
+            "columnName": "codecId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "formatVersion",
+            "columnName": "formatVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeGeneration",
+            "columnName": "activeGeneration",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isActive",
+            "columnName": "isActive",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "vectorCount",
+            "columnName": "vectorCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "indexedCount",
+            "columnName": "indexedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deletedCount",
+            "columnName": "deletedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "indexKind",
+            "columnName": "indexKind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "builtAt",
+            "columnName": "builtAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "spaceId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_semantic_index_meta_isActive",
+            "unique": false,
+            "columnNames": [
+              "isActive"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_semantic_index_meta_isActive` ON `${TABLE_NAME}` (`isActive`)"
+          },
+          {
+            "name": "index_semantic_index_meta_providerId_modelId_modelVersion_dimension",
+            "unique": false,
+            "columnNames": [
+              "providerId",
+              "modelId",
+              "modelVersion",
+              "dimension"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_semantic_index_meta_providerId_modelId_modelVersion_dimension` ON `${TABLE_NAME}` (`providerId`, `modelId`, `modelVersion`, `dimension`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "semantic_maintenance_runs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`taskType` TEXT NOT NULL, `generation` INTEGER NOT NULL, `targetSpaceId` TEXT NOT NULL, `status` TEXT NOT NULL, `cursorPath` TEXT, `scannedCount` INTEGER NOT NULL, `convertedCount` INTEGER NOT NULL, `failedCount` INTEGER NOT NULL, `totalCount` INTEGER NOT NULL, `coverageCount` INTEGER NOT NULL, `lastError` TEXT, `startedAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `completedAt` INTEGER NOT NULL, `isActive` INTEGER NOT NULL, PRIMARY KEY(`taskType`, `generation`))",
+        "fields": [
+          {
+            "fieldPath": "taskType",
+            "columnName": "taskType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetSpaceId",
+            "columnName": "targetSpaceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cursorPath",
+            "columnName": "cursorPath",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "scannedCount",
+            "columnName": "scannedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "convertedCount",
+            "columnName": "convertedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failedCount",
+            "columnName": "failedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalCount",
+            "columnName": "totalCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "coverageCount",
+            "columnName": "coverageCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "startedAt",
+            "columnName": "startedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedAt",
+            "columnName": "completedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isActive",
+            "columnName": "isActive",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "taskType",
+            "generation"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_semantic_maintenance_runs_taskType_status",
+            "unique": false,
+            "columnNames": [
+              "taskType",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_semantic_maintenance_runs_taskType_status` ON `${TABLE_NAME}` (`taskType`, `status`)"
+          },
+          {
+            "name": "index_semantic_maintenance_runs_taskType_isActive",
+            "unique": false,
+            "columnNames": [
+              "taskType",
+              "isActive"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_semantic_maintenance_runs_taskType_isActive` ON `${TABLE_NAME}` (`taskType`, `isActive`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "semantic_cluster_generations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`spaceId` TEXT NOT NULL, `generation` INTEGER NOT NULL, `status` TEXT NOT NULL, `isActive` INTEGER NOT NULL, `sampleLimit` INTEGER NOT NULL, `sampledCount` INTEGER NOT NULL, `clusterCount` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `completedAt` INTEGER NOT NULL, PRIMARY KEY(`spaceId`, `generation`))",
+        "fields": [
+          {
+            "fieldPath": "spaceId",
+            "columnName": "spaceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isActive",
+            "columnName": "isActive",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sampleLimit",
+            "columnName": "sampleLimit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sampledCount",
+            "columnName": "sampledCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "clusterCount",
+            "columnName": "clusterCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedAt",
+            "columnName": "completedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "spaceId",
+            "generation"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_semantic_cluster_generations_spaceId_isActive",
+            "unique": false,
+            "columnNames": [
+              "spaceId",
+              "isActive"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_semantic_cluster_generations_spaceId_isActive` ON `${TABLE_NAME}` (`spaceId`, `isActive`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "semantic_cluster_meta",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`spaceId` TEXT NOT NULL, `generation` INTEGER NOT NULL, `clusterId` TEXT NOT NULL, `status` TEXT NOT NULL, `centroidBlob` BLOB NOT NULL, `memberCount` INTEGER NOT NULL, `score` REAL NOT NULL, `title` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`spaceId`, `generation`, `clusterId`))",
+        "fields": [
+          {
+            "fieldPath": "spaceId",
+            "columnName": "spaceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "clusterId",
+            "columnName": "clusterId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "centroidBlob",
+            "columnName": "centroidBlob",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "memberCount",
+            "columnName": "memberCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "score",
+            "columnName": "score",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "spaceId",
+            "generation",
+            "clusterId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_semantic_cluster_meta_spaceId_generation_status",
+            "unique": false,
+            "columnNames": [
+              "spaceId",
+              "generation",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_semantic_cluster_meta_spaceId_generation_status` ON `${TABLE_NAME}` (`spaceId`, `generation`, `status`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "semantic_cluster_members",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`spaceId` TEXT NOT NULL, `generation` INTEGER NOT NULL, `clusterId` TEXT NOT NULL, `rank` INTEGER NOT NULL, `filePath` TEXT NOT NULL, PRIMARY KEY(`spaceId`, `generation`, `clusterId`, `rank`))",
+        "fields": [
+          {
+            "fieldPath": "spaceId",
+            "columnName": "spaceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "clusterId",
+            "columnName": "clusterId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rank",
+            "columnName": "rank",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "spaceId",
+            "generation",
+            "clusterId",
+            "rank"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_semantic_cluster_members_spaceId_generation_clusterId",
+            "unique": false,
+            "columnNames": [
+              "spaceId",
+              "generation",
+              "clusterId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_semantic_cluster_members_spaceId_generation_clusterId` ON `${TABLE_NAME}` (`spaceId`, `generation`, `clusterId`)"
+          },
+          {
+            "name": "index_semantic_cluster_members_filePath",
+            "unique": false,
+            "columnNames": [
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_semantic_cluster_members_filePath` ON `${TABLE_NAME}` (`filePath`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "deletion_tombstones",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`pathKey` TEXT NOT NULL, `filePath` TEXT NOT NULL, `operation` TEXT NOT NULL, `state` TEXT NOT NULL, `attemptCount` INTEGER NOT NULL, `nextRetryAt` INTEGER NOT NULL, `leaseUntil` INTEGER NOT NULL, `leaseToken` TEXT, `lastErrorType` TEXT, `lastErrorCode` TEXT, `lastErrorMessage` TEXT, `sourceVersion` TEXT NOT NULL, `deletedAtMs` INTEGER NOT NULL, `firstAttemptAt` INTEGER NOT NULL, `lastAttemptAt` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`pathKey`))",
+        "fields": [
+          {
+            "fieldPath": "pathKey",
+            "columnName": "pathKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operation",
+            "columnName": "operation",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextRetryAt",
+            "columnName": "nextRetryAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseUntil",
+            "columnName": "leaseUntil",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseToken",
+            "columnName": "leaseToken",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastErrorType",
+            "columnName": "lastErrorType",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastErrorCode",
+            "columnName": "lastErrorCode",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastErrorMessage",
+            "columnName": "lastErrorMessage",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "sourceVersion",
+            "columnName": "sourceVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deletedAtMs",
+            "columnName": "deletedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstAttemptAt",
+            "columnName": "firstAttemptAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastAttemptAt",
+            "columnName": "lastAttemptAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "pathKey"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_deletion_tombstones_state_nextRetryAt_leaseUntil",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "nextRetryAt",
+              "leaseUntil"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_deletion_tombstones_state_nextRetryAt_leaseUntil` ON `${TABLE_NAME}` (`state`, `nextRetryAt`, `leaseUntil`)"
+          },
+          {
+            "name": "index_deletion_tombstones_leaseToken",
+            "unique": false,
+            "columnNames": [
+              "leaseToken"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_deletion_tombstones_leaseToken` ON `${TABLE_NAME}` (`leaseToken`)"
+          },
+          {
+            "name": "index_deletion_tombstones_filePath",
+            "unique": true,
+            "columnNames": [
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_deletion_tombstones_filePath` ON `${TABLE_NAME}` (`filePath`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "backup_import_staging",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generation` TEXT NOT NULL, `entryName` TEXT NOT NULL, `lineNumber` INTEGER NOT NULL, `stableKey` TEXT NOT NULL, `payload` TEXT NOT NULL, PRIMARY KEY(`generation`, `entryName`, `lineNumber`))",
+        "fields": [
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryName",
+            "columnName": "entryName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lineNumber",
+            "columnName": "lineNumber",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stableKey",
+            "columnName": "stableKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "payload",
+            "columnName": "payload",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generation",
+            "entryName",
+            "lineNumber"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_backup_import_staging_generation_entryName_lineNumber",
+            "unique": false,
+            "columnNames": [
+              "generation",
+              "entryName",
+              "lineNumber"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_backup_import_staging_generation_entryName_lineNumber` ON `${TABLE_NAME}` (`generation`, `entryName`, `lineNumber`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "album_snapshot_directories",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`directoryPath` TEXT NOT NULL, `mediaCount` INTEGER NOT NULL, `latestCapturedAtMs` INTEGER NOT NULL, `coverThumbnailPath` TEXT, `coverFilePath` TEXT, `snapshotVersion` INTEGER NOT NULL, PRIMARY KEY(`directoryPath`))",
+        "fields": [
+          {
+            "fieldPath": "directoryPath",
+            "columnName": "directoryPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaCount",
+            "columnName": "mediaCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "latestCapturedAtMs",
+            "columnName": "latestCapturedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "coverThumbnailPath",
+            "columnName": "coverThumbnailPath",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "coverFilePath",
+            "columnName": "coverFilePath",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "snapshotVersion",
+            "columnName": "snapshotVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "directoryPath"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_album_snapshot_directories_snapshotVersion",
+            "unique": false,
+            "columnNames": [
+              "snapshotVersion"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_album_snapshot_directories_snapshotVersion` ON `${TABLE_NAME}` (`snapshotVersion`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "album_snapshot_meta",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `activeVersion` INTEGER NOT NULL, `updatedAtMs` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeVersion",
+            "columnName": "activeVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "media_change_events",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`eventKey` TEXT NOT NULL, `profileId` TEXT NOT NULL, `eventType` TEXT NOT NULL, `volumeName` TEXT, `mediaType` TEXT, `mediaStoreId` INTEGER, `contentUri` TEXT, `flags` INTEGER NOT NULL, `firstObservedAtMs` INTEGER NOT NULL, `observedAtMs` INTEGER NOT NULL, `status` TEXT NOT NULL, `attemptCount` INTEGER NOT NULL, `nextAttemptAt` INTEGER NOT NULL, `leaseUntil` INTEGER NOT NULL, `leaseToken` TEXT, `lastError` TEXT, `createdAtMs` INTEGER NOT NULL, `updatedAtMs` INTEGER NOT NULL, PRIMARY KEY(`eventKey`))",
+        "fields": [
+          {
+            "fieldPath": "eventKey",
+            "columnName": "eventKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "profileId",
+            "columnName": "profileId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventType",
+            "columnName": "eventType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "volumeName",
+            "columnName": "volumeName",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "mediaType",
+            "columnName": "mediaType",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "mediaStoreId",
+            "columnName": "mediaStoreId",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "contentUri",
+            "columnName": "contentUri",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "flags",
+            "columnName": "flags",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstObservedAtMs",
+            "columnName": "firstObservedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "observedAtMs",
+            "columnName": "observedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextAttemptAt",
+            "columnName": "nextAttemptAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseUntil",
+            "columnName": "leaseUntil",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseToken",
+            "columnName": "leaseToken",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "createdAtMs",
+            "columnName": "createdAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "eventKey"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_media_change_events_profileId_status_observedAtMs",
+            "unique": false,
+            "columnNames": [
+              "profileId",
+              "status",
+              "observedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_change_events_profileId_status_observedAtMs` ON `${TABLE_NAME}` (`profileId`, `status`, `observedAtMs`)"
+          },
+          {
+            "name": "index_media_change_events_leaseToken",
+            "unique": false,
+            "columnNames": [
+              "leaseToken"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_change_events_leaseToken` ON `${TABLE_NAME}` (`leaseToken`)"
+          },
+          {
+            "name": "index_media_change_events_eventType_status",
+            "unique": false,
+            "columnNames": [
+              "eventType",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_media_change_events_eventType_status` ON `${TABLE_NAME}` (`eventType`, `status`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "media_store_references",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`stableKey` TEXT NOT NULL, `profileId` TEXT NOT NULL, `volumeName` TEXT NOT NULL, `mediaType` TEXT NOT NULL, `mediaStoreId` INTEGER NOT NULL, `contentUri` TEXT NOT NULL, `filePath` TEXT NOT NULL, `sourceVersion` TEXT NOT NULL, `observedAtMs` INTEGER NOT NULL, `scanGeneration` INTEGER NOT NULL, PRIMARY KEY(`stableKey`))",
+        "fields": [
+          {
+            "fieldPath": "stableKey",
+            "columnName": "stableKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "profileId",
+            "columnName": "profileId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "volumeName",
+            "columnName": "volumeName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaType",
+            "columnName": "mediaType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaStoreId",
+            "columnName": "mediaStoreId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentUri",
+            "columnName": "contentUri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceVersion",
+            "columnName": "sourceVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "observedAtMs",
+            "columnName": "observedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scanGeneration",
+            "columnName": "scanGeneration",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "stableKey"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_media_store_references_profileId_volumeName_mediaType_mediaStoreId",
+            "unique": true,
+            "columnNames": [
+              "profileId",
+              "volumeName",
+              "mediaType",
+              "mediaStoreId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_media_store_references_profileId_volumeName_mediaType_mediaStoreId` ON `${TABLE_NAME}` (`profileId`, `volumeName`, `mediaType`, `mediaStoreId`)"
+          },
+          {
+            "name": "index_media_store_references_profileId_filePath",
+            "unique": true,
+            "columnNames": [
+              "profileId",
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_media_store_references_profileId_filePath` ON `${TABLE_NAME}` (`profileId`, `filePath`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "enhancement_outbox",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`outboxId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `scanId` TEXT NOT NULL, `profileId` TEXT NOT NULL, `filePath` TEXT NOT NULL, `sourceVersion` TEXT NOT NULL, `mediaType` TEXT NOT NULL, `pipelineScope` TEXT NOT NULL, `enqueueAnalysis` INTEGER NOT NULL, `enqueueThumbnail` INTEGER NOT NULL, `parentPath` TEXT NOT NULL, `status` TEXT NOT NULL, `attemptCount` INTEGER NOT NULL, `nextRetryAt` INTEGER NOT NULL, `leaseUntil` INTEGER NOT NULL, `leaseToken` TEXT, `lastError` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "outboxId",
+            "columnName": "outboxId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scanId",
+            "columnName": "scanId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "profileId",
+            "columnName": "profileId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceVersion",
+            "columnName": "sourceVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaType",
+            "columnName": "mediaType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pipelineScope",
+            "columnName": "pipelineScope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enqueueAnalysis",
+            "columnName": "enqueueAnalysis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enqueueThumbnail",
+            "columnName": "enqueueThumbnail",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentPath",
+            "columnName": "parentPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextRetryAt",
+            "columnName": "nextRetryAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseUntil",
+            "columnName": "leaseUntil",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseToken",
+            "columnName": "leaseToken",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "outboxId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_enhancement_outbox_scanId_status_createdAt",
+            "unique": false,
+            "columnNames": [
+              "scanId",
+              "status",
+              "createdAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_enhancement_outbox_scanId_status_createdAt` ON `${TABLE_NAME}` (`scanId`, `status`, `createdAt`)"
+          },
+          {
+            "name": "index_enhancement_outbox_status_nextRetryAt_createdAt",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "nextRetryAt",
+              "createdAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_enhancement_outbox_status_nextRetryAt_createdAt` ON `${TABLE_NAME}` (`status`, `nextRetryAt`, `createdAt`)"
+          },
+          {
+            "name": "index_enhancement_outbox_leaseUntil",
+            "unique": false,
+            "columnNames": [
+              "leaseUntil"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_enhancement_outbox_leaseUntil` ON `${TABLE_NAME}` (`leaseUntil`)"
+          },
+          {
+            "name": "index_enhancement_outbox_leaseToken",
+            "unique": false,
+            "columnNames": [
+              "leaseToken"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_enhancement_outbox_leaseToken` ON `${TABLE_NAME}` (`leaseToken`)"
+          },
+          {
+            "name": "index_enhancement_outbox_profileId_filePath_sourceVersion_pipelineScope",
+            "unique": true,
+            "columnNames": [
+              "profileId",
+              "filePath",
+              "sourceVersion",
+              "pipelineScope"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_enhancement_outbox_profileId_filePath_sourceVersion_pipelineScope` ON `${TABLE_NAME}` (`profileId`, `filePath`, `sourceVersion`, `pipelineScope`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "library_pipeline",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`pipelineId` TEXT NOT NULL, `stage` TEXT NOT NULL, `activeRunId` TEXT, `candidateGeneration` INTEGER NOT NULL, `publishedGeneration` INTEGER NOT NULL, `hasPublishedBaseline` INTEGER NOT NULL, `rebuildRequested` INTEGER NOT NULL, `rebuildRequired` INTEGER NOT NULL, `rebuildReason` TEXT, `progressCompleted` INTEGER NOT NULL, `progressTotal` INTEGER NOT NULL, `failureCount` INTEGER NOT NULL, `lastError` TEXT, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`pipelineId`))",
+        "fields": [
+          {
+            "fieldPath": "pipelineId",
+            "columnName": "pipelineId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stage",
+            "columnName": "stage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeRunId",
+            "columnName": "activeRunId",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "candidateGeneration",
+            "columnName": "candidateGeneration",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "publishedGeneration",
+            "columnName": "publishedGeneration",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "hasPublishedBaseline",
+            "columnName": "hasPublishedBaseline",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rebuildRequested",
+            "columnName": "rebuildRequested",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rebuildRequired",
+            "columnName": "rebuildRequired",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rebuildReason",
+            "columnName": "rebuildReason",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "progressCompleted",
+            "columnName": "progressCompleted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "progressTotal",
+            "columnName": "progressTotal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failureCount",
+            "columnName": "failureCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "pipelineId"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "home_media_snapshot",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`filePath` TEXT NOT NULL, `fileName` TEXT NOT NULL, `mediaType` TEXT NOT NULL, `capturedAtMs` INTEGER NOT NULL, `modifiedAtMs` INTEGER NOT NULL, `fileSize` INTEGER NOT NULL, `isFavorite` INTEGER NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, `mimeType` TEXT NOT NULL, `durationMs` INTEGER NOT NULL, `parentPath` TEXT NOT NULL, `latitude` REAL, `longitude` REAL, `make` TEXT, `model` TEXT, `aperture` TEXT, `focalLength` TEXT, `iso` TEXT, `exposureTime` TEXT, `orientation` INTEGER NOT NULL, `thumbnailPath` TEXT, `thumbnailState` TEXT NOT NULL, `isCorrupted` INTEGER NOT NULL, `publishedGeneration` INTEGER NOT NULL, PRIMARY KEY(`filePath`))",
+        "fields": [
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileName",
+            "columnName": "fileName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaType",
+            "columnName": "mediaType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capturedAtMs",
+            "columnName": "capturedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modifiedAtMs",
+            "columnName": "modifiedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileSize",
+            "columnName": "fileSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isFavorite",
+            "columnName": "isFavorite",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mimeType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentPath",
+            "columnName": "parentPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "latitude",
+            "columnName": "latitude",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "longitude",
+            "columnName": "longitude",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "make",
+            "columnName": "make",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "model",
+            "columnName": "model",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "aperture",
+            "columnName": "aperture",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "focalLength",
+            "columnName": "focalLength",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "iso",
+            "columnName": "iso",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "exposureTime",
+            "columnName": "exposureTime",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "orientation",
+            "columnName": "orientation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "thumbnailPath",
+            "columnName": "thumbnailPath",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "thumbnailState",
+            "columnName": "thumbnailState",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCorrupted",
+            "columnName": "isCorrupted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "publishedGeneration",
+            "columnName": "publishedGeneration",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "filePath"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_home_media_snapshot_publishedGeneration",
+            "unique": false,
+            "columnNames": [
+              "publishedGeneration"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_home_media_snapshot_publishedGeneration` ON `${TABLE_NAME}` (`publishedGeneration`)"
+          },
+          {
+            "name": "index_home_media_snapshot_capturedAtMs_filePath",
+            "unique": false,
+            "columnNames": [
+              "capturedAtMs",
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_home_media_snapshot_capturedAtMs_filePath` ON `${TABLE_NAME}` (`capturedAtMs`, `filePath`)"
+          },
+          {
+            "name": "index_home_media_snapshot_parentPath_capturedAtMs_filePath",
+            "unique": false,
+            "columnNames": [
+              "parentPath",
+              "capturedAtMs",
+              "filePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_home_media_snapshot_parentPath_capturedAtMs_filePath` ON `${TABLE_NAME}` (`parentPath`, `capturedAtMs`, `filePath`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "thumbnail_lane_wake",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`laneId` TEXT NOT NULL, `deliveryState` TEXT NOT NULL, `revision` INTEGER NOT NULL, `dispatchToken` TEXT, `dispatchLeaseUntil` INTEGER NOT NULL, `runToken` TEXT, `runLeaseUntil` INTEGER NOT NULL, `notBefore` INTEGER NOT NULL, `enqueueAttemptCount` INTEGER NOT NULL, `nextDispatchAt` INTEGER NOT NULL, `lastDispatchError` TEXT, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`laneId`))",
+        "fields": [
+          {
+            "fieldPath": "laneId",
+            "columnName": "laneId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deliveryState",
+            "columnName": "deliveryState",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dispatchToken",
+            "columnName": "dispatchToken",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "dispatchLeaseUntil",
+            "columnName": "dispatchLeaseUntil",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "runToken",
+            "columnName": "runToken",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "runLeaseUntil",
+            "columnName": "runLeaseUntil",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notBefore",
+            "columnName": "notBefore",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enqueueAttemptCount",
+            "columnName": "enqueueAttemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextDispatchAt",
+            "columnName": "nextDispatchAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastDispatchError",
+            "columnName": "lastDispatchError",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "laneId"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'bbf96411a67d68f251a1173a70d16bf7')"
+    ]
+  }
+}

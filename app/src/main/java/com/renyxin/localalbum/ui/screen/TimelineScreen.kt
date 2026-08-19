@@ -460,36 +460,8 @@ fun PagedTimelineScreen(
     val appendLoadState = pagedItems.loadState.append
 
     Box(modifier = modifier.fillMaxSize()) {
-        if (refreshLoadState is LoadState.Loading && pagedItems.itemCount == 0) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator()
-                    Spacer(Modifier.height(16.dp))
-                    Text("正在加载时间线…", style = MaterialTheme.typography.bodyLarge)
-                }
-            }
-        } else if (refreshLoadState is LoadState.Error) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "加载失败: ${refreshLoadState.error.message}",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-        } else if (pagedItems.itemCount == 0) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("暂无媒体文件", style = MaterialTheme.typography.bodyLarge)
-            }
-        } else {
+        // 已加载项目始终优先于 refresh 状态，避免后台 refresh 暂时遮掉现有快照。
+        if (pagedItems.itemCount > 0) {
             LazyVerticalGrid(
                 state = gridState,
                 columns = GridCells.Fixed(columns),
@@ -538,6 +510,35 @@ fun PagedTimelineScreen(
                         }
                     }
                 }
+            }
+        } else if (refreshLoadState is LoadState.Loading) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(16.dp))
+                    Text("正在加载时间线…", style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+        } else if (refreshLoadState is LoadState.Error) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "加载失败: ${refreshLoadState.error.message}",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        } else {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("暂无媒体文件", style = MaterialTheme.typography.bodyLarge)
             }
         }
     }

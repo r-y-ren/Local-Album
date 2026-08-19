@@ -167,8 +167,20 @@ class DatabaseExporterTest {
         override fun getFavoriteCountFlow(): Flow<Int> = flowOf(0)
         override suspend fun markCorrupted(path: String) {}
         override suspend fun getMissingThumbnails(limit: Int): List<MediaEntity> = emptyList()
-        override suspend fun updateThumbnail(filePath: String, thumbPath: String) {
-            store[filePath]?.let { store[filePath] = it.copy(thumbnailPath = thumbPath) }
+        override suspend fun updateThumbnailIfCanonical(
+            filePath: String,
+            sourceVersion: String,
+            mediaType: String,
+            thumbPath: String,
+        ): Int {
+            val item = store[filePath] ?: return 0
+            if ("${item.modifiedAtMs}:${item.fileSize}" != sourceVersion ||
+                item.mediaType.name != mediaType || item.isTrashed
+            ) {
+                return 0
+            }
+            store[filePath] = item.copy(thumbnailPath = thumbPath)
+            return 1
         }
         override suspend fun getMissingThumbnailsAfter(afterPath: String, limit: Int): List<MediaEntity> =
             store.toSortedMap().values.filter { it.filePath > afterPath && it.thumbnailPath == null && !it.isTrashed }.take(limit)

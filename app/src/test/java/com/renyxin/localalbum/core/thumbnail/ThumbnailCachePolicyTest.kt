@@ -67,9 +67,10 @@ class ThumbnailCachePolicyTest {
     }
 
     @Test
-    fun `legacy cropped preview cache is rejected while grid remains compatible`() {
-        assertFalse(ThumbnailSpec.isCurrentCachePath(ThumbnailSpec.SIZE_PREVIEW, "/cache/photo_preview_v3.webp"))
-        assertTrue(ThumbnailSpec.isCurrentCachePath(ThumbnailSpec.SIZE_PREVIEW, "/cache/photo_preview_v4.webp"))
-        assertTrue(ThumbnailSpec.isCurrentCachePath(ThumbnailSpec.SIZE_GRID, "/cache/legacy-grid.webp"))
+    fun `legacy format is rejected for both grid and preview`() {
+        assertFalse(ThumbnailSpec.isCurrentCachePath(ThumbnailSpec.SIZE_PREVIEW, "/cache/photo_preview_v4.webp"))
+        assertTrue(ThumbnailSpec.isCurrentCachePath(ThumbnailSpec.SIZE_PREVIEW, "/cache/photo_preview_v5.webp"))
+        assertFalse(ThumbnailSpec.isCurrentCachePath(ThumbnailSpec.SIZE_GRID, "/cache/legacy-grid.webp"))
+        assertTrue(ThumbnailSpec.isCurrentCachePath(ThumbnailSpec.SIZE_GRID, "/cache/photo_grid_v5.webp"))
     }
 }

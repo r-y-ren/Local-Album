@@ -60,8 +60,13 @@ object BackupContract {
     val byEntry = tables.associateBy(Table::entry)
 
     /** 明确写入 manifest，审计时不依赖代码中的隐式约定。 */
+    /**
+     * 重建责任：导入事务清空 thumbnail task/cache/lane 与 thumbnailPath，发布 PLACEHOLDER
+     * home baseline；启动 repair 重新 seed 完整身份任务和双 lane。pipeline/home snapshot 也不跨库恢复。
+     */
     val excludedTables = listOf(
-        "thumbnail_cache_entries", "thumbnail_tasks", "analysis_tasks", "enhancement_outbox", "scan_runs", "scan_staging",
+        "thumbnail_cache_entries", "thumbnail_tasks", "thumbnail_lane_wake",
+        "library_pipeline", "home_media_snapshot", "analysis_tasks", "enhancement_outbox", "scan_runs", "scan_staging",
         "media_change_events", "media_store_references",
         "import_media_staging", "import_face_staging", "import_embedding_staging", "import_fts_staging",
         "semantic_maintenance_runs", "duplicate_hash_staging", "duplicate_groups", "duplicate_members",

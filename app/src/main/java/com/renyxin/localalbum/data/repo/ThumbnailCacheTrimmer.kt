@@ -4,21 +4,7 @@ import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
 import com.renyxin.localalbum.data.db.dao.ThumbnailCacheDao
 import java.io.File
 
-/**
- * 缩略图缓存裁剪器：把缓存目录总占用压回字节预算内。
- *
- * 裁剪策略：
- * - 以 LRU 顺序（lastAccessAt 升序）分页枚举候选，逐个删除文件并同步删除 DAO 记录，
- *   直到总占用 ≤ 预算或无候选可删；
- * - 近期访问保护：lastAccessAt 在 [ThumbnailSpec.RECENT_TOUCH_PROTECTION_MS] 保护窗内的
- *   条目不参与本轮裁剪；
- * - 文件删除失败（如被占用）的条目标记为待重试（markDeleteRetry），不计入已回收字节。
- *
- * 触发时机：由 ThumbnailWorker 在每次缩略图生成批次收尾后调用（`trim()` 使用默认预算）。
- *
- * @param dao 缩略图缓存索引 DAO（提供总占用、候选枚举与记录删除）
- * @param deleteFile 文件删除函数，默认 `File.delete()`；测试可注入假实现
- */
+/** READY -> EVICTING -> EVICTED 的完整身份 LRU；删除失败稳定进入 DELETE_RETRY。 */
 class ThumbnailCacheTrimmer(
     private val dao: ThumbnailCacheDao,
     private val deleteFile: (File) -> Boolean = { it.delete() },
@@ -31,45 +17,46 @@ class ThumbnailCacheTrimmer(
         require(budgetBytes >= 0 && pageSize > 0)
         var remaining = dao.totalManagedBytes()
         if (remaining <= budgetBytes) return 0
-        var cursorAccess = Long.MIN_VALUE
-        var cursorPath = ""
-        var cursorSizeClass = ""
-        var cursorVersion = ""
+        var access = Long.MIN_VALUE
+        var path = ""
+        var mediaType = ""
+        var sourceVersion = ""
+        var sizeClass = ""
+        var formatVersion = Int.MIN_VALUE
         var removed = 0
         val protectedBefore = now - ThumbnailSpec.RECENT_TOUCH_PROTECTION_MS
-
         while (remaining > budgetBytes) {
             val candidates = dao.evictionCandidatesAfter(
-                now = now,
-                protectedBefore = protectedBefore,
-                afterAccess = cursorAccess,
-                afterPath = cursorPath,
-                afterSizeClass = cursorSizeClass,
-                afterSourceVersion = cursorVersion,
-                limit = pageSize,
+                now,protectedBefore,access,path,mediaType,sourceVersion,sizeClass,formatVersion,pageSize,
             )
             if (candidates.isEmpty()) break
             for (entry in candidates) {
-                cursorAccess = entry.lastAccessAt
-                cursorPath = entry.filePath
-                cursorSizeClass = entry.sizeClass
-                cursorVersion = entry.sourceVersion
+                access = entry.lastAccessAt
+                path = entry.filePath
+                mediaType = entry.mediaType
+                sourceVersion = entry.sourceVersion
+                sizeClass = entry.sizeClass
+                formatVersion = entry.formatVersion
+                if (dao.beginEviction(
+                        entry.filePath,entry.mediaType,entry.sourceVersion,entry.sizeClass,
+                        entry.formatVersion,entry.path,now,now + EVICTION_LEASE_MS,
+                    ) != 1
+                ) continue
                 val file = File(entry.path)
-                val deleted = !file.exists() || deleteFile(file)
-                if (deleted) {
-                    if (dao.deleteAfterFileRemoved(
-                            entry.filePath,
-                            entry.sizeClass,
-                            entry.sourceVersion,
-                            entry.path,
-                            now,
-                        ) > 0
+                if (!file.exists() || deleteFile(file)) {
+                    if (dao.finishEviction(
+                            entry.filePath,entry.mediaType,entry.sourceVersion,entry.sizeClass,
+                            entry.formatVersion,entry.path,
+                        ) == 1
                     ) {
                         remaining -= entry.byteSize
                         removed++
                     }
                 } else {
-                    dao.markDeleteRetry(entry.filePath, entry.sizeClass, entry.sourceVersion, entry.path)
+                    dao.markDeleteRetry(
+                        entry.filePath,entry.mediaType,entry.sourceVersion,entry.sizeClass,
+                        entry.formatVersion,entry.path,
+                    )
                 }
                 if (remaining <= budgetBytes) break
             }
@@ -77,4 +64,6 @@ class ThumbnailCacheTrimmer(
         }
         return removed
     }
+
+    companion object { private const val EVICTION_LEASE_MS = 60_000L }
 }

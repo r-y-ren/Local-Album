@@ -62,6 +62,8 @@ import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 import com.renyxin.localalbum.core.pipeline.AnalysisProgress
 import com.renyxin.localalbum.core.pipeline.ProgressManager
+import com.renyxin.localalbum.data.db.entity.LibraryPipelineStage
+import com.renyxin.localalbum.data.db.entity.LibraryPipelineState
 
 /**
  * 全局进度指示器（Phase 5.1-5.3）。
@@ -74,12 +76,11 @@ import com.renyxin.localalbum.core.pipeline.ProgressManager
  * - 取消按钮（支持中断耗时任务）
  * - 管道完成后自动隐藏
  *
- * 浮层三态（消除「扫描期空白 / 识别批次间空窗」误号）：
- * 1. [ProgressOverlayMode.ANALYSIS]：分析管线运行中，展示原有可展开分析卡片；
- * 2. [ProgressOverlayMode.SCAN]：核心扫描运行中（管线尚未开始），展示扫描进度卡片；
- * 3. [ProgressOverlayMode.WAITING]：增强任务已入队但管线批次间空窗
- *    （AnalysisWorker 按批租约执行，每批结束 onPipelineComplete 会短暂将
- *    isCompleted 置 true），展示「等待下一批次」卡片避免浮层消失。
+ * 浮层优先采用持久自动阶段覆盖陈旧内存信号：
+ * 1. [ProgressOverlayMode.SCAN]：持久 Scan 阶段展示扫描进度；
+ * 2. [ProgressOverlayMode.THUMBNAILS]：持久 Thumbnails/Publish 阶段展示主页缩略图构建进度；
+ * 3. [ProgressOverlayMode.ANALYSIS]：其余阶段只要存在真实活跃推理就展示分析进度；
+ * 4. [ProgressOverlayMode.WAITING]：仅非空自动 Analysis 计划的 Worker 批次间空窗展示等待卡片。
  *
  * 使用方式：
  * ```kotlin
@@ -92,28 +93,24 @@ import com.renyxin.localalbum.core.pipeline.ProgressManager
  * @param progressManager 管道级 [ProgressManager]
  * @param onCancel 取消回调（可选），用户点击取消按钮时调用
  * @param modifier 外部 Modifier
- * @param scanMessage 核心扫描阶段的人类可读状态文案；null 表示当前无核心扫描
- * @param scanProcessed 核心扫描已处理文件数（0 表示不确定进度）
- * @param scanTotal 核心扫描总文件数（0 表示不确定进度）
- * @param analysisPending 增强任务已入队/运行中（EnhancementState 为
- *   QUEUED/RUNNING/WAITING_FOR_CORE 时为 true），用于批次间空窗保持浮层
+ * @param pipelineState 持久流水线状态；阶段、发布门禁及进度均以它为准
+ * @param scanMessage 扫描阶段的人类可读状态文案；空值时使用持久阶段默认文案
  */
 @Composable
 fun GlobalProgressIndicator(
     progressManager: ProgressManager,
+    pipelineState: LibraryPipelineState = LibraryPipelineState(),
+    automaticAnalysisEnabled: Boolean = true,
     onCancel: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     scanMessage: String? = null,
-    scanProcessed: Int = 0,
-    scanTotal: Int = 0,
-    analysisPending: Boolean = false,
 ) {
     val progress by progressManager.progress.collectAsState()
     val analysisVisible = !progress.isCompleted && (progress.totalFiles > 0 || progress.hasError)
     val overlayMode = resolveProgressOverlayMode(
+        pipelineState = pipelineState,
         analysisRunning = analysisVisible,
-        scanActive = scanMessage != null,
-        analysisPending = analysisPending,
+        automaticAnalysisEnabled = automaticAnalysisEnabled,
     )
     val isVisible = overlayMode != ProgressOverlayMode.HIDDEN
 
@@ -160,12 +157,16 @@ fun GlobalProgressIndicator(
                     ExpandableProgressCard(progress = progress, onCancel = onCancel)
                 ProgressOverlayMode.SCAN ->
                     ScanProgressCard(
-                        message = scanMessage.orEmpty(),
-                        processed = scanProcessed,
-                        total = scanTotal,
+                        message = scanMessage ?: scanMessageFor(pipelineState.stage),
+                        processed = pipelineState.progressCompleted,
+                        total = pipelineState.progressTotal,
                     )
-                ProgressOverlayMode.WAITING ->
-                    WaitingBatchCard()
+                ProgressOverlayMode.THUMBNAILS ->
+                    ThumbnailProgressCard(
+                        completed = pipelineState.progressCompleted,
+                        total = pipelineState.progressTotal,
+                    )
+                ProgressOverlayMode.WAITING -> WaitingBatchCard()
                 ProgressOverlayMode.HIDDEN -> Unit
             }
         }
@@ -177,32 +178,37 @@ enum class ProgressOverlayMode {
     /** 分析管线运行中：展示可展开的分析进度卡片。 */
     ANALYSIS,
 
-    /** 核心扫描运行中：展示扫描进度卡片。 */
+    /** 持久核心扫描阶段。 */
     SCAN,
 
-    /** 增强任务已入队但管线批次间空窗：展示等待卡片。 */
+    /** 持久主页缩略图/发布阶段。 */
+    THUMBNAILS,
+
+    /** 真实 Analysis 阶段的批次间空窗。 */
     WAITING,
 
     /** 无任何进度可展示：浮层隐藏。 */
     HIDDEN,
 }
 
-/**
- * 浮层模式判定（纯函数，供单元测试覆盖）。
- *
- * 优先级：分析运行 > 核心扫描 > 等待批次 > 隐藏。
- * 分析批次间空窗由 [analysisPending]（EnhancementState 为 QUEUED/RUNNING/WAITING_FOR_CORE）
- * 兜底，避免浮层在 Worker 退避重试间隙闪烁消失。
- */
+/** 浮层模式纯函数：持久自动核心阶段优先，其他阶段保留真实用户分析进度。 */
 internal fun resolveProgressOverlayMode(
+    pipelineState: LibraryPipelineState,
     analysisRunning: Boolean,
-    scanActive: Boolean,
-    analysisPending: Boolean,
+    automaticAnalysisEnabled: Boolean = true,
 ): ProgressOverlayMode = when {
+    pipelineState.stage.isThumbnail || pipelineState.stage.isPublish -> ProgressOverlayMode.THUMBNAILS
+    pipelineState.stage.isScan -> ProgressOverlayMode.SCAN
     analysisRunning -> ProgressOverlayMode.ANALYSIS
-    scanActive -> ProgressOverlayMode.SCAN
-    analysisPending -> ProgressOverlayMode.WAITING
+    pipelineState.stage.isAnalysis && automaticAnalysisEnabled -> ProgressOverlayMode.WAITING
     else -> ProgressOverlayMode.HIDDEN
+}
+
+internal fun scanMessageFor(stage: LibraryPipelineStage): String = when (stage) {
+    LibraryPipelineStage.INITIAL_SCAN -> "首次扫描媒体库…"
+    LibraryPipelineStage.INCREMENTAL_SCAN -> "正在应用媒体变更…"
+    LibraryPipelineStage.REBUILD_SCAN -> "正在重建媒体索引…"
+    else -> "正在扫描媒体库…"
 }
 
 @Composable
@@ -298,7 +304,7 @@ private fun ExpandableProgressCard(
     }
 }
 
-/** 核心扫描阶段的轻量进度卡片（管线尚未开始，仅有 ScanState 数据）。 */
+/** 核心扫描阶段的轻量进度卡片。 */
 @Composable
 private fun ScanProgressCard(
     message: String,
@@ -362,7 +368,7 @@ private fun ScanProgressCard(
                 )
             }
             Text(
-                text = "扫描完成后将自动开始 AI 识别",
+                text = "扫描完成后将继续准备主页缩略图",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.outline,
             )
@@ -370,7 +376,52 @@ private fun ScanProgressCard(
     }
 }
 
-/** 识别批次间空窗的等待卡片（增强任务已入队，Worker 批次间隙）。 */
+/** 首次/增量主页缩略图与原子发布阶段。 */
+@Composable
+private fun ThumbnailProgressCard(completed: Int, total: Int) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(12.dp),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.97f),
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Text(
+                text = "正在准备主页缩略图",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = if (total > 0) "$completed / $total" else "正在生成缩略图并准备发布…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (total > 0) {
+                LinearProgressIndicator(
+                    progress = { (completed.toFloat() / total).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    strokeCap = StrokeCap.Round,
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    strokeCap = StrokeCap.Round,
+                )
+            }
+        }
+    }
+}
+
+/** 真实 Analysis 阶段识别批次间空窗的等待卡片。 */
 @Composable
 private fun WaitingBatchCard() {
     Card(

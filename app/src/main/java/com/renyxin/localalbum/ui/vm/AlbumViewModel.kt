@@ -17,6 +17,9 @@ import com.renyxin.localalbum.core.recommendation.Recommendation
 import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
 import com.renyxin.localalbum.data.repo.AlbumRepository
 import com.renyxin.localalbum.data.repo.AlbumStats
+import com.renyxin.localalbum.data.repo.ThumbnailRequest
+import com.renyxin.localalbum.data.repo.EnhancementOutboxRetryResult
+import com.renyxin.localalbum.data.repo.FailedTaskRetryResult
 import com.renyxin.localalbum.data.repo.FaceCluster
 import com.renyxin.localalbum.data.repo.FaceStats
 import com.renyxin.localalbum.data.repo.DuplicateGroup
@@ -53,7 +56,17 @@ class AlbumViewModel(
     val indexAvailability = repository.indexAvailability
     val coreScanState = repository.coreScanState
     val enhancementState = repository.enhancementState
+    val libraryPipelineState = repository.libraryPipelineState
     val albumSyncState = repository.albumSyncState
+    val failedThumbnailCount: StateFlow<Int> = repository.failedThumbnailCount
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    val failedAnalysisTaskCount: StateFlow<Int> = repository.failedAnalysisTaskCount
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    val failedEnhancementOutboxCount: StateFlow<Int> =
+        repository.failedEnhancementOutboxCount
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    val userTaskRetryAllowed: StateFlow<Boolean> = repository.userTaskRetryAllowed
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
     val favoriteCount: StateFlow<Int> = repository.favoriteCount
     val trashedCount: StateFlow<Int> = repository.trashedCount
     val stats: StateFlow<AlbumStats> = repository.stats
@@ -80,8 +93,28 @@ class AlbumViewModel(
 
     fun requestGridThumbnails(visible: List<MediaItem>, prefetch: List<MediaItem> = emptyList()) {
         viewModelScope.launch {
-            visible.forEach { repository.requestThumbnail(it, ThumbnailSpec.SIZE_GRID, ThumbnailSpec.PRIORITY_VISIBLE) }
-            prefetch.forEach { repository.requestThumbnail(it, ThumbnailSpec.SIZE_GRID, ThumbnailSpec.PRIORITY_PREFETCH) }
+            repository.requestThumbnails(
+                buildList {
+                    visible.forEach { item ->
+                        add(
+                            ThumbnailRequest(
+                                item,
+                                ThumbnailSpec.SIZE_GRID,
+                                ThumbnailSpec.PRIORITY_VISIBLE,
+                            ),
+                        )
+                    }
+                    prefetch.forEach { item ->
+                        add(
+                            ThumbnailRequest(
+                                item,
+                                ThumbnailSpec.SIZE_GRID,
+                                ThumbnailSpec.PRIORITY_PREFETCH,
+                            ),
+                        )
+                    }
+                },
+            )
         }
     }
 
@@ -98,6 +131,33 @@ class AlbumViewModel(
 
     /** 活跃的扫描任务 Job，用于取消操作 */
     private var scanJob: Job? = null
+
+    sealed interface FailedTaskRetryState {
+        data object Idle : FailedTaskRetryState
+        data object Running : FailedTaskRetryState
+        data class Completed(val result: FailedTaskRetryResult) : FailedTaskRetryState
+        data class Failed(val message: String) : FailedTaskRetryState
+    }
+
+    sealed interface EnhancementOutboxRetryState {
+        data object Idle : EnhancementOutboxRetryState
+        data object Running : EnhancementOutboxRetryState
+        data class Completed(val result: EnhancementOutboxRetryResult) : EnhancementOutboxRetryState
+        data class Failed(val message: String) : EnhancementOutboxRetryState
+    }
+
+    private val _thumbnailRetryState =
+        MutableStateFlow<FailedTaskRetryState>(FailedTaskRetryState.Idle)
+    val thumbnailRetryState: StateFlow<FailedTaskRetryState> = _thumbnailRetryState.asStateFlow()
+
+    private val _analysisRetryState =
+        MutableStateFlow<FailedTaskRetryState>(FailedTaskRetryState.Idle)
+    val analysisRetryState: StateFlow<FailedTaskRetryState> = _analysisRetryState.asStateFlow()
+
+    private val _enhancementOutboxRetryState =
+        MutableStateFlow<EnhancementOutboxRetryState>(EnhancementOutboxRetryState.Idle)
+    val enhancementOutboxRetryState: StateFlow<EnhancementOutboxRetryState> =
+        _enhancementOutboxRetryState.asStateFlow()
 
     // ---- Per-File 进度 (Phase 6.1) ----
 
@@ -165,14 +225,77 @@ class AlbumViewModel(
     }
 
     fun rescan() {
-        android.util.Log.i("AlbumViewModel", "rescan: 用户触发扫描")
-        // 修复：将 Job 赋值给 scanJob，使 cancelTask() 能真正中断扫描；
-        // 启动前取消上一次扫描，避免并发扫描叠加导致状态/数据竞态。
+        android.util.Log.i("AlbumViewModel", "rescan: 用户触发增量刷新")
+        // 普通刷新只唤醒持久 journal；不会授权根目录遍历，也不会抢占当前流水线阶段。
         scanJob?.cancel()
         scanJob = viewModelScope.launch {
-            // Post-core analysis/thumbnail work is released exclusively by the durable
-            // enhancement outbox; the UI must not start a full-library pre-generation pass.
             repository.rescan()
+        }
+    }
+
+    /**
+     * 用户确认后的唯一完整根目录遍历入口。
+     * 请求只写入持久控制面；若缩略图或 AI 正在运行，将在当前阶段完整收敛后启动。
+     */
+    fun requestFullRebuild() {
+        android.util.Log.i("AlbumViewModel", "requestFullRebuild: 用户确认完整重建")
+        viewModelScope.launch {
+            repository.requestFullRebuild()
+        }
+    }
+
+    fun retryFailedThumbnails() {
+        viewModelScope.launch {
+            _thumbnailRetryState.value = FailedTaskRetryState.Running
+            _thumbnailRetryState.value = runCatching {
+                repository.retryFailedThumbnails()
+            }.fold(
+                onSuccess = { result ->
+                    if (result.admitted) {
+                        FailedTaskRetryState.Completed(result)
+                    } else {
+                        FailedTaskRetryState.Failed(RETRY_NOT_ADMITTED_MESSAGE)
+                    }
+                },
+                onFailure = { FailedTaskRetryState.Failed(it.message ?: "重试失败") },
+            )
+        }
+    }
+
+    fun retryFailedAnalysis() {
+        viewModelScope.launch {
+            _analysisRetryState.value = FailedTaskRetryState.Running
+            _analysisRetryState.value = runCatching {
+                repository.retryFailedAnalysis()
+            }.fold(
+                onSuccess = { result ->
+                    if (result.admitted) {
+                        FailedTaskRetryState.Completed(result)
+                    } else {
+                        FailedTaskRetryState.Failed(RETRY_NOT_ADMITTED_MESSAGE)
+                    }
+                },
+                onFailure = { FailedTaskRetryState.Failed(it.message ?: "重试失败") },
+            )
+        }
+    }
+
+    /** Retries failed handoff rows by converting them into user-owned queues. */
+    fun retryFailedEnhancementOutbox() {
+        viewModelScope.launch {
+            _enhancementOutboxRetryState.value = EnhancementOutboxRetryState.Running
+            _enhancementOutboxRetryState.value = runCatching {
+                repository.retryFailedEnhancementOutbox()
+            }.fold(
+                onSuccess = { result ->
+                    if (result.admitted) {
+                        EnhancementOutboxRetryState.Completed(result)
+                    } else {
+                        EnhancementOutboxRetryState.Failed(RETRY_NOT_ADMITTED_MESSAGE)
+                    }
+                },
+                onFailure = { EnhancementOutboxRetryState.Failed(it.message ?: "重试失败") },
+            )
         }
     }
 
@@ -566,6 +689,10 @@ class AlbumViewModel(
                 BackupState.Error(result.errorMessage ?: "导入失败")
             }
         }
+    }
+
+    private companion object {
+        const val RETRY_NOT_ADMITTED_MESSAGE = "当前流水线阶段尚未结束，请稍后重试"
     }
 
     /** 取消待确认的导入，清理临时文件。 */

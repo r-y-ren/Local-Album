@@ -183,6 +183,17 @@ abstract class MediaChangeDao {
     )
     abstract suspend fun clearReconciliationHint(profileId: String): Int
 
+    /**
+     * Ambiguous provider notifications are a rebuild advisory, not permission to traverse every
+     * root. The serialized pipeline persists NEEDS_REBUILD before clearing these hints.
+     */
+    @Query(
+        """SELECT MAX(observedAtMs) FROM media_change_events
+           WHERE profileId = :profileId AND eventType = 'RECONCILIATION'
+             AND status IN ('PENDING', 'LEASED')""",
+    )
+    abstract suspend fun latestReconciliationHintAt(profileId: String): Long?
+
     /** Clears only notifications observed before a successful reconciliation started. */
     @Query(
         """DELETE FROM media_change_events
@@ -205,6 +216,13 @@ abstract class MediaChangeDao {
              AND status IN ('PENDING', 'LEASED'))""",
     )
     abstract suspend fun hasOutstandingMediaChanges(profileId: String): Boolean
+
+    @Query(
+        """SELECT COUNT(*) FROM media_change_events
+           WHERE profileId = :profileId AND eventType = 'MEDIA'
+             AND status IN ('PENDING', 'LEASED')""",
+    )
+    abstract suspend fun countOutstandingMediaChanges(profileId: String): Int
 
     @Query(
         """SELECT EXISTS(SELECT 1 FROM media_change_events

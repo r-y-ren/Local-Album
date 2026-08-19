@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import com.renyxin.localalbum.data.db.entity.AnalysisTaskEntity
+import kotlinx.coroutines.flow.Flow
 
 @Dao
 abstract class AnalysisTaskDao {
@@ -126,6 +127,19 @@ abstract class AnalysisTaskDao {
     )
     abstract suspend fun recoverInterruptedLeases(now: Long): Int
 
+    /** Strict pipeline recovery never changes a historical scan that is not currently admitted. */
+    @Query(
+        "UPDATE analysis_tasks SET status = 'PENDING', leaseUntil = 0, " +
+            "leaseToken = NULL, updatedAt = :now WHERE status = 'RUNNING' AND (" +
+            "(:includeUserTasks = 1 AND scanId IS NULL) OR " +
+            "(:admittedScanId IS NOT NULL AND scanId = :admittedScanId))",
+    )
+    abstract suspend fun recoverInterruptedLeasesForAdmission(
+        admittedScanId: String?,
+        includeUserTasks: Boolean,
+        now: Long,
+    ): Int
+
     @Query("UPDATE analysis_tasks SET status = 'PENDING', leaseUntil = 0, leaseToken = NULL, updatedAt = :now WHERE status = 'RUNNING' AND leaseUntil <= :now")
     abstract suspend fun recoverExpiredLeases(now: Long): Int
 
@@ -173,10 +187,13 @@ abstract class AnalysisTaskDao {
     @Query(
         "SELECT taskId FROM analysis_tasks " +
             "WHERE status = 'PENDING' AND nextRetryAt <= :now AND pipelineScope = :scope " +
-            "AND ((:includeUserTasks = 1 AND scanId IS NULL) OR scanId IN (" +
-            "SELECT scanId FROM scan_runs " +
-            "WHERE coreScanState = 'COMPLETED' " +
-            "AND enhancementState IN ('QUEUED', 'RUNNING'))) " +
+            "AND ((:includeUserTasks = 1 AND scanId IS NULL) OR " +
+            "(:admitAnyScan = 1 AND scanId IN (SELECT scanId FROM scan_runs " +
+            "WHERE coreScanState = 'COMPLETED' AND enhancementState IN ('QUEUED', 'RUNNING'))) OR " +
+            "(:admittedScanId IS NOT NULL AND scanId = :admittedScanId AND EXISTS (" +
+            "SELECT 1 FROM scan_runs run WHERE run.scanId = :admittedScanId " +
+            "AND run.coreScanState = 'COMPLETED' " +
+            "AND run.enhancementState IN ('QUEUED', 'RUNNING')))) " +
             "ORDER BY priority DESC, createdAt ASC LIMIT :limit",
     )
     protected abstract suspend fun findClaimableIds(
@@ -184,6 +201,8 @@ abstract class AnalysisTaskDao {
         limit: Int,
         scope: String,
         includeUserTasks: Boolean,
+        admittedScanId: String?,
+        admitAnyScan: Boolean,
     ): List<Long>
 
     @Query("UPDATE analysis_tasks SET status = 'RUNNING', leaseUntil = :leaseUntil, leaseToken = :leaseToken, attemptCount = attemptCount + 1, updatedAt = :now WHERE taskId IN (:ids) AND status = 'PENDING' AND nextRetryAt <= :now")
@@ -200,9 +219,18 @@ abstract class AnalysisTaskDao {
         leaseDurationMs: Long,
         scope: String = AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE,
         includeUserTasks: Boolean = true,
+        admittedScanId: String? = null,
+        admitAnyScan: Boolean = true,
     ): List<AnalysisTaskEntity> {
         recoverExpiredLeases(now)
-        val ids = findClaimableIds(now, limit, scope, includeUserTasks)
+        val ids = findClaimableIds(
+            now,
+            limit,
+            scope,
+            includeUserTasks,
+            admittedScanId,
+            admitAnyScan,
+        )
         if (ids.isEmpty()) return emptyList()
         markClaimed(ids, leaseToken, now + leaseDurationMs, now)
         return getByLeaseToken(leaseToken)
@@ -281,6 +309,26 @@ abstract class AnalysisTaskDao {
         now: Long,
     )
 
+    @Query(
+        "UPDATE analysis_tasks SET status = 'PENDING', attemptCount = 0, nextRetryAt = 0, " +
+            "leaseUntil = 0, leaseToken = NULL, lastError = NULL, priority = :priority, " +
+            "scanId = :scanId, updatedAt = :now " +
+            "WHERE pipelineScope = :scope AND status != 'RUNNING' " +
+            "AND (scanId IS NULL OR scanId != :scanId) AND EXISTS (" +
+            "SELECT 1 FROM media_items media " +
+            "WHERE media.filePath = analysis_tasks.filePath AND media.isTrashed = 0 " +
+            "AND media.mediaType = :mediaType " +
+            "AND analysis_tasks.sourceVersion = CAST(media.modifiedAtMs AS TEXT) || ':' || " +
+            "CAST(media.fileSize AS TEXT))",
+    )
+    protected abstract suspend fun resetCurrentForPipelineRun(
+        scope: String,
+        scanId: String,
+        mediaType: String,
+        priority: Int,
+        now: Long,
+    ): Int
+
     /** Number of rows changed by the immediately preceding statement on this transaction connection. */
     @Query("SELECT changes()")
     protected abstract suspend fun changedRowCount(): Int
@@ -301,6 +349,26 @@ abstract class AnalysisTaskDao {
         return FullReanalysisScopeResult(reset = reset, inserted = inserted, superseded = superseded)
     }
 
+    /**
+     * Idempotent initial/rebuild preparation. Re-entering the same persisted analysis stage never
+     * resets rows already owned (and possibly completed) by that scan, while a later rebuild takes
+     * ownership from an older run and intentionally schedules the current source version again.
+     */
+    @Transaction
+    open suspend fun preparePipelineRunScope(
+        scope: String,
+        scanId: String,
+        mediaType: String,
+        priority: Int,
+        now: Long,
+    ): FullReanalysisScopeResult {
+        val superseded = supersedeStaleForFullReanalysis(scope, mediaType, now)
+        val reset = resetCurrentForPipelineRun(scope, scanId, mediaType, priority, now)
+        seedMissingForFullReanalysis(scope, scanId, mediaType, priority, now)
+        val inserted = changedRowCount()
+        return FullReanalysisScopeResult(reset = reset, inserted = inserted, superseded = superseded)
+    }
+
     @Query("DELETE FROM analysis_tasks WHERE filePath IN (:paths)")
     abstract suspend fun deleteByPaths(paths: List<String>)
 
@@ -310,32 +378,57 @@ abstract class AnalysisTaskDao {
     @Query(
         "SELECT COUNT(*) FROM analysis_tasks " +
             "WHERE status IN ('PENDING', 'RUNNING') AND pipelineScope = :scope " +
-            "AND ((:includeUserTasks = 1 AND scanId IS NULL) OR scanId IN (" +
-            "SELECT scanId FROM scan_runs " +
-            "WHERE coreScanState = 'COMPLETED' " +
-            "AND enhancementState IN ('QUEUED', 'RUNNING')))"
+            "AND ((:includeUserTasks = 1 AND scanId IS NULL) OR " +
+            "(:admitAnyScan = 1 AND scanId IN (SELECT scanId FROM scan_runs " +
+            "WHERE coreScanState = 'COMPLETED' AND enhancementState IN ('QUEUED', 'RUNNING'))) OR " +
+            "(:admittedScanId IS NOT NULL AND scanId = :admittedScanId AND EXISTS (" +
+            "SELECT 1 FROM scan_runs run WHERE run.scanId = :admittedScanId " +
+            "AND run.coreScanState = 'COMPLETED' " +
+            "AND run.enhancementState IN ('QUEUED', 'RUNNING'))))"
     )
     abstract suspend fun countRunnable(
         scope: String = AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE,
         includeUserTasks: Boolean = true,
+        admittedScanId: String? = null,
+        admitAnyScan: Boolean = true,
     ): Int
 
     @Query(
         "SELECT COUNT(*) FROM analysis_tasks " +
             "WHERE status = 'PENDING' AND nextRetryAt <= :now AND pipelineScope = :scope " +
-            "AND ((:includeUserTasks = 1 AND scanId IS NULL) OR scanId IN (" +
-            "SELECT scanId FROM scan_runs " +
-            "WHERE coreScanState = 'COMPLETED' " +
-            "AND enhancementState IN ('QUEUED', 'RUNNING')))"
+            "AND ((:includeUserTasks = 1 AND scanId IS NULL) OR " +
+            "(:admitAnyScan = 1 AND scanId IN (SELECT scanId FROM scan_runs " +
+            "WHERE coreScanState = 'COMPLETED' AND enhancementState IN ('QUEUED', 'RUNNING'))) OR " +
+            "(:admittedScanId IS NOT NULL AND scanId = :admittedScanId AND EXISTS (" +
+            "SELECT 1 FROM scan_runs run WHERE run.scanId = :admittedScanId " +
+            "AND run.coreScanState = 'COMPLETED' " +
+            "AND run.enhancementState IN ('QUEUED', 'RUNNING'))))"
     )
     abstract suspend fun countClaimable(
         now: Long,
         scope: String = AnalysisTaskEntity.DEFAULT_PIPELINE_SCOPE,
         includeUserTasks: Boolean = true,
+        admittedScanId: String? = null,
+        admitAnyScan: Boolean = true,
     ): Int
 
     @Query("SELECT COUNT(*) FROM analysis_tasks WHERE scanId = :scanId AND status IN ('PENDING', 'RUNNING')")
     abstract suspend fun countActiveForScan(scanId: String): Int
+
+    @Query(
+        "SELECT COUNT(*) FROM analysis_tasks WHERE scanId = :scanId " +
+            "AND status = 'PENDING' AND nextRetryAt <= :now",
+    )
+    abstract suspend fun countClaimableForScan(scanId: String, now: Long): Int
+
+    @Query("SELECT COUNT(*) FROM analysis_tasks WHERE scanId = :scanId")
+    abstract suspend fun countTotalForScan(scanId: String): Int
+
+    @Query(
+        "SELECT COUNT(*) FROM analysis_tasks WHERE scanId = :scanId " +
+            "AND status IN ('DONE', 'FAILED', 'SUPERSEDED')",
+    )
+    abstract suspend fun countTerminalForScan(scanId: String): Int
 
     /** Counts every ownership form accepted by [findClaimableIds], for diagnostics only. */
     @Query(
@@ -363,6 +456,34 @@ abstract class AnalysisTaskDao {
 
     @Query("SELECT COUNT(*) FROM analysis_tasks WHERE scanId = :scanId AND status = 'FAILED'")
     abstract suspend fun countFailedForScan(scanId: String): Int
+
+    @Query("SELECT COUNT(*) FROM analysis_tasks WHERE status = 'FAILED'")
+    abstract suspend fun countFailed(): Int
+
+    @Query("SELECT COUNT(*) FROM analysis_tasks WHERE status = 'FAILED'")
+    abstract fun observeFailedCount(): Flow<Int>
+
+    @Query(
+        "SELECT COUNT(*) FROM analysis_tasks " +
+            "WHERE status = 'FAILED' AND pipelineScope IN (:scopes)",
+    )
+    abstract suspend fun countFailedForScopes(scopes: List<String>): Int
+
+    /**
+     * Explicit retry converts only currently executable scopes into resumable user work. Historical
+     * edition/policy failures remain FAILED and visible instead of becoming unclaimable PENDING rows.
+     */
+    @Query(
+        """UPDATE analysis_tasks SET status = 'PENDING', attemptCount = 0, nextRetryAt = 0,
+               leaseUntil = 0, leaseToken = NULL, lastError = NULL,
+               priority = :priority, scanId = NULL, updatedAt = :now
+           WHERE status = 'FAILED' AND pipelineScope IN (:scopes)""",
+    )
+    abstract suspend fun retryFailedAsUserForScopes(
+        scopes: List<String>,
+        priority: Int = AnalysisTaskEntity.PRIORITY_USER,
+        now: Long = System.currentTimeMillis(),
+    ): Int
 }
 
 data class FullReanalysisScopeResult(

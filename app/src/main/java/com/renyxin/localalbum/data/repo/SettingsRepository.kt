@@ -9,6 +9,9 @@ import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingMode
 import com.renyxin.localalbum.data.prefs.SettingsStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 对外统一的设置状态。
@@ -54,8 +57,13 @@ private data class MiscSettings(
 
 /**
  * 设置仓库：封装 [SettingsStore]，对外提供合并后的 [SettingsState] 流与增删操作。
+ * 扫描域实际变化只提交持久“需要重建”提示；是否开始全库遍历仍由用户显式确认。
  */
-class SettingsRepository(private val store: SettingsStore) {
+class SettingsRepository(
+    private val store: SettingsStore,
+    private val onScanScopeChanged: suspend (reason: String) -> Unit,
+) {
+    private val scanScopeMutex = Mutex()
 
     val state: Flow<SettingsState> = combine(
         combine(
@@ -140,11 +148,47 @@ class SettingsRepository(private val store: SettingsStore) {
         )
     }
     suspend fun setOnboardingCompleted(completed: Boolean) = store.setOnboardingCompleted(completed)
-    suspend fun addScanRoot(path: String) = store.addScanRoot(path)
-    suspend fun removeScanRoot(path: String) = store.removeScanRoot(path)
-    suspend fun addIgnoreDir(name: String) = store.addIgnoreDir(name)
-    suspend fun removeIgnoreDir(name: String) = store.removeIgnoreDir(name)
-    suspend fun setShowNomediaDirectories(show: Boolean) = store.setShowNomediaDirectories(show)
+
+    suspend fun addScanRoot(path: String) = scanScopeMutex.withLock {
+        if (store.addScanRoot(path)) submitScanScopeChange("scan_root_added")
+    }
+
+    suspend fun removeScanRoot(path: String) = scanScopeMutex.withLock {
+        if (store.removeScanRoot(path)) submitScanScopeChange("scan_root_removed")
+    }
+
+    suspend fun addIgnoreDir(name: String) = scanScopeMutex.withLock {
+        if (store.addIgnoreDir(name)) submitScanScopeChange("ignore_rule_added")
+    }
+
+    suspend fun removeIgnoreDir(name: String) = scanScopeMutex.withLock {
+        if (store.removeIgnoreDir(name)) submitScanScopeChange("ignore_rule_removed")
+    }
+
+    suspend fun setShowNomediaDirectories(show: Boolean) = scanScopeMutex.withLock {
+        if (store.setShowNomediaDirectories(show)) submitScanScopeChange("nomedia_policy_changed")
+    }
+
+    /** Replays the DataStore half of an interrupted DataStore -> Room scope-change commit. */
+    suspend fun replayPendingScanScopeChange() = scanScopeMutex.withLock {
+        store.pendingScanScopeChangeReason.first()?.let { reason -> submitScanScopeChange(reason) }
+    }
+
+    /**
+     * Linearization boundary shared with scope mutations. Callers may reserve a persistent scan run
+     * inside [block], guaranteeing the returned settings cannot change between read and reservation.
+     */
+    suspend fun <T> withStableScanSettings(block: suspend (SettingsState) -> T): T =
+        scanScopeMutex.withLock {
+            block(state.first())
+        }
+
+    private suspend fun submitScanScopeChange(reason: String) {
+        onScanScopeChanged(reason)
+        // Conditional acknowledgement cannot erase a newer concurrent scope change.
+        store.acknowledgeScanScopeChange(reason)
+    }
+
     suspend fun setShowAnalysisProgressUi(show: Boolean) = store.setShowAnalysisProgressUi(show)
     suspend fun setAlbumSortMode(mode: Int) = store.setAlbumSortMode(mode)
     suspend fun setGestureGuideShown(shown: Boolean) = store.setGestureGuideShown(shown)

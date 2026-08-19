@@ -34,27 +34,36 @@ class ScanWorker(
 
     override suspend fun doWork(): Result {
         val app = applicationContext as? LocalAlbumApplication ?: return Result.failure()
-        val repository = app.container.albumRepository
+        val container = app.container
+        var admittedScanId: String? = null
         return try {
+            admittedScanId = container.libraryPipelineCoordinator.admittedScanIdOrNull()
             setForeground(getForegroundInfo())
-            when (
-                scanWorkDecision(
-                    repository.drainPersistedScanRequests(),
-                    runAttemptCount,
-                )
-            ) {
+            val drainResult = container.albumRepository.drainPersistedScanRequests()
+            when (scanWorkDecision(drainResult, runAttemptCount)) {
                 ScanWorkDecision.SUCCESS -> Result.success()
                 ScanWorkDecision.RETRY -> Result.retry()
-                ScanWorkDecision.FAILURE -> Result.failure()
+                ScanWorkDecision.FAILURE -> {
+                    val failed = drainResult as PersistedScanDrainResult.Failed
+                    container.libraryPipelineCoordinator.markActiveScanFailed(
+                        scanId = failed.scanId,
+                        error = failed.error,
+                    )
+                    Result.failure()
+                }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "ScanWorker 执行失败 (attempt=${runAttemptCount + 1})", e)
-            when (scanWorkDecision(PersistedScanDrainResult.FAILED, runAttemptCount)) {
-                ScanWorkDecision.RETRY -> Result.retry()
-                ScanWorkDecision.FAILURE -> Result.failure()
-                ScanWorkDecision.SUCCESS -> Result.success()
+            if (runAttemptCount < MAX_RETRIES) {
+                Result.retry()
+            } else {
+                container.libraryPipelineCoordinator.markActiveScanFailed(
+                    scanId = admittedScanId,
+                    error = e.javaClass.simpleName.ifBlank { "scan_worker_failed" },
+                )
+                Result.failure()
             }
         }
     }
@@ -97,10 +106,10 @@ class ScanWorker(
             result: PersistedScanDrainResult,
             runAttemptCount: Int,
         ): ScanWorkDecision = when (result) {
-            PersistedScanDrainResult.COMPLETED -> ScanWorkDecision.SUCCESS
+            PersistedScanDrainResult.Completed -> ScanWorkDecision.SUCCESS
             // Durable work that is not claimable yet must never consume the finite failure budget.
-            PersistedScanDrainResult.DEFERRED -> ScanWorkDecision.RETRY
-            PersistedScanDrainResult.FAILED ->
+            PersistedScanDrainResult.Deferred -> ScanWorkDecision.RETRY
+            is PersistedScanDrainResult.Failed ->
                 if (runAttemptCount < MAX_RETRIES) {
                     ScanWorkDecision.RETRY
                 } else {
@@ -111,7 +120,11 @@ class ScanWorker(
         /** Worker 自身前台通知 ID，与 ScanServiceController.NOTIFICATION_ID 区分。 */
         private const val WORKER_NOTIFICATION_ID = 1002
 
-        /** Enqueues idempotent recovery for requests already persisted in the change journal. */
+        /**
+         * Called only by the durable pipeline pump after scan-stage admission. Appending preserves a
+         * newly admitted scan when the preceding ScanWorker is still completing its bounded cleanup;
+         * external event bursts are deduplicated earlier by LibraryPipelineWorker's KEEP policy.
+         */
         fun schedule(context: Context) {
             val request = OneTimeWorkRequestBuilder<ScanWorker>()
                 .setConstraints(

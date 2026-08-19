@@ -5,10 +5,9 @@ import androidx.test.core.app.ApplicationProvider
 import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.data.backup.DatabaseExporter
 import com.renyxin.localalbum.data.backup.DatabaseImporter
-import com.renyxin.localalbum.data.backup.PostRestoreTaskPolicy
-import com.renyxin.localalbum.data.backup.PostRestoreTaskSeeder
-import com.renyxin.localalbum.data.db.entity.EnhancementState
 import com.renyxin.localalbum.data.db.entity.FaceEntity
+import com.renyxin.localalbum.data.db.entity.HomeMediaSnapshotEntity
+import com.renyxin.localalbum.data.db.entity.LibraryPipelineStage
 import com.renyxin.localalbum.data.db.entity.MediaChangeEventEntity
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
 import com.renyxin.localalbum.data.db.entity.MediaEntity
@@ -41,13 +40,6 @@ class DatabaseImporterStagingTest {
             faceDao = database.faceDao(),
             embeddingDao = database.embeddingDao(),
             database = database,
-            postRestoreTaskSeeder = PostRestoreTaskSeeder(
-                PostRestoreTaskPolicy(
-                    profileId = LOCAL_PROFILE,
-                    pipelineScope = RESTORED_PIPELINE_SCOPE,
-                    enqueueAutomaticAnalysis = true,
-                ),
-            ),
         )
     }
 
@@ -101,44 +93,43 @@ class DatabaseImporterStagingTest {
         assertEquals(listOf(path), database.mediaDao().getAllFtsEntries().map { it.filePath })
         assertEquals(0, tableCount("analysis_tasks"))
         assertEquals(0, tableCount("thumbnail_tasks"))
-        database.openHelper.writableDatabase.query(
-            "SELECT pipelineScope, profileId, enqueueAnalysis, enqueueThumbnail FROM enhancement_outbox",
-        ).use { cursor ->
-            assertTrue(cursor.moveToFirst())
-            assertEquals(RESTORED_PIPELINE_SCOPE, cursor.getString(0))
-            assertEquals(LOCAL_PROFILE, cursor.getString(1))
-            assertEquals(1, cursor.getInt(2))
-            assertEquals(1, cursor.getInt(3))
-            assertFalse(cursor.moveToNext())
-        }
-        assertEquals(1, tableCount("scan_runs"))
-        database.openHelper.writableDatabase.query(
-            "SELECT enhancementState, enhancementStartedAt, enhancementCompletedAt FROM scan_runs",
-        ).use { cursor ->
-            assertTrue(cursor.moveToFirst())
-            assertEquals(EnhancementState.WAITING_FOR_CORE.name, cursor.getString(0))
-            assertEquals(0L, cursor.getLong(1))
-            assertEquals(0L, cursor.getLong(2))
-        }
+        assertEquals(0, tableCount("enhancement_outbox"))
+        assertEquals(0, tableCount("scan_runs"))
         assertFalse(database.mediaChangeDao().hasOutstandingMediaChanges(LOCAL_PROFILE))
-        assertTrue(database.mediaChangeDao().hasReconciliationHint(LOCAL_PROFILE))
-        assertEquals(1, tableCount("media_change_events"))
-        database.openHelper.writableDatabase.query(
-            "SELECT profileId, eventType, status FROM media_change_events",
-        ).use { cursor ->
-            assertTrue(cursor.moveToFirst())
-            assertEquals(LOCAL_PROFILE, cursor.getString(0))
-            assertEquals(MediaChangeEventEntity.TYPE_RECONCILIATION, cursor.getString(1))
-            assertEquals(MediaChangeEventEntity.STATUS_PENDING, cursor.getString(2))
-            assertFalse(cursor.moveToNext())
-        }
-        assertFalse(database.enhancementOutboxDao().hasRunnableEntries())
-        assertTrue(
-            database.enhancementOutboxDao()
-                .claimBatch(10L, 10, "before-reconciliation", 100L)
-                .isEmpty(),
-        )
+        assertFalse(database.mediaChangeDao().hasReconciliationHint(LOCAL_PROFILE))
+        assertEquals(0, tableCount("media_change_events"))
         assertEquals(0, tableCount("media_store_references"))
+
+        val snapshot = requireNotNull(database.homeMediaSnapshotDao().getByPath(path))
+        assertEquals(HomeMediaSnapshotEntity.THUMBNAIL_PLACEHOLDER, snapshot.thumbnailState)
+        assertEquals(null, snapshot.thumbnailPath)
+        val pipeline = requireNotNull(database.libraryPipelineDao().get())
+        assertEquals(LibraryPipelineStage.NEEDS_REBUILD.name, pipeline.stage)
+        assertTrue(pipeline.hasPublishedBaseline)
+        assertTrue(pipeline.rebuildRequired)
+        assertFalse(pipeline.rebuildRequested)
+        assertEquals("backup_import_requires_validation", pipeline.rebuildReason)
+        assertEquals(snapshot.publishedGeneration, pipeline.publishedGeneration)
+    }
+
+    @Test
+    fun emptyImportPublishesAnEmptyBaselineWithoutStartingAFullScan() = runBlocking {
+        seedProduction("/old.jpg")
+        val empty = backupJson(JSONArray(), JSONArray(), JSONArray(), JSONArray())
+
+        val result = importer.importFromJson(empty.toString())
+
+        assertTrue(result.errorMessage.orEmpty(), result.success)
+        assertEquals(0, database.mediaDao().getCount())
+        assertEquals(0, database.homeMediaSnapshotDao().count())
+        val pipeline = requireNotNull(database.libraryPipelineDao().get())
+        assertEquals(LibraryPipelineStage.NEEDS_REBUILD.name, pipeline.stage)
+        assertTrue(pipeline.hasPublishedBaseline)
+        assertTrue(pipeline.publishedGeneration > 0L)
+        assertTrue(pipeline.rebuildRequired)
+        assertFalse(pipeline.rebuildRequested)
+        assertEquals(0, tableCount("scan_runs"))
+        assertEquals(0, tableCount("enhancement_outbox"))
     }
 
     @Test
@@ -226,7 +217,6 @@ class DatabaseImporterStagingTest {
         }
 
     private companion object {
-        const val RESTORED_PIPELINE_SCOPE = "pipeline:v1|plan=enhancement|policy=lite@1"
         const val LOCAL_PROFILE = "lite"
     }
 }

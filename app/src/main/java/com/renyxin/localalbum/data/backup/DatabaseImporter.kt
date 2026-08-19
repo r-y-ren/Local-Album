@@ -52,8 +52,6 @@ class DatabaseImporter(
      * 单元测试可省略该参数以保留 Fake DAO 兼容；生产 App 路径必须注入数据库。
      */
     private val database: AppDatabase? = null,
-    /** Edition policy owns regenerable work; the importer only restores durable data. */
-    private val postRestoreTaskSeeder: PostRestoreTaskSeeder? = null,
 ) {
     companion object {
         private const val TAG = "DatabaseImporter"
@@ -209,10 +207,11 @@ class DatabaseImporter(
             "media_change_events", "media_store_references", "semantic_maintenance_runs",
             "duplicate_hash_staging", "duplicate_members", "duplicate_groups")
             .forEach { db.execSQL("DELETE FROM $it") }
+        resetThumbnailWakeHandshake(db)
         // semantic 只允许激活具有同 space 向量的 metadata/cluster generation。
         db.execSQL("UPDATE semantic_index_meta SET isActive = 0 WHERE NOT EXISTS (SELECT 1 FROM media_embeddings e WHERE e.spaceId = semantic_index_meta.spaceId)")
         db.execSQL("UPDATE semantic_cluster_generations SET isActive = 0 WHERE NOT EXISTS (SELECT 1 FROM media_embeddings e WHERE e.spaceId = semantic_cluster_generations.spaceId)")
-        postRestoreTaskSeeder?.seed(db)
+        publishImportedBaselineAndRequireValidation(db)
     }
 
     private fun insertJsonRow(db: androidx.sqlite.db.SupportSQLiteDatabase, table: BackupContract.Table, obj: JSONObject) {
@@ -401,12 +400,11 @@ class DatabaseImporter(
         db.execSQL("DELETE FROM faces")
         db.execSQL("DELETE FROM media_embeddings")
         db.execSQL("DELETE FROM media_items")
-        db.execSQL("DELETE FROM analysis_tasks")
-        db.execSQL("DELETE FROM thumbnail_tasks")
-        db.execSQL("DELETE FROM enhancement_outbox")
-        db.execSQL("DELETE FROM scan_runs")
-        db.execSQL("DELETE FROM media_change_events")
-        db.execSQL("DELETE FROM media_store_references")
+        listOf(
+            "thumbnail_cache_entries", "thumbnail_tasks", "analysis_tasks", "enhancement_outbox",
+            "scan_staging", "scan_runs", "media_change_events", "media_store_references",
+        ).forEach { table -> db.execSQL("DELETE FROM $table") }
+        resetThumbnailWakeHandshake(db)
         db.execSQL("""INSERT INTO media_items SELECT filePath,fileName,mediaType,capturedAtMs,modifiedAtMs,indexedAtMs,parentPath,fileSize,isFavorite,isTrashed,width,height,mimeType,durationMs,latitude,longitude,make,model,aperture,focalLength,iso,exposureTime,orientation,sceneType,thumbnailPath,fingerprintHead,perceptualHash,ocrText,qualityScore,deletedAtMs,isCorrupted,faceClusterId,scanGeneration FROM import_media_staging WHERE generation = ?""", arrayOf(generation))
         db.execSQL("""INSERT INTO faces(faceId,filePath,clusterId,personName,embedding,boxLeft,boxTop,boxRight,boxBottom,thumbnailPath,detectedAtMs) SELECT faceId,filePath,clusterId,personName,embedding,boxLeft,boxTop,boxRight,boxBottom,thumbnailPath,detectedAtMs FROM import_face_staging WHERE generation = ?""", arrayOf(generation))
         db.execSQL("""INSERT INTO media_embeddings(filePath,embedding,modelVersion,generatedAtMs,source,embeddingBlob,providerId,modelId,dimension,spaceId,generation,codecId,formatVersion) SELECT filePath,embedding,modelVersion,generatedAtMs,source,embeddingBlob,providerId,modelId,dimension,spaceId,vectorGeneration,codecId,formatVersion FROM import_embedding_staging WHERE generation = ?""", arrayOf(generation))
@@ -414,7 +412,55 @@ class DatabaseImporter(
         db.execSQL("UPDATE semantic_index_meta SET isActive = 0")
         db.execSQL("UPDATE semantic_cluster_generations SET isActive = 0")
         db.execSQL("""INSERT INTO media_items_fts(filePath,fileName,parentPath,ocrText,make,model) SELECT filePath,fileName,parentPath,ocrText,make,model FROM import_fts_staging WHERE generation = ?""", arrayOf(generation))
-        postRestoreTaskSeeder?.seed(db)
+        publishImportedBaselineAndRequireValidation(db)
+    }
+
+    private fun resetThumbnailWakeHandshake(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("DELETE FROM thumbnail_lane_wake")
+        listOf("interactive","automatic").forEach { laneId ->
+            db.execSQL(
+                """INSERT INTO thumbnail_lane_wake(
+                    laneId,deliveryState,revision,dispatchToken,dispatchLeaseUntil,runToken,
+                    runLeaseUntil,notBefore,enqueueAttemptCount,nextDispatchAt,lastDispatchError,updatedAt
+                ) VALUES(?,'QUIESCENT',0,NULL,0,NULL,0,0,0,0,NULL,0)""".trimIndent(),
+                arrayOf(laneId),
+            )
+        }
+    }
+
+    /**
+     * Backup excludes device-local thumbnails and the library control plane. Rebuild both from the
+     * restored canonical rows in the same production-table switch transaction. The imported index
+     * remains visible with stable placeholders, while root traversal requires explicit confirmation.
+     */
+    private fun publishImportedBaselineAndRequireValidation(
+        db: androidx.sqlite.db.SupportSQLiteDatabase,
+        now: Long = System.currentTimeMillis(),
+    ) {
+        db.execSQL("UPDATE media_items SET thumbnailPath = NULL")
+        db.execSQL("DELETE FROM home_media_snapshot")
+        db.execSQL(
+            """INSERT INTO home_media_snapshot(
+                filePath,fileName,mediaType,capturedAtMs,modifiedAtMs,fileSize,isFavorite,
+                width,height,mimeType,durationMs,parentPath,latitude,longitude,make,model,
+                aperture,focalLength,iso,exposureTime,orientation,thumbnailPath,thumbnailState,
+                isCorrupted,publishedGeneration
+            ) SELECT filePath,fileName,mediaType,capturedAtMs,modifiedAtMs,fileSize,isFavorite,
+                width,height,mimeType,durationMs,parentPath,latitude,longitude,make,model,
+                aperture,focalLength,iso,exposureTime,orientation,NULL,'PLACEHOLDER',
+                isCorrupted,?
+              FROM media_items WHERE isTrashed = 0""",
+            arrayOf(now),
+        )
+        db.execSQL(
+            """INSERT OR REPLACE INTO library_pipeline(
+                pipelineId,stage,activeRunId,candidateGeneration,publishedGeneration,
+                hasPublishedBaseline,rebuildRequested,rebuildRequired,rebuildReason,
+                progressCompleted,progressTotal,failureCount,lastError,updatedAt
+            ) VALUES('default','NEEDS_REBUILD',NULL,0,?,1,0,1,
+                'backup_import_requires_validation',0,0,0,NULL,?)""",
+            arrayOf(now, now),
+        )
     }
 
     private suspend fun cleanupStaging(generation: String) = withContext(NonCancellable) {

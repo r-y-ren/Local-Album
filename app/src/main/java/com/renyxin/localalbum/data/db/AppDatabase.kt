@@ -18,6 +18,8 @@ import com.renyxin.localalbum.data.db.dao.FaceClusterDao
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.FeatureStoreDao
 import com.renyxin.localalbum.data.db.dao.ImportStagingDao
+import com.renyxin.localalbum.data.db.dao.HomeMediaSnapshotDao
+import com.renyxin.localalbum.data.db.dao.LibraryPipelineDao
 import com.renyxin.localalbum.data.db.dao.MediaChangeDao
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.dao.PluginManifestDao
@@ -44,6 +46,8 @@ import com.renyxin.localalbum.data.db.entity.ImportEmbeddingStagingEntity
 import com.renyxin.localalbum.data.db.entity.ImportFaceStagingEntity
 import com.renyxin.localalbum.data.db.entity.ImportFtsStagingEntity
 import com.renyxin.localalbum.data.db.entity.ImportMediaStagingEntity
+import com.renyxin.localalbum.data.db.entity.HomeMediaSnapshotEntity
+import com.renyxin.localalbum.data.db.entity.LibraryPipelineEntity
 import com.renyxin.localalbum.data.db.entity.MediaChangeEventEntity
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
 import com.renyxin.localalbum.data.db.entity.MediaEntity
@@ -58,6 +62,7 @@ import com.renyxin.localalbum.data.db.entity.SemanticMaintenanceRunEntity
 import com.renyxin.localalbum.data.db.entity.ScanRunEntity
 import com.renyxin.localalbum.data.db.entity.ScanStagingEntity
 import com.renyxin.localalbum.data.db.entity.ThumbnailCacheEntryEntity
+import com.renyxin.localalbum.data.db.entity.ThumbnailLaneWakeEntity
 import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
 
 @Database(
@@ -96,12 +101,15 @@ import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
         MediaChangeEventEntity::class,
         MediaStoreReferenceEntity::class,
         EnhancementOutboxEntity::class,
+        LibraryPipelineEntity::class,
+        HomeMediaSnapshotEntity::class,
+        ThumbnailLaneWakeEntity::class,
     ],
-    version = 32,
+    version = 33,
     exportSchema = true,
 )
 /**
- * 应用主数据库（Room，schema version 32，exportSchema = true）。
+ * 应用主数据库（Room，schema version 33，exportSchema = true）。
  *
  * 单例入口见 [getDatabase]；全部 DAO 通过 abstract 访问器暴露。
  *
@@ -126,6 +134,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun thumbnailCacheDao(): ThumbnailCacheDao
     abstract fun analysisTaskDao(): AnalysisTaskDao
     abstract fun scanRunDao(): ScanRunDao
+    abstract fun libraryPipelineDao(): LibraryPipelineDao
+    abstract fun homeMediaSnapshotDao(): HomeMediaSnapshotDao
     abstract fun scanStagingDao(): ScanStagingDao
     abstract fun mediaChangeDao(): MediaChangeDao
     abstract fun enhancementOutboxDao(): EnhancementOutboxDao
@@ -1009,9 +1019,200 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Migration 32 -> 33: durable pipeline/home snapshot plus full thumbnail identity and fixed
+         * dual-lane level-triggered delivery. v33 is unpublished, so this edge is finalized in place.
+         */
+        val MIGRATION_32_33 = object : Migration(32, 33) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS library_pipeline (
+                        pipelineId TEXT NOT NULL PRIMARY KEY,
+                        stage TEXT NOT NULL,
+                        activeRunId TEXT,
+                        candidateGeneration INTEGER NOT NULL,
+                        publishedGeneration INTEGER NOT NULL,
+                        hasPublishedBaseline INTEGER NOT NULL,
+                        rebuildRequested INTEGER NOT NULL,
+                        rebuildRequired INTEGER NOT NULL,
+                        rebuildReason TEXT,
+                        progressCompleted INTEGER NOT NULL,
+                        progressTotal INTEGER NOT NULL,
+                        failureCount INTEGER NOT NULL,
+                        lastError TEXT,
+                        updatedAt INTEGER NOT NULL
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS home_media_snapshot (
+                        filePath TEXT NOT NULL PRIMARY KEY,
+                        fileName TEXT NOT NULL,
+                        mediaType TEXT NOT NULL,
+                        capturedAtMs INTEGER NOT NULL,
+                        modifiedAtMs INTEGER NOT NULL,
+                        fileSize INTEGER NOT NULL,
+                        isFavorite INTEGER NOT NULL,
+                        width INTEGER NOT NULL,
+                        height INTEGER NOT NULL,
+                        mimeType TEXT NOT NULL,
+                        durationMs INTEGER NOT NULL,
+                        parentPath TEXT NOT NULL,
+                        latitude REAL,
+                        longitude REAL,
+                        make TEXT,
+                        model TEXT,
+                        aperture TEXT,
+                        focalLength TEXT,
+                        iso TEXT,
+                        exposureTime TEXT,
+                        orientation INTEGER NOT NULL,
+                        thumbnailPath TEXT,
+                        thumbnailState TEXT NOT NULL,
+                        isCorrupted INTEGER NOT NULL,
+                        publishedGeneration INTEGER NOT NULL
+                    )""".trimIndent(),
+                )
+                // Old v32 thumbnail bytes/metadata are not trusted across the identity/format edge.
+                // FAILED remains a stable placeholder; RUNNING is recovered as PENDING.
+                db.execSQL(
+                    """CREATE TABLE thumbnail_tasks_v33 (
+                        taskId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        filePath TEXT NOT NULL,sizeClass TEXT NOT NULL,sourceVersion TEXT NOT NULL,
+                        mediaType TEXT NOT NULL,formatVersion INTEGER NOT NULL,priority INTEGER NOT NULL,
+                        status TEXT NOT NULL,attemptCount INTEGER NOT NULL,nextRetryAt INTEGER NOT NULL,
+                        leaseUntil INTEGER NOT NULL,leaseToken TEXT,lastError TEXT,createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,scanId TEXT
+                    )""".trimIndent(),
+                )
+                db.execSQL(
+                    """INSERT OR IGNORE INTO thumbnail_tasks_v33(
+                        taskId,filePath,sizeClass,sourceVersion,mediaType,formatVersion,priority,status,
+                        attemptCount,nextRetryAt,leaseUntil,leaseToken,lastError,createdAt,updatedAt,scanId)
+                       SELECT taskId,filePath,sizeClass,
+                         CASE WHEN instr(sourceVersion,':') > 0 THEN
+                           'sv1|m=' || substr(sourceVersion,1,instr(sourceVersion,':')-1) ||
+                           '|s=' || substr(sourceVersion,instr(sourceVersion,':')+1) || '|f=-'
+                           ELSE sourceVersion END,
+                         mediaType,5,priority,CASE WHEN status='RUNNING' THEN 'PENDING' ELSE status END,
+                         attemptCount,nextRetryAt,0,NULL,lastError,createdAt,updatedAt,scanId
+                       FROM thumbnail_tasks WHERE status != 'DONE'""".trimIndent(),
+                )
+                db.execSQL("DROP TABLE thumbnail_tasks")
+                db.execSQL("ALTER TABLE thumbnail_tasks_v33 RENAME TO thumbnail_tasks")
+                db.execSQL("CREATE UNIQUE INDEX index_thumbnail_tasks_filePath_mediaType_sourceVersion_sizeClass_formatVersion ON thumbnail_tasks(filePath,mediaType,sourceVersion,sizeClass,formatVersion)")
+                db.execSQL("CREATE INDEX index_thumbnail_tasks_status_nextRetryAt_priority ON thumbnail_tasks(status,nextRetryAt,priority)")
+                db.execSQL("CREATE INDEX index_thumbnail_tasks_scanId_status ON thumbnail_tasks(scanId,status)")
+                db.execSQL("CREATE INDEX index_thumbnail_tasks_leaseUntil ON thumbnail_tasks(leaseUntil)")
+                db.execSQL("CREATE INDEX index_thumbnail_tasks_leaseToken ON thumbnail_tasks(leaseToken)")
+
+                db.execSQL("DROP TABLE thumbnail_cache_entries")
+                db.execSQL(
+                    """CREATE TABLE thumbnail_cache_entries (
+                        filePath TEXT NOT NULL,sizeClass TEXT NOT NULL,sourceVersion TEXT NOT NULL,
+                        mediaType TEXT NOT NULL,formatVersion INTEGER NOT NULL,path TEXT NOT NULL,
+                        byteSize INTEGER NOT NULL,lastAccessAt INTEGER NOT NULL,createdAt INTEGER NOT NULL,
+                        state TEXT NOT NULL,leaseUntil INTEGER NOT NULL,deleteAttemptCount INTEGER NOT NULL,
+                        PRIMARY KEY(filePath,mediaType,sourceVersion,sizeClass,formatVersion)
+                    )""".trimIndent(),
+                )
+                db.execSQL("CREATE INDEX index_thumbnail_cache_entries_state_lastAccessAt_filePath_mediaType_sourceVersion_sizeClass_formatVersion ON thumbnail_cache_entries(state,lastAccessAt,filePath,mediaType,sourceVersion,sizeClass,formatVersion)")
+                db.execSQL("CREATE INDEX index_thumbnail_cache_entries_filePath_mediaType_sourceVersion_sizeClass_formatVersion_state ON thumbnail_cache_entries(filePath,mediaType,sourceVersion,sizeClass,formatVersion,state)")
+                db.execSQL("CREATE INDEX index_thumbnail_cache_entries_leaseUntil ON thumbnail_cache_entries(leaseUntil)")
+                db.execSQL("CREATE UNIQUE INDEX index_thumbnail_cache_entries_path ON thumbnail_cache_entries(path)")
+                db.execSQL("UPDATE media_items SET thumbnailPath = NULL")
+
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS thumbnail_lane_wake (
+                        laneId TEXT NOT NULL PRIMARY KEY,deliveryState TEXT NOT NULL,revision INTEGER NOT NULL,
+                        dispatchToken TEXT,dispatchLeaseUntil INTEGER NOT NULL,runToken TEXT,
+                        runLeaseUntil INTEGER NOT NULL,notBefore INTEGER NOT NULL,
+                        enqueueAttemptCount INTEGER NOT NULL,nextDispatchAt INTEGER NOT NULL,
+                        lastDispatchError TEXT,updatedAt INTEGER NOT NULL
+                    )""".trimIndent(),
+                )
+                val migrationNow = System.currentTimeMillis()
+                db.execSQL(
+                    """INSERT OR REPLACE INTO thumbnail_lane_wake VALUES(
+                        'interactive',CASE WHEN EXISTS(SELECT 1 FROM thumbnail_tasks
+                          WHERE scanId IS NULL AND status='PENDING' AND nextRetryAt <= ?)
+                          THEN 'PENDING' WHEN EXISTS(SELECT 1 FROM thumbnail_tasks
+                          WHERE scanId IS NULL AND status='PENDING') THEN 'DELAYED' ELSE 'QUIESCENT' END,
+                        0,NULL,0,NULL,0,CASE WHEN EXISTS(SELECT 1 FROM thumbnail_tasks
+                          WHERE scanId IS NULL AND status='PENDING') THEN COALESCE((SELECT MIN(nextRetryAt)
+                          FROM thumbnail_tasks WHERE scanId IS NULL AND status='PENDING'),0) ELSE 0 END,
+                        0,0,NULL,?)""".trimIndent(),
+                    arrayOf(migrationNow,migrationNow),
+                )
+                db.execSQL(
+                    """INSERT OR REPLACE INTO thumbnail_lane_wake VALUES(
+                        'automatic',CASE WHEN EXISTS(SELECT 1 FROM thumbnail_tasks task
+                          JOIN library_pipeline pipeline ON pipeline.pipelineId='default'
+                          WHERE task.scanId IS NOT NULL AND task.status='PENDING'
+                            AND pipeline.stage IN ('INITIAL_THUMBNAILS','INCREMENTAL_THUMBNAILS','REBUILD_THUMBNAILS')
+                            AND task.scanId= pipeline.activeRunId) THEN 'PENDING' ELSE 'QUIESCENT' END,
+                        0,NULL,0,NULL,0,0,0,0,NULL,?)""".trimIndent(),
+                    arrayOf(migrationNow),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_home_media_snapshot_publishedGeneration ON home_media_snapshot(publishedGeneration)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_home_media_snapshot_capturedAtMs_filePath ON home_media_snapshot(capturedAtMs, filePath)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_home_media_snapshot_parentPath_capturedAtMs_filePath ON home_media_snapshot(parentPath, capturedAtMs, filePath)")
+
+                val now = System.currentTimeMillis()
+                val (visibleMediaCount, legacyMaxGeneration) = db.query(
+                    "SELECT COUNT(*), COALESCE(MAX(scanGeneration), 0) " +
+                        "FROM media_items WHERE isTrashed = 0",
+                ).use { cursor ->
+                    check(cursor.moveToFirst())
+                    cursor.getLong(0) to cursor.getLong(1)
+                }
+                val baselineGeneration = when {
+                    visibleMediaCount == 0L -> 0L
+                    legacyMaxGeneration > 0L -> legacyMaxGeneration
+                    else -> 1L
+                }
+                if (visibleMediaCount > 0L && legacyMaxGeneration <= 0L) {
+                    // Legacy databases could expose media while every row still used generation 0.
+                    // Give those visible facts the same synthetic positive identity as the snapshot.
+                    db.execSQL(
+                        "UPDATE media_items SET scanGeneration = ? " +
+                            "WHERE isTrashed = 0 AND scanGeneration <= 0",
+                        arrayOf(baselineGeneration),
+                    )
+                }
+                // Existing installations keep canonical media visible, but every legacy thumbnail is
+                // intentionally downgraded to PLACEHOLDER and regenerated under full identity.
+                db.execSQL(
+                    """INSERT INTO home_media_snapshot(
+                        filePath,fileName,mediaType,capturedAtMs,modifiedAtMs,fileSize,isFavorite,
+                        width,height,mimeType,durationMs,parentPath,latitude,longitude,make,model,
+                        aperture,focalLength,iso,exposureTime,orientation,thumbnailPath,thumbnailState,
+                        isCorrupted,publishedGeneration
+                    ) SELECT media.filePath,media.fileName,media.mediaType,media.capturedAtMs,
+                        media.modifiedAtMs,media.fileSize,media.isFavorite,media.width,media.height,
+                        media.mimeType,media.durationMs,media.parentPath,media.latitude,media.longitude,
+                        media.make,media.model,media.aperture,media.focalLength,media.iso,
+                        media.exposureTime,media.orientation,NULL,'PLACEHOLDER',
+                        media.isCorrupted,$baselineGeneration
+                    FROM media_items AS media
+                    WHERE media.isTrashed = 0""".trimIndent(),
+                )
+                db.execSQL(
+                    """INSERT OR REPLACE INTO library_pipeline(
+                        pipelineId,stage,activeRunId,candidateGeneration,publishedGeneration,
+                        hasPublishedBaseline,rebuildRequested,rebuildRequired,rebuildReason,
+                        progressCompleted,progressTotal,failureCount,lastError,updatedAt
+                    ) SELECT 'default',
+                        CASE WHEN COUNT(*) > 0 THEN 'READY' ELSE 'UNINITIALIZED' END,
+                        NULL,$baselineGeneration,$baselineGeneration,
+                        CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END,
+                        0,0,NULL,0,0,0,NULL,$now FROM media_items WHERE isTrashed = 0""".trimIndent(),
+                )
+            }
+        }
+
+        /**
          * 数据库单例入口（double-checked locking，进程内唯一实例，库名 `local_album_db`）。
          *
-         * 注册了 MIGRATION_8_9 至 MIGRATION_31_32 的完整迁移链；升级缺失迁移时抛异常，
+         * 注册了 MIGRATION_8_9 至 MIGRATION_32_33 的完整迁移链；升级缺失迁移时抛异常，
          * 仅降级时允许销毁重建（fallbackToDestructiveMigrationOnDowngrade）。
          *
          * @param context 任意 Context，内部取 applicationContext，持有进程级单例安全
@@ -1049,6 +1250,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_29_30,
                         MIGRATION_30_31,
                         MIGRATION_31_32,
+                        MIGRATION_32_33,
                     )
                     // 1.2: 仅在降级时销毁数据；升级缺失迁移时抛异常而非静默清库
                     .fallbackToDestructiveMigrationOnDowngrade()
