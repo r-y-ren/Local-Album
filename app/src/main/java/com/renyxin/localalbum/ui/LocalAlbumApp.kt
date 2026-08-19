@@ -272,10 +272,10 @@ fun LocalAlbumApp(
     val navigationStateHolder = rememberSaveableStateHolder()
     val scanState by albumViewModel.scanState.collectAsStateWithLifecycle()
     val pipelineState by albumViewModel.libraryPipelineState.collectAsStateWithLifecycle()
-    val coreScanActive = pipelineState.stage.isScan
+    val coreScanActive = pipelineState.hasStartedOrRequestedScan
     val progressScanMessage = (scanState as? ScanState.Scanning)
         ?.message
-        ?.takeIf { pipelineState.stage.isScan }
+        ?.takeIf { coreScanActive }
 
     // 手势引导：仅首次安装后展示一次，之后持久化不再弹出
     val gestureGuideShown by settingsViewModel.gestureGuideShown.collectAsStateWithLifecycle()

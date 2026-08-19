@@ -163,6 +163,44 @@ class HomeMediaSnapshotConsistencyTest {
     }
 
     @Test
+    fun firstScanAdmissionRequiresRequestAndConsumesItOnlyWhenRunBinds() = runBlocking {
+        val dao = db.libraryPipelineDao()
+        dao.ensureInitialized(
+            hasCanonicalMedia = false,
+            hasPublishedSnapshot = false,
+            publishedGeneration = 0L,
+        )
+
+        assertEquals(0, dao.startRequestedRebuild())
+        assertEquals(LibraryPipelineStage.UNINITIALIZED.name, dao.get()?.stage)
+
+        dao.requestRebuild("user_requested_initial_scan")
+        assertEquals(1, dao.startRequestedRebuild())
+        val admitted = requireNotNull(dao.get())
+        assertEquals(LibraryPipelineStage.INITIAL_SCAN.name, admitted.stage)
+        assertTrue(admitted.rebuildRequested)
+        assertNull(admitted.activeRunId)
+
+        val run = ScanRunEntity(
+            scanId = "first-requested-run",
+            generation = 101L,
+            scanType = ScanRunEntity.TYPE_FULL,
+        )
+        db.scanRunDao().insert(run)
+        assertEquals(
+            1,
+            dao.bindScanRun(
+                stage = LibraryPipelineStage.INITIAL_SCAN.name,
+                scanId = run.scanId,
+                generation = run.generation,
+            ),
+        )
+        val bound = requireNotNull(dao.get())
+        assertEquals(run.scanId, bound.activeRunId)
+        assertFalse(bound.rebuildRequested)
+    }
+
+    @Test
     fun rebuildRequirementWaitsForExplicitUserRequest() = runBlocking {
         val path = "/private/rebuild-advisory.jpg"
         db.mediaDao().insertAll(listOf(media(path, thumbnailPath = null)))
@@ -189,7 +227,7 @@ class HomeMediaSnapshotConsistencyTest {
         val admitted = requireNotNull(dao.get())
         assertEquals(LibraryPipelineStage.REBUILD_SCAN.name, admitted.stage)
         assertFalse(admitted.rebuildRequired)
-        assertFalse(admitted.rebuildRequested)
+        assertTrue(admitted.rebuildRequested)
         assertNull(admitted.activeRunId)
     }
 
@@ -313,6 +351,7 @@ class HomeMediaSnapshotConsistencyTest {
         assertEquals(LibraryPipelineStage.READY.name, dao.get()?.stage)
         assertEquals(1, dao.startRequestedRebuild())
         assertEquals(LibraryPipelineStage.REBUILD_SCAN.name, dao.get()?.stage)
+        assertTrue(dao.get()?.rebuildRequested == true)
     }
 
     @Test

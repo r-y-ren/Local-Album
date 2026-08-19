@@ -627,7 +627,10 @@ class BoundedDataAccessArchitectureTest {
 
         val repositoryRefresh = repository.substringAfter("suspend fun rescan(): Boolean")
             .substringBefore("suspend fun requestFullRebuild()")
-        assertTrue("普通刷新必须只唤醒持久流水线", repositoryRefresh.contains("libraryPipelineCoordinator?.wake()"))
+        assertTrue(
+            "普通刷新必须走仅授权首次扫描/否则只唤醒 journal 的用户扫描入口",
+            repositoryRefresh.contains("libraryPipelineCoordinator?.requestUserScan()"),
+        )
         assertFalse("普通刷新不得授权完整重建", repositoryRefresh.contains("requestExplicitRebuild"))
         val repositoryRebuild = repository.substringAfter("suspend fun requestFullRebuild()")
             .substringBefore("suspend fun retryFailedThumbnails()")

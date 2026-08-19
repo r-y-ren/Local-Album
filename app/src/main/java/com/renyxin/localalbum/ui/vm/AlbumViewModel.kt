@@ -225,8 +225,8 @@ class AlbumViewModel(
     }
 
     fun rescan() {
-        android.util.Log.i("AlbumViewModel", "rescan: 用户触发增量刷新")
-        // 普通刷新只唤醒持久 journal；不会授权根目录遍历，也不会抢占当前流水线阶段。
+        android.util.Log.i("AlbumViewModel", "rescan: 用户触发扫描检查")
+        // 首次点击会持久授权初始遍历；已有 baseline 后仍只唤醒持久 journal。
         scanJob?.cancel()
         scanJob = viewModelScope.launch {
             repository.rescan()

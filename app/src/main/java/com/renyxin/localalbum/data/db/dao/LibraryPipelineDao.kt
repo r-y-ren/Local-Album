@@ -83,6 +83,7 @@ abstract class LibraryPipelineDao {
     @Query(
         """UPDATE library_pipeline SET
                activeRunId = :scanId, candidateGeneration = :generation,
+               rebuildRequested = 0,
                progressCompleted = 0, progressTotal = 0, failureCount = 0,
                lastError = NULL, updatedAt = :now
            WHERE pipelineId = :pipelineId AND stage = :stage
@@ -149,12 +150,16 @@ abstract class LibraryPipelineDao {
 
     @Query(
         """UPDATE library_pipeline SET
-               stage = 'REBUILD_SCAN', activeRunId = NULL, candidateGeneration = 0,
-               rebuildRequested = 0, rebuildRequired = 0, rebuildReason = NULL,
+               stage = CASE
+                   WHEN stage = 'UNINITIALIZED' THEN 'INITIAL_SCAN'
+                   ELSE 'REBUILD_SCAN'
+               END,
+               activeRunId = NULL, candidateGeneration = 0,
+               rebuildRequired = 0, rebuildReason = NULL,
                progressCompleted = 0, progressTotal = 0, failureCount = 0,
                lastError = NULL, updatedAt = :now
            WHERE pipelineId = :pipelineId
-             AND stage IN ('READY', 'NEEDS_REBUILD')
+             AND stage IN ('UNINITIALIZED', 'READY', 'NEEDS_REBUILD')
              AND rebuildRequested = 1""",
     )
     abstract suspend fun startRequestedRebuild(

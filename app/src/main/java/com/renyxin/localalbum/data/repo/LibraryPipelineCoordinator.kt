@@ -163,9 +163,29 @@ class LibraryPipelineCoordinator(
         if (advanced) LibraryPipelineWorker.appendSuccessor(context)
     }
 
+    /** Normal scan action: explicitly authorizes the first traversal, otherwise only drains journals. */
+    suspend fun requestUserScan() {
+        mutex.withLock {
+            val state = ensureStateLocked()
+            val stage = LibraryPipelineStage.fromPersisted(state.stage)
+            if (
+                !state.hasPublishedBaseline && state.activeRunId == null &&
+                stage in setOf(
+                    LibraryPipelineStage.UNINITIALIZED,
+                    LibraryPipelineStage.INITIAL_SCAN,
+                )
+            ) {
+                dao.requestRebuild("user_requested_initial_scan")
+            }
+        }
+        wake()
+    }
+
     suspend fun requestExplicitRebuild(reason: String = "user_requested") {
         val advanced = mutex.withLock {
             ensureStateLocked()
+            // This marker is the durable user intent for both the first traversal and later rebuilds.
+            // It remains set through scan-stage admission and is consumed only when a run is bound.
             dao.requestRebuild(reason.take(80))
             startQueuedWorkIfIdleLocked()
         }
@@ -222,13 +242,8 @@ class LibraryPipelineCoordinator(
         val stage = LibraryPipelineStage.fromPersisted(state.stage)
         if (stage !in IDLE_ADMISSION_STAGES) return false
 
-        if (stage == LibraryPipelineStage.UNINITIALIZED || !state.hasPublishedBaseline) {
-            return dao.transition(
-                from = setOf(LibraryPipelineStage.UNINITIALIZED),
-                to = LibraryPipelineStage.INITIAL_SCAN,
-            )
-        }
-
+        // Merely creating the control row or configuring roots is not authority to traverse them.
+        // A durable explicit request admits the first scan/rebuild and remains set until run binding.
         if (state.rebuildRequested) {
             return dao.startRequestedRebuild() == 1
         }

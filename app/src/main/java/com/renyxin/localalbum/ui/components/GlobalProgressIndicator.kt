@@ -197,8 +197,9 @@ internal fun resolveProgressOverlayMode(
     analysisRunning: Boolean,
     automaticAnalysisEnabled: Boolean = true,
 ): ProgressOverlayMode = when {
-    pipelineState.stage.isThumbnail || pipelineState.stage.isPublish -> ProgressOverlayMode.THUMBNAILS
-    pipelineState.stage.isScan -> ProgressOverlayMode.SCAN
+    (pipelineState.stage.isThumbnail || pipelineState.stage.isPublish) &&
+        pipelineState.activeRunId != null -> ProgressOverlayMode.THUMBNAILS
+    pipelineState.hasStartedOrRequestedScan -> ProgressOverlayMode.SCAN
     analysisRunning -> ProgressOverlayMode.ANALYSIS
     pipelineState.stage.isAnalysis && automaticAnalysisEnabled -> ProgressOverlayMode.WAITING
     else -> ProgressOverlayMode.HIDDEN

@@ -42,10 +42,12 @@ internal fun SettingsTab(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val scanState by albumViewModel.scanState.collectAsStateWithLifecycle()
+    val pipelineState by albumViewModel.libraryPipelineState.collectAsStateWithLifecycle()
     val indexAvailability by albumViewModel.indexAvailability.collectAsStateWithLifecycle()
     val coreScanState by albumViewModel.coreScanState.collectAsStateWithLifecycle()
     val enhancementState by albumViewModel.enhancementState.collectAsStateWithLifecycle()
-    val coreScanActive = isCoreScanActive(scanState, coreScanState)
+    val coreScanActive = pipelineState.hasStartedOrRequestedScan ||
+        isCoreScanActive(scanState, coreScanState)
     val trashedCount by albumViewModel.trashedCount.collectAsStateWithLifecycle()
 
     var showPicker by remember { mutableStateOf(false) }

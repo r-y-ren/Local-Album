@@ -602,9 +602,9 @@ class AlbumRepository(
     }
 
     // ---- 扫描 ----
-    /** Normal user refresh checks only the durable incremental journal. */
+    /** Normal user refresh authorizes the first traversal; after baseline it only drains journals. */
     suspend fun rescan(): Boolean = withContext(Dispatchers.IO) {
-        libraryPipelineCoordinator?.wake()
+        libraryPipelineCoordinator?.requestUserScan()
         true
     }
 

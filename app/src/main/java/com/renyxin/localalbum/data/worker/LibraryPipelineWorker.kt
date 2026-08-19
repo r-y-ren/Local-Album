@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.renyxin.localalbum.LocalAlbumApplication
 import com.renyxin.localalbum.data.db.entity.LibraryPipelineStage
+import com.renyxin.localalbum.data.db.entity.isScanProgressVisible
 
 /**
  * Single durable pump for the serialized library pipeline.
@@ -32,11 +33,13 @@ class LibraryPipelineWorker(
             coordinator.ensureState()
             coordinator.startQueuedWorkIfIdle()
             val state = requireNotNull(dao.get())
-            when (LibraryPipelineStage.fromPersisted(state.stage)) {
+            when (val stage = LibraryPipelineStage.fromPersisted(state.stage)) {
                 LibraryPipelineStage.INITIAL_SCAN,
                 LibraryPipelineStage.INCREMENTAL_SCAN,
                 LibraryPipelineStage.REBUILD_SCAN,
-                -> ScanWorker.schedule(applicationContext)
+                -> if (isScanProgressVisible(stage, state.activeRunId, state.rebuildRequested)) {
+                    ScanWorker.schedule(applicationContext)
+                }
 
                 LibraryPipelineStage.INITIAL_THUMBNAILS,
                 LibraryPipelineStage.INCREMENTAL_THUMBNAILS,

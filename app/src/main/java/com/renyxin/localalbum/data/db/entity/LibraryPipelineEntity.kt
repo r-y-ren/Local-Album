@@ -73,6 +73,26 @@ enum class LibraryPipelineStage {
     }
 }
 
+/**
+ * Shared visibility/scheduling gate for a core scan.
+ *
+ * Incremental and rebuild stages can only be entered from durable journal/user requests, so their
+ * stage is itself a persisted request. INITIAL_SCAN is also the default first-build stage on older
+ * control rows and therefore additionally requires an explicit pending request or a bound run.
+ */
+internal fun isScanProgressVisible(
+    stage: LibraryPipelineStage,
+    activeRunId: String?,
+    explicitRequestPending: Boolean,
+): Boolean = when (stage) {
+    LibraryPipelineStage.UNINITIALIZED -> explicitRequestPending
+    LibraryPipelineStage.INITIAL_SCAN -> activeRunId != null || explicitRequestPending
+    LibraryPipelineStage.INCREMENTAL_SCAN,
+    LibraryPipelineStage.REBUILD_SCAN,
+    -> true
+    else -> false
+}
+
 /** UI-facing immutable projection of the durable pipeline row. */
 data class LibraryPipelineState(
     val stage: LibraryPipelineStage = LibraryPipelineStage.UNINITIALIZED,
@@ -90,6 +110,14 @@ data class LibraryPipelineState(
 ) {
     /** 已发布快照始终可见；只有首次发布门禁尚未打开时才阻塞主页。 */
     val blocksHome: Boolean get() = !hasPublishedBaseline
+
+    /**
+     * A scan stage without either a pending explicit request or a bound run is only an admitted
+     * control-plane row. It must not be rendered as running progress.
+     */
+    val hasStartedOrRequestedScan: Boolean
+        get() = isScanProgressVisible(stage, activeRunId, rebuildRequested)
+
     val isBusy: Boolean
         get() = stage != LibraryPipelineStage.READY &&
             stage != LibraryPipelineStage.NEEDS_REBUILD &&

@@ -7,6 +7,52 @@ import org.junit.Test
 
 class HomeContentModeTest {
     @Test
+    fun `first launch without request keeps empty library state`() {
+        assertEquals(
+            HomeContentMode.EMPTY,
+            resolveHomeContentMode(
+                pipelineState = pipeline(
+                    stage = LibraryPipelineStage.UNINITIALIZED,
+                    hasBaseline = false,
+                ),
+                itemCount = 0,
+                refresh = HomeRefreshState.NOT_LOADING,
+            ),
+        )
+    }
+
+    @Test
+    fun `configured roots without first scan request do not show building overlay`() {
+        assertEquals(
+            HomeContentMode.EMPTY,
+            resolveHomeContentMode(
+                pipelineState = pipeline(
+                    stage = LibraryPipelineStage.INITIAL_SCAN,
+                    hasBaseline = false,
+                ),
+                itemCount = 0,
+                refresh = HomeRefreshState.NOT_LOADING,
+            ),
+        )
+    }
+
+    @Test
+    fun `requested first scan shows building even before results`() {
+        assertEquals(
+            HomeContentMode.BUILDING,
+            resolveHomeContentMode(
+                pipelineState = pipeline(
+                    stage = LibraryPipelineStage.UNINITIALIZED,
+                    hasBaseline = false,
+                    rebuildRequested = true,
+                ),
+                itemCount = 0,
+                refresh = HomeRefreshState.NOT_LOADING,
+            ),
+        )
+    }
+
+    @Test
     fun `initial thumbnails without baseline shows building instead of empty`() {
         assertEquals(
             HomeContentMode.BUILDING,
@@ -14,6 +60,7 @@ class HomeContentModeTest {
                 pipelineState = pipeline(
                     stage = LibraryPipelineStage.INITIAL_THUMBNAILS,
                     hasBaseline = false,
+                    activeRunId = "thumbnail-run",
                 ),
                 itemCount = 0,
                 refresh = HomeRefreshState.NOT_LOADING,
@@ -104,9 +151,13 @@ class HomeContentModeTest {
     private fun pipeline(
         stage: LibraryPipelineStage,
         hasBaseline: Boolean,
+        activeRunId: String? = null,
+        rebuildRequested: Boolean = false,
     ) = LibraryPipelineState(
         stage = stage,
+        activeRunId = activeRunId,
         hasPublishedBaseline = hasBaseline,
         publishedGeneration = if (hasBaseline) 7L else 0L,
+        rebuildRequested = rebuildRequested,
     )
 }

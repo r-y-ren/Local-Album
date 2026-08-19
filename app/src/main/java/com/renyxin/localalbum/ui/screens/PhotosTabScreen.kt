@@ -54,7 +54,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
 import com.renyxin.localalbum.core.model.MediaItem
-import com.renyxin.localalbum.data.db.entity.LibraryPipelineStage
 import com.renyxin.localalbum.data.db.entity.LibraryPipelineState
 import com.renyxin.localalbum.data.repo.ScanState
 import com.renyxin.localalbum.edition.EditionSearchContribution
@@ -151,14 +150,20 @@ internal enum class HomeRefreshState { LOADING, ERROR, NOT_LOADING }
 
 internal enum class HomeContentMode { GRID, BUILDING, LOADING, ERROR, EMPTY }
 
-/** 已加载项目最高优先；首次门禁仅在无项目时覆盖加载/空态。 */
+/** 已加载项目最高优先；首次门禁仅在真实已启动/请求的流水线构建时覆盖空态。 */
 internal fun resolveHomeContentMode(
     pipelineState: LibraryPipelineState,
     itemCount: Int,
     refresh: HomeRefreshState,
 ): HomeContentMode = when {
     itemCount > 0 -> HomeContentMode.GRID
-    !pipelineState.hasPublishedBaseline -> HomeContentMode.BUILDING
+    !pipelineState.hasPublishedBaseline && (
+        pipelineState.hasStartedOrRequestedScan ||
+            pipelineState.activeRunId != null && (
+                pipelineState.stage.isThumbnail || pipelineState.stage.isPublish ||
+                    pipelineState.stage.isAnalysis
+                )
+        ) -> HomeContentMode.BUILDING
     refresh == HomeRefreshState.LOADING -> HomeContentMode.LOADING
     refresh == HomeRefreshState.ERROR -> HomeContentMode.ERROR
     else -> HomeContentMode.EMPTY
@@ -182,7 +187,7 @@ private fun HomeBuildingState(
             } else {
                 "正在生成缩略图，完成后将一次性显示主页。"
             }
-        pipelineState.stage.isScan || pipelineState.stage == LibraryPipelineStage.UNINITIALIZED ->
+        pipelineState.hasStartedOrRequestedScan ->
             "正在构建媒体库" to "扫描完成后将生成主页缩略图，请稍候。"
         else -> "正在发布主页" to "媒体快照即将可见，请稍候。"
     }
