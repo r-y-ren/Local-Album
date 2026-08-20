@@ -33,9 +33,9 @@ data class AnalysisDeviceCapabilities(
     val availableMemoryGb: Double
         get() = availableMemoryBytes.toDouble() / BYTES_PER_GB
 
+    // detect() 在 Android Q 以下固定返回 NONE；纯策略只判断快照值，便于隔离平台的 JVM 验证。
     val hasSeriousThermalPressure: Boolean
-        get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-            thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE
+        get() = thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE
 
     private companion object {
         const val BYTES_PER_GB = 1024.0 * 1024.0 * 1024.0
@@ -46,6 +46,7 @@ data class AnalysisDeviceCapabilities(
  * 一次分析窗口使用的有效调度参数。
  *
  * [workerLeaseGroups] 每组固定 250 条，最多四组，以维持已经真机验证过的 1000 条硬上限。
+ * [thumbnailConcurrency] 同时约束 automatic/interactive lane，且不得突破 1..4 的 Bitmap 内存安全边界。
  * Semantic 与 OCR 始终为 1；任何预设都不得突破阶段声明的模型安全并发。
  */
 data class AnalysisSchedulingProfile(
@@ -55,6 +56,7 @@ data class AnalysisSchedulingProfile(
     val allowFaceQualityParallel: Boolean,
     val faceConcurrency: Int,
     val sceneConcurrency: Int,
+    val thumbnailConcurrency: Int,
     val semanticConcurrency: Int = 1,
     val qualityConcurrency: Int,
     val ocrConcurrency: Int = 1,
@@ -72,6 +74,12 @@ data class AnalysisSchedulingProfile(
 
 /** 纯策略解析器，集中维护推荐阈值和不可绕过的安全边界。 */
 object AnalysisSchedulingResolver {
+    internal const val MIN_THUMBNAIL_CONCURRENCY = 1
+    internal const val MAX_THUMBNAIL_CONCURRENCY = 4
+
+    internal fun clampThumbnailConcurrency(value: Int): Int =
+        value.coerceIn(MIN_THUMBNAIL_CONCURRENCY, MAX_THUMBNAIL_CONCURRENCY)
+
     fun recommend(capabilities: AnalysisDeviceCapabilities): AnalysisSchedulingMode = when {
         capabilities.lowMemory || capabilities.totalMemoryGb < 6.0 ->
             AnalysisSchedulingMode.STABILITY
@@ -106,6 +114,7 @@ object AnalysisSchedulingResolver {
                 allowFaceQualityParallel = false,
                 faceConcurrency = 1,
                 sceneConcurrency = 1,
+                thumbnailConcurrency = clampThumbnailConcurrency(1),
                 qualityConcurrency = 2,
             )
             AnalysisSchedulingMode.BALANCED -> AnalysisSchedulingProfile(
@@ -115,6 +124,7 @@ object AnalysisSchedulingResolver {
                 allowFaceQualityParallel = true,
                 faceConcurrency = 2,
                 sceneConcurrency = 2,
+                thumbnailConcurrency = clampThumbnailConcurrency(2),
                 qualityConcurrency = 4,
             )
             AnalysisSchedulingMode.PERFORMANCE -> AnalysisSchedulingProfile(
@@ -124,6 +134,7 @@ object AnalysisSchedulingResolver {
                 allowFaceQualityParallel = true,
                 faceConcurrency = 2,
                 sceneConcurrency = 2,
+                thumbnailConcurrency = clampThumbnailConcurrency(4),
                 qualityConcurrency = 4,
             )
         }

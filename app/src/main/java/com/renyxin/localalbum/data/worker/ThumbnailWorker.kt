@@ -6,6 +6,9 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.renyxin.localalbum.LocalAlbumApplication
+import com.renyxin.localalbum.core.concurrent.AnalysisDeviceCapabilityDetector
+import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingMode
+import com.renyxin.localalbum.core.concurrent.AnalysisSchedulingResolver
 import com.renyxin.localalbum.core.concurrent.EnhancementResourceGate
 import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity
@@ -15,13 +18,19 @@ import com.renyxin.localalbum.data.db.dao.ThumbnailTaskDao
 import com.renyxin.localalbum.data.db.entity.ThumbnailCacheEntryEntity
 import com.renyxin.localalbum.data.db.entity.ThumbnailLaneWakeEntity
 import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
+import com.renyxin.localalbum.data.prefs.SettingsStore
 import com.renyxin.localalbum.data.repo.ThumbnailCacheTrimmer
 import com.renyxin.localalbum.data.repo.ThumbnailWakeDispatcher
 import com.renyxin.localalbum.data.source.MediaSource
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 
 /** 固定双 lane pump；任务 level、延迟和运行租约全部由 Room 保存。 */
@@ -46,12 +55,23 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
                 laneId,revision,dispatchToken,runToken,now + RUN_LEASE_MS,now,
             ) != 1
         ) return Result.success()
-        // CAS 成功后再做幂等 repair。RUNNING lease 会保护当前 run token，同时回收过期 task lease。
-        dao.recomputeLaneLevel(laneId,now)
-
         var processed = 0
         var failed = 0
         return try {
+            // exact token 已被当前 run 接管；此后的设置读取、能力检测与 lane repair 都受
+            // 下方统一取消/异常清理保护，不会把持久队列遗留在 ENQUEUED/RUNNING。
+            dao.recomputeLaneLevel(laneId,now)
+            // WorkManager 可在冷启动或进程重建后运行，因此每次 pump 直接从持久化设置解析
+            // 一份不可变 profile；本次最多 32 项都使用同一快照，设置变更从下一次 pump 生效。
+            val requestedMode = AnalysisSchedulingMode.fromPersistedValue(
+                SettingsStore(applicationContext).analysisSchedulingMode.first(),
+            )
+            val schedulingProfile = AnalysisSchedulingResolver.resolve(
+                requestedMode,
+                AnalysisDeviceCapabilityDetector.detect(applicationContext),
+            )
+            val thumbnailConcurrency = schedulingProfile.thumbnailConcurrency
+            val mediaSource = MediaSource(applicationContext)
             val admittedScanId = if (laneId == ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID) {
                 database.libraryPipelineDao().get()?.takeIf { pipeline ->
                     pipeline.stage in setOf(
@@ -96,26 +116,47 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
                     }
                     if (tasks.isEmpty()) false else {
                         try {
-                            tasks.forEach { task ->
-                                val error = processTask(task,leaseToken,database,MediaSource(applicationContext))
-                                if (error == null) processed++ else {
-                                    val completed = System.currentTimeMillis()
-                                    dao.markFailed(
-                                        task.taskId,leaseToken,error.take(MAX_ERROR_LENGTH),
-                                        completed + retryDelayMs(task.attemptCount),MAX_ATTEMPTS,completed,
-                                    )
-                                    failed++
+                            val taskResults = coroutineScope {
+                                val results = ArrayList<TaskProcessingResult>(tasks.size)
+                                executionWaves(tasks,thumbnailConcurrency).forEach { wave ->
+                                    results += wave.map { task ->
+                                        async(Dispatchers.IO) {
+                                            val error = processTask(task,leaseToken,database,mediaSource)
+                                            if (error == null) {
+                                                TaskProcessingResult(processed=1,failed=0)
+                                            } else {
+                                                val completed = System.currentTimeMillis()
+                                                dao.markFailed(
+                                                    task.taskId,leaseToken,error.take(MAX_ERROR_LENGTH),
+                                                    completed + retryDelayMs(task.attemptCount),MAX_ATTEMPTS,completed,
+                                                )
+                                                TaskProcessingResult(processed=0,failed=1)
+                                            }
+                                        }
+                                    }.awaitAll()
                                 }
-                                // Exact gate truth cannot count PENDING retry as completed. At most
-                                // MAX_BATCHES_PER_RUN * BATCH_SIZE bounded commits occur per pump.
-                                if (admittedScanId != null) {
-                                    container.libraryPipelineCoordinator
-                                        .onThumbnailProgressChanged(admittedScanId)
-                                }
+                                results
+                            }
+                            val summary = summarizeBatch(taskResults)
+                            processed += summary.processed
+                            failed += summary.failed
+                            // Exact gate truth cannot count PENDING retry as completed. All claimed
+                            // task state writes settle before this single bounded batch-level commit.
+                            if (admittedScanId != null && shouldReportBatchProgress(tasks.size)) {
+                                container.libraryPipelineCoordinator
+                                    .onThumbnailProgressChanged(admittedScanId)
                             }
                         } catch (cancelled: CancellationException) {
+                            // coroutineScope does not return until every child has cancelled or
+                            // completed, so no decoder can still publish after this lease release.
                             withContext(NonCancellable) { dao.releaseLease(leaseToken,System.currentTimeMillis()) }
                             throw cancelled
+                        } catch (error: Throwable) {
+                            // Infrastructure failures are not business retries. Once structured
+                            // concurrency has settled every child, release unfinished claims now
+                            // instead of waiting for the ten-minute task lease to expire.
+                            withContext(NonCancellable) { dao.releaseLease(leaseToken,System.currentTimeMillis()) }
+                            throw error
                         }
                         true
                     }
@@ -210,7 +251,7 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
         val publicationNonce = UUID.randomUUID().toString()
         var staged: String? = null
         var installed: String? = null
-        return runCatching {
+        val failure = runCatching {
             val generated = mediaSource.generateThumbnailSync(
                 File(identity.canonicalPath),MediaType.valueOf(identity.mediaType),identity,
                 task.taskId,leaseToken,publicationNonce,
@@ -244,16 +285,21 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
                 )
                 if (ready?.path != path) File(path).delete()
             }
-        }.exceptionOrNull()?.let { it.message ?: it::class.java.simpleName }
+        }.exceptionOrNull()
+        if (failure is CancellationException) throw failure
+        return failure?.let { it.message ?: it::class.java.simpleName }
     }
+
+    internal data class TaskProcessingResult(val processed: Int, val failed: Int)
 
     companion object {
         private const val TAG = "ThumbnailWorker"
         const val KEY_LANE_ID = "thumbnail_lane_id"
         const val KEY_DISPATCH_REVISION = "thumbnail_dispatch_revision"
         const val KEY_DISPATCH_TOKEN = "thumbnail_dispatch_token"
-        private const val BATCH_SIZE = 4
-        private const val MAX_BATCHES_PER_RUN = 8
+        internal const val BATCH_SIZE = 4
+        internal const val MAX_BATCHES_PER_RUN = 8
+        internal const val MAX_TASKS_PER_RUN = BATCH_SIZE * MAX_BATCHES_PER_RUN
         private const val MAX_ATTEMPTS = 4
         private const val TASK_LEASE_MS = 10 * 60_000L
         private const val RUN_LEASE_MS = 12 * 60_000L
@@ -261,6 +307,20 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
 
         internal fun retryDelayMs(attemptCount: Int): Long =
             60_000L * (1L shl (attemptCount - 1).coerceIn(0,10))
+
+        internal fun <T> executionWaves(tasks: List<T>, concurrency: Int): List<List<T>> =
+            tasks.chunked(concurrency.coerceIn(1,BATCH_SIZE))
+
+        internal fun summarizeBatch(results: List<TaskProcessingResult>): TaskProcessingResult =
+            TaskProcessingResult(
+                processed=results.sumOf { it.processed },
+                failed=results.sumOf { it.failed },
+            )
+
+        internal fun shouldReportBatchProgress(taskCount: Int): Boolean = taskCount > 0
+
+        internal fun progressCallbackCount(batchSizes: List<Int>): Int =
+            batchSizes.count(::shouldReportBatchProgress)
 
         /** Compatibility entry points now only kick fixed level-triggered lanes. */
         fun enqueueBackground(context: Context) = dispatcher(context)?.kick(ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID)

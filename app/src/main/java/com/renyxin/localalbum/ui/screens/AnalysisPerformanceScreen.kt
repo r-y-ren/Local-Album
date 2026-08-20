@@ -145,9 +145,10 @@ fun AnalysisPerformanceScreen(
                         Text("分析窗口：最多 ${effectiveProfile.workerLeaseGroups * 250} 个媒体")
                         Text(if (effectiveProfile.allowFaceQualityParallel) "人脸与质量评估：安全并行" else "所有分析阶段：串行")
                         Text("人脸 / 场景 / 质量并发：${effectiveProfile.faceConcurrency} / ${effectiveProfile.sceneConcurrency} / ${effectiveProfile.qualityConcurrency}")
+                        Text("主页缩略图并发：${effectiveProfile.thumbnailConcurrency} 路")
                         Spacer(Modifier.height(2.dp))
                         Text(
-                            "语义分析与 OCR 始终保持单路执行；系统内存紧张或严重发热时会自动降级。修改将在下一个分析窗口生效，不会重置现有任务。",
+                            "语义分析与 OCR 始终保持单路执行；系统内存紧张或严重发热时，主页缩略图会自动降到 1 路。修改从下一次后台缩略图任务泵或分析窗口生效，不会重置现有任务。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -192,8 +193,8 @@ private fun AnalysisSchedulingMode.displayName(): String = when (this) {
 }
 
 private fun AnalysisSchedulingMode.description(recommended: AnalysisSchedulingMode): String = when (this) {
-    AnalysisSchedulingMode.AUTO -> "根据设备能力自动选择，当前推荐 ${recommended.displayName()}"
-    AnalysisSchedulingMode.STABILITY -> "250 个媒体窗口，阶段串行，适合低内存或易发热设备"
-    AnalysisSchedulingMode.BALANCED -> "500–1000 个媒体窗口，恢复经过验证的安全组合并行"
-    AnalysisSchedulingMode.PERFORMANCE -> "使用最大安全窗口和并发，适合 12 GB 以上高性能设备"
+    AnalysisSchedulingMode.AUTO -> "根据设备能力自动选择，当前推荐 ${recommended.displayName()}（对应 1 / 2 / 4 路缩略图）"
+    AnalysisSchedulingMode.STABILITY -> "250 个媒体窗口，阶段串行，1 路缩略图，适合低内存或易发热设备"
+    AnalysisSchedulingMode.BALANCED -> "500–1000 个媒体窗口，安全组合并行，2 路缩略图"
+    AnalysisSchedulingMode.PERFORMANCE -> "使用最大安全窗口和并发，4 路缩略图，适合 12 GB 以上高性能设备"
 }

@@ -84,9 +84,11 @@ class MediaSource(
      * 此处使用独立线程 + [java.util.concurrent.Future.get] 超时模式，确保单个问题文件
      * 不会卡死整个扫描流程。
      */
-    private val mediaMetaExecutor = Executors.newFixedThreadPool(
-        minOf(Runtime.getRuntime().availableProcessors(), 4),
-    ) { r -> Thread(r, "media-meta").apply { isDaemon = true } }
+    private val mediaMetaExecutor by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        Executors.newFixedThreadPool(
+            minOf(Runtime.getRuntime().availableProcessors(), 4),
+        ) { r -> Thread(r, "media-meta").apply { isDaemon = true } }
+    }
 
     /**
      * 视频元数据聚合结果（F2：单次 MediaMetadataRetriever 提取全部字段）。
