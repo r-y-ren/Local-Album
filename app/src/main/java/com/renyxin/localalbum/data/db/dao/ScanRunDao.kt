@@ -21,6 +21,9 @@ abstract class ScanRunDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract suspend fun insert(run: ScanRunEntity)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    abstract suspend fun insertIfAbsent(run: ScanRunEntity): Long
+
     @Query("UPDATE scan_runs SET mediaStoreCompleted = 1 WHERE scanId = :scanId AND status = 'RUNNING'")
     abstract suspend fun markMediaStoreCompleted(scanId: String): Int
 
@@ -182,8 +185,9 @@ abstract class ScanRunDao {
     @Query(
         """SELECT scanId FROM scan_runs
            WHERE coreScanState = 'COMPLETED'
-              AND enhancementState IN ('QUEUED', 'RUNNING')
-              AND (
+               AND enhancementState IN ('QUEUED', 'RUNNING')
+               AND scanType != 'THUMBNAIL_REPAIR'
+               AND (
                   EXISTS(SELECT 1 FROM enhancement_outbox o WHERE o.scanId = scan_runs.scanId AND o.status IN ('PENDING', 'RUNNING'))
                   OR EXISTS(SELECT 1 FROM analysis_tasks a WHERE a.scanId = scan_runs.scanId AND a.status IN ('PENDING', 'RUNNING'))
                   OR EXISTS(SELECT 1 FROM thumbnail_tasks t WHERE t.scanId = scan_runs.scanId AND t.status IN ('PENDING', 'RUNNING'))
@@ -198,8 +202,9 @@ abstract class ScanRunDao {
      */
     @Query(
         """SELECT scanId FROM scan_runs
-           WHERE coreScanState = 'COMPLETED'
-             AND enhancementState IN ('QUEUED', 'RUNNING')""",
+            WHERE coreScanState = 'COMPLETED'
+              AND enhancementState IN ('QUEUED', 'RUNNING')
+              AND scanType != 'THUMBNAIL_REPAIR'""",
     )
     abstract suspend fun getUnsettledEnhancementScanIds(): List<String>
 
@@ -340,22 +345,93 @@ abstract class ScanRunDao {
 
     @Query(
         """UPDATE scan_runs
-           SET enhancementState = 'QUEUED'
-           WHERE scanId = :scanId
-             AND coreScanState = 'COMPLETED'
-             AND enhancementState IN ('NOT_SCHEDULED', 'RUNNING')""",
+            SET enhancementState = 'QUEUED'
+            WHERE scanId = :scanId
+              AND coreScanState = 'COMPLETED'
+              AND enhancementState IN ('NOT_SCHEDULED', 'RUNNING')""",
     )
     abstract suspend fun markEnhancementQueued(scanId: String): Int
 
+    /** Reopens the deterministic thumbnail repair row without creating a second run identity. */
     @Query(
         """UPDATE scan_runs
-           SET enhancementState = :state,
+            SET enhancementState = 'QUEUED', enhancementCompletedAt = 0, errorType = NULL
+            WHERE scanId = :scanId
+              AND scanType = 'THUMBNAIL_REPAIR'
+              AND coreScanState = 'COMPLETED'
+              AND enhancementState IN ('COMPLETED', 'COMPLETED_WITH_FAILURES', 'CANCELLED')""",
+    )
+    abstract suspend fun requeueThumbnailRepair(scanId: String): Int
+
+    @Query(
+        """UPDATE scan_runs
+            SET enhancementState = :state,
                enhancementCompletedAt = :now
-           WHERE scanId = :scanId
-             AND coreScanState = 'COMPLETED'
-             AND enhancementState IN ('QUEUED', 'RUNNING', 'PREEMPTED', 'PAUSED')""",
+            WHERE scanId = :scanId
+              AND coreScanState = 'COMPLETED'
+              AND enhancementState IN ('QUEUED', 'RUNNING', 'PREEMPTED', 'PAUSED')""",
     )
     abstract suspend fun markEnhancementTerminal(scanId: String, state: String, now: Long): Int
+
+    @Query(
+        """UPDATE scan_runs
+            SET enhancementState = :state,
+                enhancementCompletedAt = :now
+            WHERE scanId = :scanId
+              AND generation = :generation
+              AND scanType = 'THUMBNAIL_REPAIR'
+              AND coreScanState = 'COMPLETED'
+              AND enhancementState IN ('QUEUED', 'RUNNING', 'PREEMPTED', 'PAUSED')""",
+    )
+    protected abstract suspend fun markThumbnailRepairTerminalIfActive(
+        scanId: String,
+        generation: Long,
+        state: String,
+        now: Long,
+    ): Int
+
+    /**
+     * Repair publication may be replayed after Lite cold-start settlement. It is idempotent only for
+     * the exact target state and exact deterministic repair identity; all mismatches remain failures.
+     */
+    @Transaction
+    open suspend fun markThumbnailRepairTerminal(
+        scanId: String,
+        generation: Long,
+        state: String,
+        now: Long,
+    ): Boolean {
+        require(
+            state == EnhancementState.COMPLETED.name ||
+                state == EnhancementState.COMPLETED_WITH_FAILURES.name,
+        ) { "Thumbnail repair terminal state is not publishable: $state" }
+        val run = getById(scanId) ?: return false
+        check(run.generation == generation) {
+            "Thumbnail repair generation mismatch for scanId=$scanId"
+        }
+        check(run.scanType == ScanRunEntity.TYPE_THUMBNAIL_REPAIR) {
+            "Thumbnail repair type mismatch for scanId=$scanId"
+        }
+        check(run.coreScanState == CoreScanState.COMPLETED.name) {
+            "Thumbnail repair core state is not completed for scanId=$scanId"
+        }
+        if (run.enhancementState == state) return true
+        if (
+            markThumbnailRepairTerminalIfActive(
+                scanId = scanId,
+                generation = generation,
+                state = state,
+                now = now,
+            ) == 1
+        ) {
+            return true
+        }
+        val settled = getById(scanId) ?: return false
+        return settled.generation == generation &&
+            settled.scanType == ScanRunEntity.TYPE_THUMBNAIL_REPAIR &&
+            settled.coreScanState == CoreScanState.COMPLETED.name &&
+            settled.enhancementState == state
+    }
 
     @Query("SELECT status = 'COMPLETED' FROM scan_runs WHERE scanId = :scanId LIMIT 1")
     abstract suspend fun isCompleted(scanId: String): Boolean?

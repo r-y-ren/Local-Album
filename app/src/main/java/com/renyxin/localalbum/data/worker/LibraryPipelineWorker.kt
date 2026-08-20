@@ -25,14 +25,13 @@ class LibraryPipelineWorker(
     override suspend fun doWork(): Result {
         val app = applicationContext as? LocalAlbumApplication ?: return Result.failure()
         val container = app.container
-        val db = container.database
-        val dao = db.libraryPipelineDao()
         val coordinator = container.libraryPipelineCoordinator
 
         return runCatching {
-            coordinator.ensureState()
-            coordinator.startQueuedWorkIfIdle()
-            val state = requireNotNull(dao.get())
+            // One mutex/Room preparation pass owns recovery, idle admission and exact thumbnail-gate
+            // convergence. The current pump consumes its library continuation, while any admitted
+            // thumbnail/analysis lane is dispatched only after the coordinator lock has been released.
+            val state = coordinator.prepareLibraryWorkerPass()
             when (val stage = LibraryPipelineStage.fromPersisted(state.stage)) {
                 LibraryPipelineStage.INITIAL_SCAN,
                 LibraryPipelineStage.INCREMENTAL_SCAN,
@@ -44,7 +43,7 @@ class LibraryPipelineWorker(
                 LibraryPipelineStage.INITIAL_THUMBNAILS,
                 LibraryPipelineStage.INCREMENTAL_THUMBNAILS,
                 LibraryPipelineStage.REBUILD_THUMBNAILS,
-                -> ThumbnailWorker.appendBackgroundSuccessor(applicationContext)
+                -> Unit
 
                 LibraryPipelineStage.INITIAL_PUBLISH,
                 LibraryPipelineStage.INCREMENTAL_PUBLISH,

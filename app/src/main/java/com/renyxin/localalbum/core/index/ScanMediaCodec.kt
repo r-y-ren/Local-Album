@@ -64,6 +64,10 @@ internal object ScanMediaCodec {
         if (mediaStore == null) return requireNotNull(fileSystem)
         if (fileSystem == null) return mediaStore
         return mediaStore.copy(
+            // File enumeration is the high-resolution physical identity source. MediaStore-only
+            // rows keep their provider metadata because they have no filesystem counterpart here.
+            modifiedAt = fileSystem.modifiedAt,
+            fileSize = fileSystem.fileSize,
             latitude = mediaStore.latitude ?: fileSystem.latitude,
             longitude = mediaStore.longitude ?: fileSystem.longitude,
             make = mediaStore.make?.ifBlank { fileSystem.make } ?: fileSystem.make,

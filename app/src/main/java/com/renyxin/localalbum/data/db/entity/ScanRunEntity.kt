@@ -5,11 +5,12 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
- * 一次媒体扫描的持久化生命周期。
+ * 一次媒体扫描或持久增强修复的生命周期。
  *
  * 旧 [status] 与来源完成字段继续作为数据库升级和孤儿删除的兼容门禁；
  * [coreScanState]、[indexAvailability] 与 [enhancementState] 是新的正交完成语义。
  * 场景、质量、缩略图和其他后台任务不能通过 [status] 伪装成核心扫描完成。
+ * [TYPE_THUMBNAIL_REPAIR] 复用同一控制面，但不代表重新枚举媒体或执行分析。
  */
 @Entity(
     tableName = "scan_runs",
@@ -44,6 +45,8 @@ data class ScanRunEntity(
         const val TYPE_FULL = "FULL"
         const val TYPE_INCREMENTAL = "INCREMENTAL"
         const val TYPE_RECONCILIATION = "RECONCILIATION"
+        /** Durable app-level repair that owns only current Grid thumbnail identities. */
+        const val TYPE_THUMBNAIL_REPAIR = "THUMBNAIL_REPAIR"
         const val STATUS_RUNNING = "RUNNING"
         const val STATUS_COMPLETED = "COMPLETED"
         const val STATUS_FAILED = "FAILED"

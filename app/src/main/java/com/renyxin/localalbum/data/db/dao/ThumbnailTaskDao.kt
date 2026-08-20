@@ -60,14 +60,21 @@ abstract class ThumbnailTaskDao {
 
     @Query(
         """SELECT
-             COALESCE(SUM(CASE WHEN status = 'PENDING' AND nextRetryAt <= :now THEN 1 ELSE 0 END),0) AS immediateCount,
-             COALESCE(SUM(CASE WHEN status IN ('PENDING','RUNNING') THEN 1 ELSE 0 END),0) AS activeCount,
-             MIN(CASE WHEN status = 'PENDING' AND nextRetryAt > :now THEN nextRetryAt
-                      WHEN status = 'RUNNING' AND leaseUntil > :now THEN leaseUntil END) AS earliestFuture
-           FROM thumbnail_tasks
-           WHERE ((:laneId = 'interactive' AND scanId IS NULL) OR
-                  (:laneId = 'automatic' AND scanId IS NOT NULL))
-             AND status IN ('PENDING','RUNNING')""",
+             COALESCE(SUM(CASE WHEN task.status = 'PENDING' AND task.nextRetryAt <= :now THEN 1 ELSE 0 END),0) AS immediateCount,
+             COALESCE(SUM(CASE WHEN task.status IN ('PENDING','RUNNING') THEN 1 ELSE 0 END),0) AS activeCount,
+             MIN(CASE WHEN task.status = 'PENDING' AND task.nextRetryAt > :now THEN task.nextRetryAt
+                      WHEN task.status = 'RUNNING' AND task.leaseUntil > :now THEN task.leaseUntil END) AS earliestFuture
+           FROM thumbnail_tasks task
+           WHERE task.status IN ('PENDING','RUNNING')
+             AND (
+               (:laneId = 'interactive' AND task.scanId IS NULL) OR
+               (:laneId = 'automatic' AND task.scanId IS NOT NULL AND EXISTS(
+                 SELECT 1 FROM library_pipeline pipeline
+                 WHERE pipeline.pipelineId = 'default'
+                   AND pipeline.stage IN ('INITIAL_THUMBNAILS','INCREMENTAL_THUMBNAILS','REBUILD_THUMBNAILS')
+                   AND pipeline.activeRunId = task.scanId
+               ))
+             )""",
     )
     protected abstract suspend fun readLaneLevel(laneId: String, now: Long): ThumbnailLaneLevel
 
@@ -103,7 +110,8 @@ abstract class ThumbnailTaskDao {
             level.activeCount > 0 -> ThumbnailLaneWakeEntity.STATE_DELAYED
             else -> ThumbnailLaneWakeEntity.STATE_QUIESCENT
         }
-        writeLaneLevel(laneId, state, level.earliestFuture ?: 0L, now)
+        val notBefore = if (level.immediateCount > 0) 0L else level.earliestFuture ?: 0L
+        writeLaneLevel(laneId, state, notBefore, now)
         return requireNotNull(laneState(laneId))
     }
 
@@ -111,8 +119,15 @@ abstract class ThumbnailTaskDao {
         """UPDATE thumbnail_tasks SET status = 'PENDING', leaseUntil = 0, leaseToken = NULL,
                updatedAt = :now
            WHERE status = 'RUNNING' AND leaseUntil <= :now
-             AND ((:laneId = 'interactive' AND scanId IS NULL) OR
-                  (:laneId = 'automatic' AND scanId IS NOT NULL))""",
+             AND (
+               (:laneId = 'interactive' AND scanId IS NULL) OR
+               (:laneId = 'automatic' AND scanId IS NOT NULL AND EXISTS(
+                 SELECT 1 FROM library_pipeline pipeline
+                 WHERE pipeline.pipelineId = 'default'
+                   AND pipeline.stage IN ('INITIAL_THUMBNAILS','INCREMENTAL_THUMBNAILS','REBUILD_THUMBNAILS')
+                   AND pipeline.activeRunId = thumbnail_tasks.scanId
+               ))
+             )""",
     )
     protected abstract suspend fun recoverExpiredTaskLeasesForLane(laneId: String, now: Long): Int
 
@@ -223,7 +238,8 @@ abstract class ThumbnailTaskDao {
             level.activeCount > 0 -> ThumbnailLaneWakeEntity.STATE_DELAYED
             else -> ThumbnailLaneWakeEntity.STATE_QUIESCENT
         }
-        if (finalizeRunInternal(laneId, runToken, state, level.earliestFuture ?: 0L, now) != 1) return null
+        val notBefore = if (level.immediateCount > 0) 0L else level.earliestFuture ?: 0L
+        if (finalizeRunInternal(laneId, runToken, state, notBefore, now) != 1) return null
         return laneState(laneId)
     }
 
@@ -356,6 +372,35 @@ abstract class ThumbnailTaskDao {
         )
     }
 
+    @Query("SELECT COUNT(*) FROM media_items WHERE isTrashed = 0 AND mediaType IN ('IMAGE','VIDEO')")
+    abstract suspend fun countVisibleGridMedia(): Int
+
+    @Query(
+        """SELECT COUNT(*) FROM media_items media
+           WHERE media.isTrashed = 0 AND media.mediaType IN ('IMAGE','VIDEO')
+             AND (
+               NOT EXISTS(
+                 SELECT 1 FROM home_media_snapshot home
+                 WHERE home.filePath = media.filePath
+                   AND home.thumbnailState = 'READY'
+                   AND home.thumbnailPath IS NOT NULL
+                   AND home.thumbnailPath = media.thumbnailPath
+               )
+               OR NOT EXISTS(
+                 SELECT 1 FROM thumbnail_cache_entries cache
+                 WHERE cache.filePath = media.filePath
+                   AND cache.mediaType = media.mediaType
+                   AND cache.sizeClass = 'grid'
+                   AND cache.formatVersion = :formatVersion
+                   AND cache.sourceVersion = 'sv1|m=' || media.modifiedAtMs || '|s=' ||
+                       media.fileSize || '|f=' || COALESCE(LOWER(media.fingerprintHead),'-')
+                   AND cache.path = media.thumbnailPath
+                   AND cache.state = 'READY'
+               )
+             )""",
+    )
+    abstract suspend fun countCurrentGridGaps(formatVersion: Int = ThumbnailIdentity.CURRENT_FORMAT_VERSION): Int
+
     @Query(
         """UPDATE thumbnail_tasks SET status = 'SUPERSEDED', leaseUntil = 0, leaseToken = NULL,
                updatedAt = :now
@@ -401,10 +446,60 @@ abstract class ThumbnailTaskDao {
         now: Long,
     ): Int
 
+    @Query(
+        """UPDATE thumbnail_tasks SET status = 'PENDING', attemptCount = 0, nextRetryAt = 0,
+               leaseUntil = 0, leaseToken = NULL, lastError = NULL,
+               priority = MAX(priority,:priority), scanId = :scanId, updatedAt = :now
+           WHERE sizeClass = 'grid' AND formatVersion = :formatVersion AND status = 'DONE'
+             AND EXISTS(
+               SELECT 1 FROM media_items media
+               WHERE media.filePath = thumbnail_tasks.filePath
+                 AND media.mediaType = thumbnail_tasks.mediaType
+                 AND media.isTrashed = 0
+                 AND media.mediaType IN ('IMAGE','VIDEO')
+                 AND ('sv1|m=' || media.modifiedAtMs || '|s=' || media.fileSize || '|f=' ||
+                      COALESCE(LOWER(media.fingerprintHead),'-')) = thumbnail_tasks.sourceVersion
+             )
+             AND NOT EXISTS(
+               SELECT 1 FROM thumbnail_cache_entries cache
+               JOIN media_items media
+                 ON media.filePath = cache.filePath AND media.mediaType = cache.mediaType
+               WHERE cache.filePath = thumbnail_tasks.filePath
+                 AND cache.mediaType = thumbnail_tasks.mediaType
+                 AND cache.sourceVersion = thumbnail_tasks.sourceVersion
+                 AND cache.sizeClass = thumbnail_tasks.sizeClass
+                 AND cache.formatVersion = thumbnail_tasks.formatVersion
+                 AND cache.state = 'READY'
+                 AND media.isTrashed = 0
+                 AND ('sv1|m=' || media.modifiedAtMs || '|s=' || media.fileSize || '|f=' ||
+                      COALESCE(LOWER(media.fingerprintHead),'-')) = thumbnail_tasks.sourceVersion
+                 AND cache.path = media.thumbnailPath
+             )""",
+    )
+    protected abstract suspend fun reactivateCurrentDoneGridForRepair(
+        scanId: String,
+        priority: Int,
+        formatVersion: Int,
+        now: Long,
+    ): Int
+
     @Transaction
-    open suspend fun seedAllGrid(scanId: String, priority: Int, now: Long = System.currentTimeMillis()): Int {
+    open suspend fun seedAllGrid(
+        scanId: String,
+        priority: Int,
+        now: Long = System.currentTimeMillis(),
+        repairMissingDone: Boolean = false,
+    ): Int {
         supersedeStaleGridForAll(ThumbnailIdentity.CURRENT_FORMAT_VERSION, now)
         insertAllCurrentGrid(scanId, priority, ThumbnailIdentity.CURRENT_FORMAT_VERSION, now)
+        if (repairMissingDone) {
+            reactivateCurrentDoneGridForRepair(
+                scanId = scanId,
+                priority = priority,
+                formatVersion = ThumbnailIdentity.CURRENT_FORMAT_VERSION,
+                now = now,
+            )
+        }
         assignAllCurrentGrid(scanId, priority, ThumbnailIdentity.CURRENT_FORMAT_VERSION, now)
         recomputeLaneLevel(ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID, now)
         return thumbnailGateSnapshot(scanId).total
@@ -475,7 +570,7 @@ abstract class ThumbnailTaskDao {
                'sv1|m=' || media.modifiedAtMs || '|s=' || media.fileSize || '|f=' ||
                COALESCE(LOWER(media.fingerprintHead),'-') AS sourceVersion
              FROM scan_runs run JOIN media_items media ON media.isTrashed = 0
-             WHERE run.scanId = :scanId AND run.scanType IN ('FULL','RECONCILIATION')
+             WHERE run.scanId = :scanId AND run.scanType IN ('FULL','RECONCILIATION','THUMBNAIL_REPAIR')
                AND media.mediaType IN ('IMAGE','VIDEO')
              UNION
              SELECT outbox.filePath,outbox.mediaType,outbox.sourceVersion
@@ -496,12 +591,17 @@ abstract class ThumbnailTaskDao {
         thumbnailGateSnapshotVersioned(scanId, ThumbnailIdentity.CURRENT_FORMAT_VERSION)
 
     @Query(
-        """SELECT taskId FROM thumbnail_tasks WHERE status = 'PENDING' AND nextRetryAt <= :now
-           AND ((:laneId = 'interactive' AND scanId IS NULL) OR
-                (:laneId = 'automatic' AND scanId IS NOT NULL AND scanId IN (
-                  SELECT activeRunId FROM library_pipeline WHERE pipelineId = 'default'
-                    AND stage IN ('INITIAL_THUMBNAILS','INCREMENTAL_THUMBNAILS','REBUILD_THUMBNAILS'))))
-           ORDER BY priority DESC,createdAt LIMIT :limit""",
+        """SELECT task.taskId FROM thumbnail_tasks task
+           WHERE task.status = 'PENDING' AND task.nextRetryAt <= :now
+             AND (
+               (:laneId = 'interactive' AND task.scanId IS NULL) OR
+               (:laneId = 'automatic' AND task.scanId IS NOT NULL AND task.scanId IN (
+                 SELECT pipeline.activeRunId FROM library_pipeline pipeline
+                 WHERE pipeline.pipelineId = 'default'
+                   AND pipeline.stage IN ('INITIAL_THUMBNAILS','INCREMENTAL_THUMBNAILS','REBUILD_THUMBNAILS')
+               ))
+             )
+           ORDER BY task.priority DESC,task.createdAt LIMIT :limit""",
     )
     protected abstract suspend fun findClaimableIds(laneId: String, now: Long, limit: Int): List<Long>
 
@@ -536,9 +636,38 @@ abstract class ThumbnailTaskDao {
     suspend fun claimInteractiveBatch(now: Long, limit: Int, leaseToken: String, leaseDurationMs: Long) =
         claimLaneBatch(ThumbnailLaneWakeEntity.INTERACTIVE_LANE_ID, now, limit, leaseToken, leaseDurationMs)
 
-    suspend fun claimAutomaticBatch(now: Long, limit: Int, leaseToken: String, leaseDurationMs: Long, scanId: String): List<ThumbnailTaskEntity> =
-        claimLaneBatch(ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID, now, limit, leaseToken, leaseDurationMs)
-            .filter { it.scanId == scanId }
+    @Query(
+        """SELECT task.taskId FROM thumbnail_tasks task
+           WHERE task.status = 'PENDING' AND task.nextRetryAt <= :now
+             AND task.scanId = :scanId
+             AND EXISTS(
+               SELECT 1 FROM library_pipeline pipeline
+               WHERE pipeline.pipelineId = 'default'
+                 AND pipeline.stage IN ('INITIAL_THUMBNAILS','INCREMENTAL_THUMBNAILS','REBUILD_THUMBNAILS')
+                 AND pipeline.activeRunId = :scanId
+             )
+           ORDER BY task.priority DESC,task.createdAt LIMIT :limit""",
+    )
+    protected abstract suspend fun findClaimableAutomaticIds(
+        scanId: String,
+        now: Long,
+        limit: Int,
+    ): List<Long>
+
+    @Transaction
+    open suspend fun claimAutomaticBatch(
+        now: Long,
+        limit: Int,
+        leaseToken: String,
+        leaseDurationMs: Long,
+        scanId: String,
+    ): List<ThumbnailTaskEntity> {
+        recoverExpiredTaskLeasesForLane(ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID, now)
+        val ids = findClaimableAutomaticIds(scanId, now, limit)
+        if (ids.isEmpty()) return emptyList()
+        markClaimed(ids, leaseToken, now + leaseDurationMs, now)
+        return getByLeaseToken(leaseToken)
+    }
 
     @Query("SELECT * FROM thumbnail_tasks WHERE taskId = :taskId LIMIT 1")
     abstract suspend fun getById(taskId: Long): ThumbnailTaskEntity?
@@ -593,7 +722,15 @@ abstract class ThumbnailTaskDao {
     @Query("SELECT COUNT(*) FROM thumbnail_tasks WHERE status='PENDING' AND nextRetryAt<=:now AND scanId IS NULL")
     abstract suspend fun countInteractiveClaimable(now: Long): Int
 
-    @Query("SELECT COUNT(*) FROM thumbnail_tasks WHERE status IN ('PENDING','RUNNING') AND scanId IS NOT NULL")
+    @Query(
+        """SELECT COUNT(*) FROM thumbnail_tasks task
+           WHERE task.status IN ('PENDING','RUNNING') AND task.scanId IS NOT NULL
+             AND task.scanId IN (
+               SELECT pipeline.activeRunId FROM library_pipeline pipeline
+               WHERE pipeline.pipelineId = 'default'
+                 AND pipeline.stage IN ('INITIAL_THUMBNAILS','INCREMENTAL_THUMBNAILS','REBUILD_THUMBNAILS')
+             )""",
+    )
     abstract suspend fun countAutomaticRunnable(): Int
 
     @Query("SELECT COUNT(*) FROM thumbnail_tasks WHERE status IN ('PENDING','RUNNING')")

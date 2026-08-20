@@ -8,6 +8,7 @@ import com.renyxin.localalbum.core.concurrent.EnhancementResourceGate
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.core.pipeline.PluginAnalysisPipeline
+import com.renyxin.localalbum.core.thumbnail.HeadFingerprint
 import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.MediaChangeDao
 import com.renyxin.localalbum.data.db.dao.MediaDao
@@ -33,8 +34,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileInputStream
-import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -189,7 +188,6 @@ class HybridIndexer(
     }
     companion object {
         private const val TAG = "HybridIndexer"
-        private const val HEAD_HASH_BYTES = 4096 // 读取前4KB计算头部哈希
         private const val CHANGE_BATCH_SIZE = 500
         private const val CHANGE_LEASE_MS = 60_000L
         private const val CHANGE_RETRY_DELAY_MS = 5_000L
@@ -323,6 +321,15 @@ class HybridIndexer(
 
     suspend fun countOutstandingMediaChanges(): Int =
         requireMediaChangeDao().countOutstandingMediaChanges(profileId)
+
+    /**
+     * Returns the durable changed-set state when this indexer is fully wired. A null result means
+     * the journal DAO was intentionally omitted by a lightweight test-only construction; callers
+     * that make an admission decision must treat that state as unknown, not as an empty journal.
+     * Production [com.renyxin.localalbum.AppContainer] construction always injects the DAO.
+     */
+    suspend fun hasOutstandingMediaChangesOrNull(): Boolean? =
+        mediaChangeDao?.hasOutstandingMediaChanges(profileId)
 
     suspend fun hasOutstandingMediaChanges(): Boolean =
         requireMediaChangeDao().hasOutstandingMediaChanges(profileId)
@@ -1311,24 +1318,12 @@ class HybridIndexer(
         if (batch.isNotEmpty()) emit(batch.toList())
     }
 
-    /**
-     * 计算文件头部哈希，用于增量异常检测。
-     * 读取文件前 HEAD_HASH_BYTES 个字节计算 SHA-256。
-     */
+    /** 计算持久化文件头指纹；协议由 [HeadFingerprint] 统一定义。 */
     fun computeFingerprintHead(filePath: String): String? {
         return try {
             val file = File(filePath)
             if (!file.exists() || !file.isFile) return null
-
-            val digest = MessageDigest.getInstance("SHA-256")
-            FileInputStream(file).use { fis ->
-                val buffer = ByteArray(HEAD_HASH_BYTES)
-                val bytesRead = fis.read(buffer)
-                if (bytesRead > 0) {
-                    digest.update(buffer, 0, bytesRead)
-                }
-            }
-            digest.digest().joinToString("") { "%02x".format(it) }
+            HeadFingerprint.compute(file)
         } catch (e: Exception) {
             Log.w(TAG, "计算头部哈希失败: $filePath", e)
             null

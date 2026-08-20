@@ -77,6 +77,7 @@ data class ThumbnailSourceVersion(
 object SourceVersionCodec {
     private const val PREFIX = "sv1"
     private const val ABSENT_FINGERPRINT = "-"
+    private const val MILLIS_PER_SECOND = 1_000L
     private val FINGERPRINT = Regex("[0-9a-fA-F]+")
 
     fun encode(modifiedAtMs: Long, fileSize: Long, fingerprintHead: String?): String {
@@ -129,7 +130,15 @@ object SourceVersionCodec {
         fingerprintHead: String? = null,
     ): Boolean {
         val decoded = decode(encoded) ?: return false
-        if (decoded.modifiedAtMs != modifiedAtMs || decoded.fileSize != fileSize) return false
+        if (modifiedAtMs < 0L || fileSize < 0L) return false
+        // Existing MediaStore identities are second-precision; only that persisted shape gets
+        // same-second compatibility. New millisecond identities remain exact, with no wide tolerance.
+        val modifiedAtMatches = if (decoded.modifiedAtMs % MILLIS_PER_SECOND == 0L) {
+            decoded.modifiedAtMs / MILLIS_PER_SECOND == modifiedAtMs / MILLIS_PER_SECOND
+        } else {
+            decoded.modifiedAtMs == modifiedAtMs
+        }
+        if (!modifiedAtMatches || decoded.fileSize != fileSize) return false
         return decoded.fingerprintHead == null ||
             decoded.fingerprintHead == fingerprintHead?.trim()?.lowercase()
     }

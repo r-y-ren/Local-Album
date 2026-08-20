@@ -63,6 +63,12 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
                 finalize(database,laneId,runToken,container)
                 return Result.success()
             }
+            if (admittedScanId != null) {
+                database.scanRunDao().markEnhancementRunning(
+                    admittedScanId,
+                    now = System.currentTimeMillis(),
+                )
+            }
             var batches = 0
             while (batches < MAX_BATCHES_PER_RUN && !isStopped) {
                 val batchWork: suspend () -> Boolean = {
@@ -72,10 +78,21 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
                         container.thumbnailProcessEpoch,
                         UUID.randomUUID().toString(),
                     )
-                    val tasks = dao.claimLaneBatch(
-                        laneId,batchNow,BATCH_SIZE,leaseToken,TASK_LEASE_MS,
-                    ).let { claimed ->
-                        if (admittedScanId == null) claimed else claimed.filter { it.scanId == admittedScanId }
+                    val tasks = if (laneId == ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID) {
+                        dao.claimAutomaticBatch(
+                            now = batchNow,
+                            limit = BATCH_SIZE,
+                            leaseToken = leaseToken,
+                            leaseDurationMs = TASK_LEASE_MS,
+                            scanId = requireNotNull(admittedScanId),
+                        )
+                    } else {
+                        dao.claimInteractiveBatch(
+                            now = batchNow,
+                            limit = BATCH_SIZE,
+                            leaseToken = leaseToken,
+                            leaseDurationMs = TASK_LEASE_MS,
+                        )
                     }
                     if (tasks.isEmpty()) false else {
                         try {
@@ -88,6 +105,12 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
                                         completed + retryDelayMs(task.attemptCount),MAX_ATTEMPTS,completed,
                                     )
                                     failed++
+                                }
+                                // Exact gate truth cannot count PENDING retry as completed. At most
+                                // MAX_BATCHES_PER_RUN * BATCH_SIZE bounded commits occur per pump.
+                                if (admittedScanId != null) {
+                                    container.libraryPipelineCoordinator
+                                        .onThumbnailProgressChanged(admittedScanId)
                                 }
                             }
                         } catch (cancelled: CancellationException) {
@@ -146,6 +169,8 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
         ThumbnailCacheTrimmer(database.thumbnailCacheDao()).trim()
         if (laneId == ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID) {
             database.libraryPipelineDao().get()?.activeRunId?.let {
+                // Recovery/final-batch progress is committed before the independent gate transition.
+                container.libraryPipelineCoordinator.onThumbnailProgressChanged(it)
                 container.libraryPipelineCoordinator.onThumbnailQueueChanged(it)
             }
         } else {

@@ -16,10 +16,17 @@ class ScanMediaCodecTest {
     }
 
     @Test
-    fun `merge keeps MediaStore base and fills EXIF from file source`() {
-        val mediaStore = media("/same.jpg").copy(capturedAt = Instant.ofEpochMilli(100), width = 4000)
+    fun `merge keeps MediaStore metadata but adopts filesystem physical version`() {
+        val mediaStore = media("/same.jpg").copy(
+            capturedAt = Instant.ofEpochMilli(100),
+            modifiedAt = Instant.ofEpochMilli(1_787_037_277_000L),
+            fileSize = 100,
+            width = 4000,
+        )
         val file = media("/same.jpg").copy(
             capturedAt = Instant.ofEpochMilli(200),
+            modifiedAt = Instant.ofEpochMilli(1_787_037_277_145L),
+            fileSize = 101,
             width = 10,
             make = "Canon",
             model = "R5",
@@ -30,11 +37,26 @@ class ScanMediaCodecTest {
         val merged = ScanMediaCodec.merge(ScanMediaCodec.encode(mediaStore), ScanMediaCodec.encode(file))
 
         assertEquals(Instant.ofEpochMilli(100), merged.capturedAt)
+        assertEquals(1_787_037_277_145L, merged.modifiedAt.toEpochMilli())
+        assertEquals(101, merged.fileSize)
         assertEquals(4000, merged.width)
         assertEquals("Canon", merged.make)
         assertEquals("R5", merged.model)
         assertEquals(12.3, merged.latitude!!, 0.0)
         assertEquals(6, merged.orientation)
+    }
+
+    @Test
+    fun `MediaStore-only merge keeps provider physical version`() {
+        val mediaStore = media("/provider-only.jpg").copy(
+            modifiedAt = Instant.ofEpochMilli(1_787_037_277_000L),
+            fileSize = 100,
+        )
+
+        val merged = ScanMediaCodec.merge(ScanMediaCodec.encode(mediaStore), null)
+
+        assertEquals(mediaStore.modifiedAt, merged.modifiedAt)
+        assertEquals(mediaStore.fileSize, merged.fileSize)
     }
 
     private fun media(path: String) = MediaItem(

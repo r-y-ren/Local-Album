@@ -16,6 +16,7 @@ import androidx.exifinterface.media.ExifInterface
 import com.renyxin.localalbum.core.index.IgnorePatternMatcher
 import com.renyxin.localalbum.core.index.MediaStoreIdentity
 import com.renyxin.localalbum.core.index.ScanRootPolicy
+import com.renyxin.localalbum.core.thumbnail.HeadFingerprint
 import com.renyxin.localalbum.core.thumbnail.SourceVersionCodec
 import com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity
 import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
@@ -25,7 +26,6 @@ import com.renyxin.localalbum.core.model.MediaType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.security.MessageDigest
@@ -846,36 +846,12 @@ class MediaSource(
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
 
-    private fun fingerprintHead(file: File): String? = runCatching {
-        FileInputStream(file).use { input -> fingerprintHead(input) }
-    }.getOrNull()
+    internal fun fingerprintHead(file: File): String? =
+        runCatching { HeadFingerprint.compute(file) }.getOrNull()
 
-    private fun fingerprintHead(source: RandomAccessFile): String? = runCatching {
-        val position = source.filePointer
-        try {
-            source.seek(0L)
-            fingerprintHead(object : java.io.InputStream() {
-                override fun read(): Int = source.read()
-                override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
-                    source.read(buffer,offset,length)
-            })
-        } finally {
-            source.seek(position)
-        }
-    }.getOrNull()
-
-    private fun fingerprintHead(input: java.io.InputStream): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteArray(64 * 1024)
-        var remaining = buffer.size
-        while (remaining > 0) {
-            val read = input.read(buffer,0,remaining)
-            if (read <= 0) break
-            digest.update(buffer,0,read)
-            remaining -= read
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
+    /** Thumbnail validation hashes the opened fd and preserves its decode position. */
+    internal fun fingerprintHead(source: RandomAccessFile): String? =
+        runCatching { HeadFingerprint.compute(source) }.getOrNull()
 
     internal fun encodeThumbnail(bitmap: Bitmap, targetFile: File, sizeClass: String): String {
         val (encodedWidth, encodedHeight) = ThumbnailSpec.encodedSize(

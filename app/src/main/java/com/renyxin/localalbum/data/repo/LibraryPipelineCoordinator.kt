@@ -6,6 +6,9 @@ import androidx.room.withTransaction
 import com.renyxin.localalbum.core.index.HybridIndexer
 import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.core.pipeline.PluginAnalysisPipeline
+import com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity
+import com.renyxin.localalbum.core.thumbnail.ThumbnailRepairAdmissionFacts
+import com.renyxin.localalbum.core.thumbnail.ThumbnailRepairPolicy
 import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
 import com.renyxin.localalbum.data.db.AppDatabase
 import com.renyxin.localalbum.data.db.entity.AnalysisTaskEntity
@@ -38,6 +41,40 @@ private data class UserTaskAdmission(
     val hasWork: Boolean get() = analysis || thumbnails
 }
 
+/**
+ * WorkManager actions returned only after the corresponding Room transaction and coordinator mutex
+ * have completed. Thumbnail and library continuations stay separate so a terminal gate selects the
+ * publish pump instead of waking a QUIESCENT thumbnail lane.
+ */
+private data class PipelineWakePlan(
+    val libraryWorker: Boolean = false,
+    val libraryWake: Boolean = false,
+    val thumbnailWorker: Boolean = false,
+    val handoffWorker: Boolean = false,
+    val analysisWorker: Boolean = false,
+    val userTasks: UserTaskAdmission = UserTaskAdmission(),
+    val appendUserAnalysis: Boolean = false,
+) {
+    operator fun plus(other: PipelineWakePlan): PipelineWakePlan = PipelineWakePlan(
+        libraryWorker = libraryWorker || other.libraryWorker,
+        libraryWake = libraryWake || other.libraryWake,
+        thumbnailWorker = thumbnailWorker || other.thumbnailWorker,
+        handoffWorker = handoffWorker || other.handoffWorker,
+        analysisWorker = analysisWorker || other.analysisWorker,
+        userTasks = UserTaskAdmission(
+            analysis = userTasks.analysis || other.userTasks.analysis,
+            thumbnails = userTasks.thumbnails || other.userTasks.thumbnails,
+        ),
+        appendUserAnalysis = appendUserAnalysis || other.appendUserAnalysis,
+    )
+}
+
+private data class ThumbnailRunBinding(
+    val scanId: String,
+    val generation: Long,
+    val stage: LibraryPipelineStage,
+)
+
 data class EnhancementOutboxRetryResult(
     val outboxesRetried: Int = 0,
     val analysisTasks: Int = 0,
@@ -58,14 +95,64 @@ class LibraryPipelineCoordinator(
     private val mutex = Mutex()
     private val dao get() = database.libraryPipelineDao()
     private var processRecoveryCompleted = false
+    /** Plans are accumulated only while [mutex] is held and dispatched after Room work commits. */
+    private var pendingWakePlan = PipelineWakePlan()
 
     /** UI admission derives from the same persisted rule used by every explicit retry mutation. */
     val userTaskRetryAllowed: Flow<Boolean> = dao.observe()
         .map { state -> state?.let(::canAdmitUserTasks) ?: false }
         .distinctUntilChanged()
 
-    suspend fun ensureState(): LibraryPipelineEntity = mutex.withLock {
+    suspend fun ensureState(): LibraryPipelineEntity = withLockAndDispatch {
         ensureStateLocked()
+    }
+
+    private suspend fun <T> withLockAndDispatch(
+        planTransform: (PipelineWakePlan) -> PipelineWakePlan = { it },
+        block: suspend () -> T,
+    ): T {
+        var plan = PipelineWakePlan()
+        return try {
+            mutex.withLock {
+                try {
+                    block()
+                } finally {
+                    // A transition may have committed before a later invariant fails. Always drain its
+                    // durable continuation so an exception cannot strand the new persisted stage.
+                    plan = takeWakePlanLocked()
+                }
+            }
+        } finally {
+            dispatchWakePlan(planTransform(plan))
+        }
+    }
+
+    private fun recordWakePlanLocked(plan: PipelineWakePlan) {
+        pendingWakePlan += plan
+    }
+
+    private fun takeWakePlanLocked(): PipelineWakePlan {
+        val plan = pendingWakePlan
+        pendingWakePlan = PipelineWakePlan()
+        return plan
+    }
+
+    /** WorkManager is touched only after the mutex-protected Room section has returned. */
+    private suspend fun dispatchWakePlan(plan: PipelineWakePlan) {
+        if (plan.libraryWorker) {
+            LibraryPipelineWorker.appendSuccessor(context)
+        } else if (plan.libraryWake) {
+            LibraryPipelineWorker.enqueue(context)
+        }
+        if (plan.thumbnailWorker) ThumbnailWorker.appendBackgroundSuccessor(context)
+        if (plan.handoffWorker) EnhancementHandoffWorker.appendSuccessor(context)
+        if (plan.analysisWorker) AnalysisWorker.appendSuccessor(context)
+        if (plan.userTasks.hasWork) {
+            enqueueAdmittedUserTasks(
+                admission = plan.userTasks,
+                appendAnalysis = plan.appendUserAnalysis,
+            )
+        }
     }
 
     private suspend fun ensureStateLocked(): LibraryPipelineEntity {
@@ -102,6 +189,137 @@ class LibraryPipelineCoordinator(
     }
 
     /**
+     * Coordinator-owned repair barrier for the v33 cache-identity cutover. Run binding and current-grid
+     * seed commit atomically; the exact progress-only projection and conditional publish transition then
+     * converge in separate transactions. A later wake can rediscover the deterministic run after a crash.
+     */
+    private suspend fun ensureThumbnailRepairLocked(state: LibraryPipelineEntity): Boolean {
+        val stage = LibraryPipelineStage.fromPersisted(state.stage)
+        if (stage !in IDLE_ADMISSION_STAGES) return false
+        // The durable media journal must be known and empty before repairing a published baseline.
+        // Lightweight test-only indexers may omit that DAO; unknown is fail-closed so production
+        // admission can never silently interpret a missing dependency as an empty changed-set.
+        if (indexer.hasOutstandingMediaChangesOrNull() != false) return false
+        val runDao = database.scanRunDao()
+        val taskDao = database.thumbnailTaskDao()
+        val visibleCount = taskDao.countVisibleGridMedia()
+        val gapCount = taskDao.countCurrentGridGaps()
+        val facts = ThumbnailRepairAdmissionFacts(
+            hasPublishedBaseline = state.hasPublishedBaseline,
+            visibleGridMediaCount = visibleCount,
+            eligibleGapCount = gapCount,
+            idleStage = stage == LibraryPipelineStage.READY ||
+                stage == LibraryPipelineStage.NEEDS_REBUILD,
+            hasActiveRun = state.activeRunId != null,
+            rebuildRequested = state.rebuildRequested,
+        )
+        if (!ThumbnailRepairPolicy.shouldAdmit(facts)) return false
+
+        val now = System.currentTimeMillis()
+        val binding: ThumbnailRunBinding? = database.withTransaction {
+            // Re-evaluate every mutable admission fact at the commit boundary. A media notification
+            // inserted after the optimistic checks above is ordered before this transaction (and
+            // blocks repair) or after the complete run/pipeline/task commit (and queues the next scan).
+            if (indexer.hasOutstandingMediaChangesOrNull() != false) return@withTransaction null
+            val current = requireNotNull(dao.get())
+            val currentStage = LibraryPipelineStage.fromPersisted(current.stage)
+            val currentFacts = ThumbnailRepairAdmissionFacts(
+                hasPublishedBaseline = current.hasPublishedBaseline,
+                visibleGridMediaCount = taskDao.countVisibleGridMedia(),
+                eligibleGapCount = taskDao.countCurrentGridGaps(),
+                idleStage = currentStage == LibraryPipelineStage.READY ||
+                    currentStage == LibraryPipelineStage.NEEDS_REBUILD,
+                hasActiveRun = current.activeRunId != null,
+                rebuildRequested = current.rebuildRequested,
+            )
+            if (!ThumbnailRepairPolicy.shouldAdmit(currentFacts)) return@withTransaction null
+
+            val repairId = ThumbnailRepairPolicy.repairRunId(
+                publishedGeneration = current.publishedGeneration,
+                formatVersion = ThumbnailIdentity.CURRENT_FORMAT_VERSION,
+            )
+            val existing = runDao.getById(repairId)
+            check(existing == null || existing.scanType == ScanRunEntity.TYPE_THUMBNAIL_REPAIR) {
+                "Deterministic thumbnail repair id is owned by another run type"
+            }
+            // A permanent failure is stable while that exact current identity remains FAILED.
+            // Explicit retry changes it to PENDING, which authorizes this same deterministic run to
+            // reopen and republish the repaired home projection without creating a second run row.
+            if (existing?.enhancementState ==
+                com.renyxin.localalbum.data.db.entity.EnhancementState.COMPLETED_WITH_FAILURES.name
+            ) {
+                val previousGate = taskDao.thumbnailGateSnapshot(repairId)
+                if (previousGate.failures > 0 || previousGate.interactiveActive > 0) {
+                    return@withTransaction null
+                }
+            }
+
+            if (existing == null) {
+                runDao.insertIfAbsent(
+                    ScanRunEntity(
+                        scanId = repairId,
+                        generation = maxOf(
+                            now,
+                            current.publishedGeneration,
+                            (runDao.getMaxGeneration() ?: 0L) + 1L,
+                        ),
+                        scanType = ScanRunEntity.TYPE_THUMBNAIL_REPAIR,
+                        status = ScanRunEntity.STATUS_COMPLETED,
+                        mediaStoreCompleted = true,
+                        fileSystemCompleted = true,
+                        startedAt = now,
+                        completedAt = now,
+                        indexAvailability = com.renyxin.localalbum.data.db.entity.IndexAvailability.PUBLISHED.name,
+                        coreScanState = CoreScanState.COMPLETED.name,
+                        enhancementState = com.renyxin.localalbum.data.db.entity.EnhancementState.QUEUED.name,
+                        firstBatchCommittedAt = now,
+                        indexAvailableAt = now,
+                        coreCompletedAt = now,
+                    ),
+                )
+            }
+            val persisted = requireNotNull(runDao.getById(repairId))
+            if (persisted.enhancementState in setOf(
+                    com.renyxin.localalbum.data.db.entity.EnhancementState.COMPLETED.name,
+                    com.renyxin.localalbum.data.db.entity.EnhancementState.COMPLETED_WITH_FAILURES.name,
+                    com.renyxin.localalbum.data.db.entity.EnhancementState.CANCELLED.name,
+                )
+            ) {
+                check(runDao.requeueThumbnailRepair(repairId) == 1) {
+                    "Thumbnail repair run could not be reopened"
+                }
+            }
+            val targetStage = if (current.rebuildRequired) {
+                LibraryPipelineStage.REBUILD_THUMBNAILS
+            } else {
+                LibraryPipelineStage.INCREMENTAL_THUMBNAILS
+            }
+            check(
+                dao.transition(
+                    from = setOf(
+                        LibraryPipelineStage.READY,
+                        LibraryPipelineStage.NEEDS_REBUILD,
+                    ),
+                    to = targetStage,
+                    activeRunId = repairId,
+                    candidateGeneration = persisted.generation,
+                    now = now,
+                ),
+            ) { "thumbnail repair admission lost" }
+            taskDao.seedAllGrid(
+                scanId = repairId,
+                priority = ThumbnailSpec.PRIORITY_BACKGROUND,
+                now = now,
+                repairMissingDone = true,
+            )
+            ThumbnailRunBinding(repairId, persisted.generation, targetStage)
+        }
+        if (binding == null) return false
+        recordWakePlanLocked(convergeSeededThumbnailGateLocked(binding))
+        return true
+    }
+
+    /**
      * A committed core run can be advanced idempotently on every wake. Enhancement RUNNING recovery
      * is process-death-specific and must happen only once, otherwise a live worker would be reset.
      */
@@ -132,21 +350,40 @@ class LibraryPipelineCoordinator(
         }
     }
 
+    private suspend fun preparePipelinePassLocked(): Boolean {
+        ensureStateLocked()
+        // A process can die after the final task commit but before its Worker callback advances the
+        // gate. Exact convergence commits progress first and then evaluates the transition in a separate
+        // transaction: a terminal queue is intentionally QUIESCENT and cannot wake itself.
+        recordWakePlanLocked(advanceThumbnailGateLocked(expectedScanId = null))
+        return startQueuedWorkIfIdleLocked()
+    }
+
+    /**
+     * One coordinator-owned preparation pass for the durable library pump. The current pump consumes
+     * any library continuation itself; only a non-library lane is dispatched after the lock is released.
+     */
+    suspend fun prepareLibraryWorkerPass(): LibraryPipelineEntity = withLockAndDispatch(
+        planTransform = { it.copy(libraryWorker = false, libraryWake = false) },
+    ) {
+        preparePipelinePassLocked()
+        requireNotNull(dao.get())
+    }
+
     /** Startup/user wake-up resumes the one Worker admitted by durable state. */
-    suspend fun wake() {
-        val (advanced, userTasks) = mutex.withLock {
-            ensureStateLocked()
-            val pipelineAdvanced = startQueuedWorkIfIdleLocked()
-            pipelineAdvanced to if (pipelineAdvanced) {
-                UserTaskAdmission()
-            } else {
-                admittedUserTasksLocked()
-            }
+    suspend fun wake() = withLockAndDispatch {
+        val pipelineAdvanced = preparePipelinePassLocked()
+        val userAdmission = if (pipelineAdvanced) UserTaskAdmission() else admittedUserTasksLocked()
+        if (userAdmission.hasWork) {
+            recordWakePlanLocked(PipelineWakePlan(userTasks = userAdmission))
         }
-        when {
-            advanced -> LibraryPipelineWorker.appendSuccessor(context)
-            userTasks.hasWork -> enqueueAdmittedUserTasks(userTasks)
-            else -> LibraryPipelineWorker.enqueue(context)
+        val stage = LibraryPipelineStage.fromPersisted(requireNotNull(dao.get()).stage)
+        val plan = pendingWakePlan
+        if (!userAdmission.hasWork && !stage.isThumbnail &&
+            !plan.libraryWorker && !plan.libraryWake && !plan.thumbnailWorker &&
+            !plan.handoffWorker && !plan.analysisWorker
+        ) {
+            recordWakePlanLocked(PipelineWakePlan(libraryWake = true))
         }
     }
 
@@ -155,17 +392,16 @@ class LibraryPipelineCoordinator(
      * enqueue any Worker; the current analysis/thumbnail stage completes and consumes the journal next.
      */
     suspend fun onMediaChangesRecorded() {
-        val advanced = mutex.withLock {
+        withLockAndDispatch {
             val state = ensureStateLocked()
             val stage = LibraryPipelineStage.fromPersisted(state.stage)
-            if (stage in IDLE_ADMISSION_STAGES) startQueuedWorkIfIdleLocked() else false
+            if (stage in IDLE_ADMISSION_STAGES) startQueuedWorkIfIdleLocked()
         }
-        if (advanced) LibraryPipelineWorker.appendSuccessor(context)
     }
 
     /** Normal scan action: explicitly authorizes the first traversal, otherwise only drains journals. */
     suspend fun requestUserScan() {
-        mutex.withLock {
+        withLockAndDispatch {
             val state = ensureStateLocked()
             val stage = LibraryPipelineStage.fromPersisted(state.stage)
             if (
@@ -182,18 +418,14 @@ class LibraryPipelineCoordinator(
     }
 
     suspend fun requestExplicitRebuild(reason: String = "user_requested") {
-        val advanced = mutex.withLock {
+        val advanced = withLockAndDispatch {
             ensureStateLocked()
             // This marker is the durable user intent for both the first traversal and later rebuilds.
             // It remains set through scan-stage admission and is consumed only when a run is bound.
             dao.requestRebuild(reason.take(80))
             startQueuedWorkIfIdleLocked()
         }
-        if (advanced) {
-            LibraryPipelineWorker.appendSuccessor(context)
-        } else {
-            LibraryPipelineWorker.enqueue(context)
-        }
+        if (!advanced) LibraryPipelineWorker.enqueue(context)
     }
 
     suspend fun markRebuildRequired(reason: String) {
@@ -206,7 +438,7 @@ class LibraryPipelineCoordinator(
      * will already read the new settings and therefore consumes the change naturally. Once a run has
      * been reserved (or a baseline exists), the change must wait as a later explicit rebuild advisory.
      */
-    suspend fun markScanScopeChanged(reason: String) = mutex.withLock {
+    suspend fun markScanScopeChanged(reason: String) = withLockAndDispatch {
         val state = ensureStateLocked()
         val stage = LibraryPipelineStage.fromPersisted(state.stage)
         val coveredByPendingInitialScan = !state.hasPublishedBaseline &&
@@ -224,40 +456,49 @@ class LibraryPipelineCoordinator(
      * Starts at most one stage. Ambiguous hints only preserve a rebuild advisory; independently
      * journaled item identities remain safe to consume through the incremental pipeline.
      */
-    suspend fun startQueuedWorkIfIdle(): Boolean {
-        val (advanced, userTasks) = mutex.withLock {
-            val pipelineAdvanced = startQueuedWorkIfIdleLocked()
-            pipelineAdvanced to if (pipelineAdvanced) {
-                UserTaskAdmission()
-            } else {
-                admittedUserTasksLocked()
-            }
+    suspend fun startQueuedWorkIfIdle(): Boolean = withLockAndDispatch {
+        val pipelineAdvanced = startQueuedWorkIfIdleLocked()
+        if (!pipelineAdvanced) {
+            val userTasks = admittedUserTasksLocked()
+            if (userTasks.hasWork) recordWakePlanLocked(PipelineWakePlan(userTasks = userTasks))
         }
-        if (userTasks.hasWork) enqueueAdmittedUserTasks(userTasks)
-        return advanced
+        pipelineAdvanced
     }
 
     private suspend fun startQueuedWorkIfIdleLocked(): Boolean {
-        val state = requireNotNull(dao.get())
-        val stage = LibraryPipelineStage.fromPersisted(state.stage)
+        var state = requireNotNull(dao.get())
+        var stage = LibraryPipelineStage.fromPersisted(state.stage)
         if (stage !in IDLE_ADMISSION_STAGES) return false
 
         // Merely creating the control row or configuring roots is not authority to traverse them.
         // A durable explicit request admits the first scan/rebuild and remains set until run binding.
         if (state.rebuildRequested) {
-            return dao.startRequestedRebuild() == 1
+            val advanced = dao.startRequestedRebuild() == 1
+            if (advanced) recordWakePlanLocked(PipelineWakePlan(libraryWorker = true))
+            return advanced
         }
 
+        // Reconciliation hints are advisories, precise identities are durable work. Both must be
+        // handled before the repair barrier so a cold-start gap cannot outrun a queued media change.
         if (indexer.consumeReconciliationHintAsAdvisory()) {
             dao.requireRebuild("ambiguous_media_store_change")
         }
-        return indexer.hasOutstandingMediaChanges() && dao.transition(
-            from = setOf(
-                LibraryPipelineStage.READY,
-                LibraryPipelineStage.NEEDS_REBUILD,
-            ),
-            to = LibraryPipelineStage.INCREMENTAL_SCAN,
-        )
+        if (indexer.hasOutstandingMediaChanges()) {
+            val advanced = dao.transition(
+                from = setOf(
+                    LibraryPipelineStage.READY,
+                    LibraryPipelineStage.NEEDS_REBUILD,
+                ),
+                to = LibraryPipelineStage.INCREMENTAL_SCAN,
+            )
+            if (advanced) recordWakePlanLocked(PipelineWakePlan(libraryWorker = true))
+            return advanced
+        }
+
+        state = requireNotNull(dao.get())
+        stage = LibraryPipelineStage.fromPersisted(state.stage)
+        if (stage !in IDLE_ADMISSION_STAGES) return false
+        return ensureThumbnailRepairLocked(state)
     }
 
     private suspend fun admittedUserTasksLocked(): UserTaskAdmission {
@@ -321,7 +562,7 @@ class LibraryPipelineCoordinator(
      * Reserves the identity of the currently admitted core run before source enumeration begins.
      * A process restart reads the same row and generation instead of inventing another full scan.
      */
-    suspend fun getOrCreateAdmittedScanRun(): ScanRunEntity = mutex.withLock {
+    suspend fun getOrCreateAdmittedScanRun(): ScanRunEntity = withLockAndDispatch {
         ensureStateLocked()
         val pipeline = requireNotNull(dao.get())
         val stage = LibraryPipelineStage.fromPersisted(pipeline.stage)
@@ -334,7 +575,7 @@ class LibraryPipelineCoordinator(
             check(existing.generation == pipeline.candidateGeneration && existing.scanType == expectedType) {
                 "Persisted pipeline/run mismatch for stage=$stage"
             }
-            return@withLock existing
+            return@withLockAndDispatch existing
         }
 
         val runDao = database.scanRunDao()
@@ -374,16 +615,16 @@ class LibraryPipelineCoordinator(
         scanId: String,
         generation: Long,
         changedCount: Int,
-    ) = mutex.withLock {
+    ) = withLockAndDispatch {
         val state = requireNotNull(dao.get())
         val current = LibraryPipelineStage.fromPersisted(state.stage)
         if (state.activeRunId != scanId || state.candidateGeneration != generation || !current.isScan) {
             Log.w(TAG, "ignored stale core callback scanIdHash=${scanId.hashCode()} stage=$current")
-            return@withLock
+        } else if (advanceCoreRunToThumbnailsLocked(current, scanId, generation)) {
+            Log.i(TAG, "core complete stage=$current changed=$changedCount generation=$generation")
+        } else {
+            Unit
         }
-        if (!advanceCoreRunToThumbnailsLocked(current, scanId, generation)) return@withLock
-        Log.i(TAG, "core complete stage=$current changed=$changedCount generation=$generation")
-        LibraryPipelineWorker.appendSuccessor(context)
     }
 
     private suspend fun advanceCoreRunToThumbnailsLocked(
@@ -398,20 +639,20 @@ class LibraryPipelineCoordinator(
             else -> return false
         }
         val taskDao = database.thumbnailTaskDao()
-        return database.withTransaction {
-            val run = database.scanRunDao().getById(scanId) ?: return@withTransaction false
+        val binding: ThumbnailRunBinding? = database.withTransaction {
+            val run = database.scanRunDao().getById(scanId) ?: return@withTransaction null
             if (run.generation != generation || run.scanType != scanTypeFor(current)) {
-                return@withTransaction false
+                return@withTransaction null
             }
             if (run.coreScanState == CoreScanState.PUBLISHING.name) {
                 if (database.scanRunDao().markSnapshotPublished(scanId, System.currentTimeMillis()) != 1) {
-                    return@withTransaction false
+                    return@withTransaction null
                 }
             } else if (run.coreScanState != CoreScanState.COMPLETED.name) {
-                return@withTransaction false
+                return@withTransaction null
             }
             if (dao.transitionActiveRun(current.name, next.name, scanId, generation) != 1) {
-                return@withTransaction false
+                return@withTransaction null
             }
             if (current == LibraryPipelineStage.INITIAL_SCAN || current == LibraryPipelineStage.REBUILD_SCAN) {
                 taskDao.seedAllGrid(scanId, ThumbnailSpec.PRIORITY_BACKGROUND)
@@ -421,77 +662,175 @@ class LibraryPipelineCoordinator(
             // Scan-owned workers admit only QUEUED/RUNNING runs. Marking an empty run queued is
             // harmless and lets the same durable transition cover zero-media libraries.
             database.scanRunDao().markEnhancementQueued(scanId)
-            updateThumbnailProgressLocked(scanId, generation, next)
-            true
+            ThumbnailRunBinding(scanId, generation, next)
         }
+        if (binding == null) return false
+        recordWakePlanLocked(convergeSeededThumbnailGateLocked(binding))
+        return true
     }
 
-    suspend fun onThumbnailQueueChanged(scanId: String) = mutex.withLock {
-        advanceThumbnailGateLocked(expectedScanId = scanId)
+    /** Persists only the current thumbnail gate; it never transitions the durable pipeline stage. */
+    suspend fun onThumbnailProgressChanged(scanId: String) = withLockAndDispatch {
+        persistThumbnailProgressLocked(expectedScanId = scanId)
+    }
+
+    suspend fun onThumbnailQueueChanged(scanId: String) {
+        convergeCurrentThumbnailGate(expectedScanId = scanId)
+    }
+
+    /** Library pump/process recovery continuation; stale and non-thumbnail stages are idempotent no-ops. */
+    suspend fun convergeCurrentThumbnailGate(expectedScanId: String? = null) = withLockAndDispatch {
+        recordWakePlanLocked(advanceThumbnailGateLocked(expectedScanId))
     }
 
     /**
      * A live UI lease keeps interactive ownership during scan seeding. Its completion still wakes the
      * current durable thumbnail gate, which identifies participation from the required source identity.
      */
-    suspend fun onInteractiveThumbnailQueueChanged() = mutex.withLock {
-        advanceThumbnailGateLocked(expectedScanId = null)
+    suspend fun onInteractiveThumbnailQueueChanged() {
+        withLockAndDispatch {
+            // An explicit retry may have repaired the last FAILED Grid identity while the pipeline
+            // was idle. Re-admit the same deterministic repair row after consuming any journal hint;
+            // the following exact convergence advances immediately when all targets are terminal.
+            ensureStateLocked()
+            recordWakePlanLocked(advanceThumbnailGateLocked(expectedScanId = null))
+            if (LibraryPipelineStage.fromPersisted(requireNotNull(dao.get()).stage) in IDLE_ADMISSION_STAGES) {
+                startQueuedWorkIfIdleLocked()
+            }
+        }
     }
 
-    private suspend fun advanceThumbnailGateLocked(expectedScanId: String?) {
+    private suspend fun advanceThumbnailGateLocked(expectedScanId: String?): PipelineWakePlan {
         val state = requireNotNull(dao.get())
         val stage = LibraryPipelineStage.fromPersisted(state.stage)
-        val scanId = state.activeRunId ?: return
-        if (!stage.isThumbnail || (expectedScanId != null && expectedScanId != scanId)) return
-        val generation = state.candidateGeneration
+        val scanId = state.activeRunId ?: return PipelineWakePlan()
+        if (!stage.isThumbnail || (expectedScanId != null && expectedScanId != scanId)) {
+            return PipelineWakePlan()
+        }
+        return convergeThumbnailGateLocked(
+            scanId = scanId,
+            generation = state.candidateGeneration,
+            stage = stage,
+        )
+    }
+
+    /**
+     * Single post-seed/post-queue convergence path. It intentionally commits the progress-only
+     * projection before the conditional thumbnail -> publish transition. A terminal gate therefore
+     * never depends on an automatic lane consumer, while a non-terminal gate is the only case that
+     * asks the automatic lane to deliver a thumbnail worker.
+     */
+    private suspend fun convergeSeededThumbnailGateLocked(
+        binding: ThumbnailRunBinding,
+    ): PipelineWakePlan = convergeThumbnailGateLocked(
+        scanId = binding.scanId,
+        generation = binding.generation,
+        stage = binding.stage,
+    )
+
+    private suspend fun convergeThumbnailGateLocked(
+        scanId: String,
+        generation: Long,
+        stage: LibraryPipelineStage,
+    ): PipelineWakePlan {
+        require(stage.isThumbnail) { "Not a thumbnail stage: $stage" }
+        val current = requireNotNull(dao.get())
+        if (current.activeRunId != scanId || current.candidateGeneration != generation ||
+            LibraryPipelineStage.fromPersisted(current.stage) != stage
+        ) return PipelineWakePlan()
+
+        val taskDao = database.thumbnailTaskDao()
+        val initialGate = taskDao.thumbnailGateSnapshot(scanId)
+        if (initialGate.repairable > 0) {
+            // SUPERSEDED/missing identities are not terminal. Repair the target set first, then take
+            // a fresh exact snapshot for the progress-only commit below.
+            database.withTransaction {
+                repairThumbnailGateLocked(scanId, stage, initialGate)
+            }
+        }
+
+        // This transaction contains only the exact gate read and its progress projection. It must
+        // commit before the transition transaction, so observers can see the first DONE as non-zero.
+        val gate = database.withTransaction {
+            val exact = taskDao.thumbnailGateSnapshot(scanId)
+            check(
+                dao.updateThumbnailProgressExact(
+                    stage = stage.name,
+                    scanId = scanId,
+                    generation = generation,
+                    completed = exact.terminal,
+                    total = exact.total,
+                    failures = exact.failures,
+                ) == 1,
+            ) { "Thumbnail progress projection lost for scanId=$scanId" }
+            exact
+        }
+
         val publish = when (stage) {
             LibraryPipelineStage.INITIAL_THUMBNAILS -> LibraryPipelineStage.INITIAL_PUBLISH
             LibraryPipelineStage.INCREMENTAL_THUMBNAILS -> LibraryPipelineStage.INCREMENTAL_PUBLISH
             LibraryPipelineStage.REBUILD_THUMBNAILS -> LibraryPipelineStage.REBUILD_PUBLISH
-            else -> return
+            else -> error("Not a thumbnail stage: $stage")
         }
-        // The terminal snapshot and conditional stage transition share one database transaction.
-        // A concurrent UI enqueue is therefore ordered entirely before the gate (and counted) or
-        // after the durable Publish transition; it can never land in an unobserved count/transition gap.
-        var repairedTargets = false
-        val transitioned = database.withTransaction {
-            val beforeRepair = database.thumbnailTaskDao().thumbnailGateSnapshot(scanId)
-            val snapshot = updateThumbnailProgressLocked(scanId, generation, stage)
-            repairedTargets = beforeRepair.repairable > 0
-            snapshot.remaining == 0 &&
-                dao.transitionActiveRun(stage.name, publish.name, scanId, generation) == 1
+        if (gate.remaining == 0) {
+            // Re-read inside the CAS transaction. A producer may have seeded/reopened a target after
+            // the progress-only commit; that target must block publication and be delivered normally.
+            var transitionGate = gate
+            val transitioned = database.withTransaction {
+                transitionGate = taskDao.thumbnailGateSnapshot(scanId)
+                if (transitionGate.remaining == 0) {
+                    dao.transitionActiveRun(stage.name, publish.name, scanId, generation) == 1
+                } else {
+                    check(
+                        dao.updateThumbnailProgressExact(
+                            stage = stage.name,
+                            scanId = scanId,
+                            generation = generation,
+                            completed = transitionGate.terminal,
+                            total = transitionGate.total,
+                            failures = transitionGate.failures,
+                        ) == 1,
+                    ) { "Thumbnail progress projection lost after gate reopened for scanId=$scanId" }
+                    false
+                }
+            }
+            if (transitioned) {
+                // The library pump is the publish continuation. It is recorded while the mutex is held,
+                // but dispatched only after every Room transaction above has committed.
+                return PipelineWakePlan(libraryWorker = true)
+            }
+            if (transitionGate.remaining == 0) {
+                val currentStage = LibraryPipelineStage.fromPersisted(requireNotNull(dao.get()).stage)
+                if (currentStage != stage) return PipelineWakePlan()
+            }
         }
-        if (repairedTargets && expectedScanId == null && !transitioned) {
-            // An interactive completion can discover and repair a scan-owned target while no
-            // background consumer exists. Wake that independent lane exactly for this rare repair.
-            ThumbnailWorker.appendBackgroundSuccessor(context)
-        }
-        // Never append an interactive WorkSpec merely because a background batch observed a live UI
-        // participant. Producers/startup/final consumer checks exclusively drive the durable wake CAS.
-        if (transitioned) LibraryPipelineWorker.appendSuccessor(context)
+
+        // Do not force a QUIESCENT lane to run. Recompute from durable automatic facts and only kick
+        // when this exact gate has claimable/delayed automatic work; an interactive lease will wake
+        // its own completion path instead.
+        val lane = taskDao.recomputeLaneLevel(
+            com.renyxin.localalbum.data.db.entity.ThumbnailLaneWakeEntity.AUTOMATIC_LANE_ID,
+        )
+        return PipelineWakePlan(
+            thumbnailWorker = lane.deliveryState ==
+                com.renyxin.localalbum.data.db.entity.ThumbnailLaneWakeEntity.STATE_PENDING ||
+                lane.deliveryState ==
+                com.renyxin.localalbum.data.db.entity.ThumbnailLaneWakeEntity.STATE_DELAYED,
+        )
     }
 
-    private suspend fun updateThumbnailProgressLocked(
-        scanId: String,
-        generation: Long,
-        stage: LibraryPipelineStage,
-    ): com.renyxin.localalbum.data.db.dao.ThumbnailGateSnapshot {
-        val taskDao = database.thumbnailTaskDao()
-        var gate = taskDao.thumbnailGateSnapshot(scanId)
-        if (gate.repairable > 0) {
-            // Missing or abnormally SUPERSEDED target identities are not terminal. Re-seeding is
-            // idempotent, preserves every RUNNING lease, and gives each required identity an owner.
-            if (stage == LibraryPipelineStage.INCREMENTAL_THUMBNAILS) {
-                taskDao.seedGridFromOutbox(scanId, ThumbnailSpec.PRIORITY_BACKGROUND)
-            } else {
-                taskDao.seedAllGrid(scanId, ThumbnailSpec.PRIORITY_BACKGROUND)
-            }
-            gate = taskDao.thumbnailGateSnapshot(scanId)
-        }
+    private suspend fun persistThumbnailProgressLocked(
+        expectedScanId: String?,
+    ): com.renyxin.localalbum.data.db.dao.ThumbnailGateSnapshot? {
+        val state = requireNotNull(dao.get())
+        val stage = LibraryPipelineStage.fromPersisted(state.stage)
+        val scanId = state.activeRunId ?: return null
+        if (!stage.isThumbnail || (expectedScanId != null && expectedScanId != scanId)) return null
+        val gate = database.thumbnailTaskDao().thumbnailGateSnapshot(scanId)
         dao.updateThumbnailProgressExact(
             stage = stage.name,
             scanId = scanId,
-            generation = generation,
+            generation = state.candidateGeneration,
             completed = gate.terminal,
             total = gate.total,
             failures = gate.failures,
@@ -499,34 +838,97 @@ class LibraryPipelineCoordinator(
         return gate
     }
 
-    /** Atomically switches the home projection, then admits analysis. */
-    suspend fun publishCandidateAndAdvance() = mutex.withLock {
+    private suspend fun repairThumbnailGateLocked(
+        scanId: String,
+        stage: LibraryPipelineStage,
+        initial: com.renyxin.localalbum.data.db.dao.ThumbnailGateSnapshot? = null,
+    ): com.renyxin.localalbum.data.db.dao.ThumbnailGateSnapshot {
+        val taskDao = database.thumbnailTaskDao()
+        var gate = initial ?: taskDao.thumbnailGateSnapshot(scanId)
+        if (gate.repairable > 0) {
+            // Missing or abnormally SUPERSEDED target identities are not terminal. Re-seeding is
+            // idempotent, preserves every RUNNING lease, and gives each required identity an owner.
+            // A thumbnail-only repair has no enhancement outbox; it must always derive its target
+            // set from the current published media baseline, even when it uses the incremental
+            // thumbnail stage for ordinary pipeline admission.
+            val thumbnailOnlyRepair = database.scanRunDao().getById(scanId)?.scanType ==
+                ScanRunEntity.TYPE_THUMBNAIL_REPAIR
+            if (thumbnailOnlyRepair || stage != LibraryPipelineStage.INCREMENTAL_THUMBNAILS) {
+                taskDao.seedAllGrid(
+                    scanId = scanId,
+                    priority = ThumbnailSpec.PRIORITY_BACKGROUND,
+                    repairMissingDone = thumbnailOnlyRepair,
+                )
+            } else {
+                taskDao.seedGridFromOutbox(scanId, ThumbnailSpec.PRIORITY_BACKGROUND)
+            }
+            gate = taskDao.thumbnailGateSnapshot(scanId)
+        }
+        return gate
+    }
+
+    /** Atomically switches the home projection, then admits analysis or finishes a repair-only run. */
+    suspend fun publishCandidateAndAdvance() = withLockAndDispatch {
         val state = requireNotNull(dao.get())
         val stage = LibraryPipelineStage.fromPersisted(state.stage)
-        if (!stage.isPublish) return@withLock
-        val scanId = state.activeRunId ?: return@withLock
+        if (!stage.isPublish) return@withLockAndDispatch
+        val scanId = state.activeRunId ?: return@withLockAndDispatch
+        val run = requireNotNull(database.scanRunDao().getById(scanId))
         val analysisStage = when (stage) {
             LibraryPipelineStage.INITIAL_PUBLISH -> LibraryPipelineStage.INITIAL_ANALYSIS
             LibraryPipelineStage.INCREMENTAL_PUBLISH -> LibraryPipelineStage.INCREMENTAL_ANALYSIS
             LibraryPipelineStage.REBUILD_PUBLISH -> LibraryPipelineStage.REBUILD_ANALYSIS
-            else -> return@withLock
+            else -> return@withLockAndDispatch
+        }
+        val thumbnailOnlyRepair = run.scanType == ScanRunEntity.TYPE_THUMBNAIL_REPAIR
+        val failures = database.thumbnailTaskDao().thumbnailGateSnapshot(scanId).failures
+        val publicationGeneration = if (thumbnailOnlyRepair) {
+            state.publishedGeneration
+        } else {
+            state.candidateGeneration
         }
         database.withTransaction {
-            database.homeMediaSnapshotDao().replaceFromCanonical(state.candidateGeneration)
-            check(
-                dao.publishAndEnterAnalysis(
-                    publishStage = stage.name,
-                    analysisStage = analysisStage.name,
-                    activeRunId = scanId,
-                    generation = state.candidateGeneration,
-                ) == 1,
-            ) { "Pipeline publication transition lost: $stage -> $analysisStage" }
+            database.homeMediaSnapshotDao().replaceFromCanonical(publicationGeneration)
+            if (thumbnailOnlyRepair) {
+                check(
+                    database.scanRunDao().markThumbnailRepairTerminal(
+                        scanId = scanId,
+                        generation = state.candidateGeneration,
+                        state = if (failures > 0) {
+                            com.renyxin.localalbum.data.db.entity.EnhancementState.COMPLETED_WITH_FAILURES.name
+                        } else {
+                            com.renyxin.localalbum.data.db.entity.EnhancementState.COMPLETED.name
+                        },
+                        now = System.currentTimeMillis(),
+                    ),
+                ) { "Thumbnail repair run terminal transition lost" }
+                check(
+                    dao.finishThumbnailRepair(
+                        scanId = scanId,
+                        generation = state.candidateGeneration,
+                        failures = failures,
+                    ) == 1,
+                ) { "Thumbnail repair publication transition lost: $stage" }
+            } else {
+                check(
+                    dao.publishAndEnterAnalysis(
+                        publishStage = stage.name,
+                        analysisStage = analysisStage.name,
+                        activeRunId = scanId,
+                        generation = state.candidateGeneration,
+                    ) == 1,
+                ) { "Pipeline publication transition lost: $stage -> $analysisStage" }
+            }
         }
-        startOrFinishAnalysisLocked(scanId)
+        if (thumbnailOnlyRepair) {
+            startQueuedWorkIfIdleLocked()
+        } else {
+            startOrFinishAnalysisLocked(scanId)
+        }
     }
 
     /** Seeds full analysis only for initial/rebuild; incremental tasks are expanded from this run's outbox. */
-    suspend fun startOrFinishAnalysis(expectedScanId: String? = null) = mutex.withLock {
+    suspend fun startOrFinishAnalysis(expectedScanId: String? = null) = withLockAndDispatch {
         startOrFinishAnalysisLocked(expectedScanId)
     }
 
@@ -561,13 +963,13 @@ class LibraryPipelineCoordinator(
         } else if (outboxDao.countActiveForScan(scanId) > 0) {
             // Incremental analysis is admitted only after every row for this run has been expanded.
             // The handoff worker is itself stage-gated and cannot wake thumbnails or another run.
-            EnhancementHandoffWorker.appendSuccessor(context)
+            recordWakePlanLocked(PipelineWakePlan(handoffWorker = true))
             return
         }
 
         updateAnalysisProgressLocked(scanId, state.candidateGeneration, stage)
         if (analysisDao.countActiveForScan(scanId) > 0) {
-            AnalysisWorker.appendSuccessor(context)
+            recordWakePlanLocked(PipelineWakePlan(analysisWorker = true))
         } else {
             finishAnalysisIfIdleLocked(scanId)
         }
@@ -590,7 +992,7 @@ class LibraryPipelineCoordinator(
         )
     }
 
-    suspend fun finishAnalysisIfIdle(expectedScanId: String) = mutex.withLock {
+    suspend fun finishAnalysisIfIdle(expectedScanId: String) = withLockAndDispatch {
         finishAnalysisIfIdleLocked(expectedScanId)
     }
 
@@ -603,7 +1005,7 @@ class LibraryPipelineCoordinator(
         val analysisDao = database.analysisTaskDao()
         val outboxDao = database.enhancementOutboxDao()
         if (outboxDao.countActiveForScan(scanId) > 0) {
-            EnhancementHandoffWorker.appendSuccessor(context)
+            recordWakePlanLocked(PipelineWakePlan(handoffWorker = true))
             return
         }
         if (analysisDao.countActiveForScan(scanId) > 0) return
@@ -623,62 +1025,65 @@ class LibraryPipelineCoordinator(
         }
         if (finished) {
             val pipelineAdvanced = startQueuedWorkIfIdleLocked()
-            when {
-                pipelineAdvanced -> LibraryPipelineWorker.appendSuccessor(context)
-                else -> {
-                    val userTasks = admittedUserTasksLocked()
-                    if (userTasks.hasWork) {
-                        enqueueAdmittedUserTasks(userTasks, appendAnalysis = true)
-                    }
+            if (!pipelineAdvanced) {
+                val userTasks = admittedUserTasksLocked()
+                if (userTasks.hasWork) {
+                    recordWakePlanLocked(
+                        PipelineWakePlan(
+                            userTasks = userTasks,
+                            appendUserAnalysis = true,
+                        ),
+                    )
                 }
             }
         }
     }
 
     /** Explicit retry is admitted only when no automatic pipeline stage owns the resource lanes. */
-    suspend fun retryFailedThumbnails(): FailedTaskRetryResult {
-        var wakeRequired = false
-        val result = mutex.withLock {
-            val state = ensureStateLocked()
-            if (!canAdmitUserTasks(state)) {
-                return@withLock FailedTaskRetryResult(admitted = false)
-            }
-            val retried = database.thumbnailTaskDao().retryAllFailedInteractive(
-                priority = ThumbnailSpec.PRIORITY_VISIBLE,
-            )
-            wakeRequired = retried.shouldWake
-            FailedTaskRetryResult(retried = retried.accepted)
+    suspend fun retryFailedThumbnails(): FailedTaskRetryResult = withLockAndDispatch {
+        val state = ensureStateLocked()
+        if (!canAdmitUserTasks(state)) {
+            return@withLockAndDispatch FailedTaskRetryResult(admitted = false)
         }
-        if (wakeRequired) {
-            ThumbnailWorker.replayInteractiveWake(context, database.thumbnailTaskDao())
-        }
-        return result
-    }
-
-    /** Explicit retry is admitted only when no automatic pipeline stage owns the resource lanes. */
-    suspend fun retryFailedAnalysis(): FailedTaskRetryResult {
-        val result = mutex.withLock {
-            val state = ensureStateLocked()
-            if (!canAdmitUserTasks(state)) {
-                return@withLock FailedTaskRetryResult(admitted = false)
-            }
-            val analysisDao = database.analysisTaskDao()
-            val scopes = analysisPipeline().claimableTaskScopes
-            if (scopes.isEmpty() || analysisDao.countFailedForScopes(scopes) == 0) {
-                return@withLock FailedTaskRetryResult()
-            }
-            check(AnalysisResumePrefs.resumeUserWork(context)) {
-                "Failed to persist explicit analysis retry admission"
-            }
-            FailedTaskRetryResult(
-                retried = analysisDao.retryFailedAsUserForScopes(
-                    scopes = scopes,
-                    priority = AnalysisTaskEntity.PRIORITY_USER,
+        val retried = database.thumbnailTaskDao().retryAllFailedInteractive(
+            priority = ThumbnailSpec.PRIORITY_VISIBLE,
+        )
+        if (retried.shouldWake) {
+            recordWakePlanLocked(
+                PipelineWakePlan(
+                    userTasks = UserTaskAdmission(thumbnails = true),
                 ),
             )
         }
-        if (result.retried > 0) AnalysisWorker.enqueue(context)
-        return result
+        FailedTaskRetryResult(retried = retried.accepted)
+    }
+
+    /** Explicit retry is admitted only when no automatic pipeline stage owns the resource lanes. */
+    suspend fun retryFailedAnalysis(): FailedTaskRetryResult = withLockAndDispatch {
+        val state = ensureStateLocked()
+        if (!canAdmitUserTasks(state)) {
+            return@withLockAndDispatch FailedTaskRetryResult(admitted = false)
+        }
+        val analysisDao = database.analysisTaskDao()
+        val scopes = analysisPipeline().claimableTaskScopes
+        if (scopes.isEmpty() || analysisDao.countFailedForScopes(scopes) == 0) {
+            return@withLockAndDispatch FailedTaskRetryResult()
+        }
+        check(AnalysisResumePrefs.resumeUserWork(context)) {
+            "Failed to persist explicit analysis retry admission"
+        }
+        val retried = analysisDao.retryFailedAsUserForScopes(
+            scopes = scopes,
+            priority = AnalysisTaskEntity.PRIORITY_USER,
+        )
+        if (retried > 0) {
+            recordWakePlanLocked(
+                PipelineWakePlan(
+                    userTasks = UserTaskAdmission(analysis = true),
+                ),
+            )
+        }
+        FailedTaskRetryResult(retried = retried)
     }
 
     /**
@@ -689,15 +1094,15 @@ class LibraryPipelineCoordinator(
         limit: Int = OUTBOX_USER_RETRY_BATCH_SIZE,
     ): EnhancementOutboxRetryResult {
         require(limit > 0) { "limit must be positive" }
-        val result = mutex.withLock {
+        return withLockAndDispatch {
             val state = ensureStateLocked()
             if (!canAdmitUserTasks(state)) {
-                return@withLock EnhancementOutboxRetryResult(admitted = false)
+                return@withLockAndDispatch EnhancementOutboxRetryResult(admitted = false)
             }
 
             val pipeline = analysisPipeline()
             val now = System.currentTimeMillis()
-            database.withTransaction {
+            val result = database.withTransaction {
                 val outboxDao = database.enhancementOutboxDao()
                 val entries = outboxDao.getFailedForUserRetry(limit)
                 if (entries.isEmpty()) {
@@ -799,13 +1204,18 @@ class LibraryPipelineCoordinator(
                     thumbnailWakeRequired = thumbnailEnqueue.shouldWake,
                 )
             }
+            if (result.thumbnailWakeRequired || result.analysisTasks > 0) {
+                recordWakePlanLocked(
+                    PipelineWakePlan(
+                        userTasks = UserTaskAdmission(
+                            analysis = result.analysisTasks > 0,
+                            thumbnails = result.thumbnailWakeRequired,
+                        ),
+                    ),
+                )
+            }
+            result
         }
-
-        if (result.thumbnailWakeRequired) {
-            ThumbnailWorker.replayInteractiveWake(context, database.thumbnailTaskDao())
-        }
-        if (result.analysisTasks > 0) AnalysisWorker.enqueue(context)
-        return result
     }
 
     private fun canAdmitUserTasks(state: LibraryPipelineEntity): Boolean =

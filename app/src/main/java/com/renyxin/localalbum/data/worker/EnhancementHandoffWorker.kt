@@ -163,6 +163,12 @@ class EnhancementHandoffWorker(
             now: Long = System.currentTimeMillis(),
         ) {
             scanIds.forEach { scanId ->
+                val run = database.scanRunDao().getById(scanId) ?: return@forEach
+                // Thumbnail-only repair is coordinated by LibraryPipelineCoordinator. Keeping this
+                // guard in addition to the DAO query makes direct/test callers equally fail-closed.
+                if (run.scanType == com.renyxin.localalbum.data.db.entity.ScanRunEntity.TYPE_THUMBNAIL_REPAIR) {
+                    return@forEach
+                }
                 val active = database.enhancementOutboxDao().countActiveForScan(scanId) +
                     database.analysisTaskDao().countActiveForScan(scanId) +
                     database.thumbnailTaskDao().countActiveForScan(scanId)

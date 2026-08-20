@@ -101,7 +101,18 @@ abstract class LibraryPipelineDao {
     @Query(
         """UPDATE library_pipeline SET
                stage = :toStage,
-               progressCompleted = 0, progressTotal = 0, failureCount = 0,
+               progressCompleted = CASE
+                   WHEN :fromStage IN ('INITIAL_THUMBNAILS','INCREMENTAL_THUMBNAILS','REBUILD_THUMBNAILS')
+                     AND :toStage IN ('INITIAL_PUBLISH','INCREMENTAL_PUBLISH','REBUILD_PUBLISH')
+                   THEN progressCompleted ELSE 0 END,
+               progressTotal = CASE
+                   WHEN :fromStage IN ('INITIAL_THUMBNAILS','INCREMENTAL_THUMBNAILS','REBUILD_THUMBNAILS')
+                     AND :toStage IN ('INITIAL_PUBLISH','INCREMENTAL_PUBLISH','REBUILD_PUBLISH')
+                   THEN progressTotal ELSE 0 END,
+               failureCount = CASE
+                   WHEN :fromStage IN ('INITIAL_THUMBNAILS','INCREMENTAL_THUMBNAILS','REBUILD_THUMBNAILS')
+                     AND :toStage IN ('INITIAL_PUBLISH','INCREMENTAL_PUBLISH','REBUILD_PUBLISH')
+                   THEN failureCount ELSE 0 END,
                lastError = NULL, updatedAt = :now
            WHERE pipelineId = :pipelineId AND stage = :fromStage
              AND activeRunId = :scanId AND candidateGeneration = :generation""",
@@ -202,6 +213,29 @@ abstract class LibraryPipelineDao {
         generation: Long,
         completed: Int,
         total: Int,
+        failures: Int,
+        now: Long = System.currentTimeMillis(),
+        pipelineId: String = LibraryPipelineEntity.DEFAULT_PIPELINE_ID,
+    ): Int
+
+    /** Publishes a thumbnail-only repair without changing the canonical media generation. */
+    @Query(
+        """UPDATE library_pipeline SET
+               stage = CASE
+                   WHEN rebuildRequired = 1 AND rebuildRequested = 0 THEN 'NEEDS_REBUILD'
+                   ELSE 'READY'
+               END,
+               activeRunId = NULL, candidateGeneration = 0,
+               hasPublishedBaseline = 1,
+               failureCount = :failures,
+               lastError = NULL, updatedAt = :now
+           WHERE pipelineId = :pipelineId
+             AND stage IN ('INITIAL_PUBLISH','INCREMENTAL_PUBLISH','REBUILD_PUBLISH')
+             AND activeRunId = :scanId AND candidateGeneration = :generation""",
+    )
+    abstract suspend fun finishThumbnailRepair(
+        scanId: String,
+        generation: Long,
         failures: Int,
         now: Long = System.currentTimeMillis(),
         pipelineId: String = LibraryPipelineEntity.DEFAULT_PIPELINE_ID,

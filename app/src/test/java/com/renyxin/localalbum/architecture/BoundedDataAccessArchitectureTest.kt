@@ -467,9 +467,17 @@ class BoundedDataAccessArchitectureTest {
             .substringAfter("private suspend fun startOrFinishAnalysisLocked")
             .substringBefore("private suspend fun updateAnalysisProgressLocked")
         assertTrue(
-            "自动分析阶段必须追加交接和分析 successor",
-            automaticAnalysisAdmission.contains("EnhancementHandoffWorker.appendSuccessor(context)") &&
-                automaticAnalysisAdmission.contains("AnalysisWorker.appendSuccessor(context)"),
+            "自动分析阶段必须记录锁外交接和分析 successor 计划",
+            automaticAnalysisAdmission.contains("PipelineWakePlan(handoffWorker = true)") &&
+                automaticAnalysisAdmission.contains("PipelineWakePlan(analysisWorker = true)"),
+        )
+        val wakeDispatcher = pipelineCoordinator
+            .substringAfter("private suspend fun dispatchWakePlan")
+            .substringBefore("private suspend fun ensureStateLocked")
+        assertTrue(
+            "协调器必须在 mutex/Room 区段外追加交接和分析 successor",
+            wakeDispatcher.contains("EnhancementHandoffWorker.appendSuccessor(context)") &&
+                wakeDispatcher.contains("AnalysisWorker.appendSuccessor(context)"),
         )
         assertFalse(
             "自动分析阶段不得使用外部 KEEP 唤醒入口",
@@ -478,7 +486,7 @@ class BoundedDataAccessArchitectureTest {
         )
         val thumbnailGateAdmission = pipelineCoordinator
             .substringAfter("private suspend fun advanceThumbnailGateLocked")
-            .substringBefore("private suspend fun updateThumbnailProgressLocked")
+            .substringBefore("private suspend fun persistThumbnailProgressLocked")
         assertFalse(
             "后台缩略图 gate 不得按交互 participant 数追加交互 successor",
             thumbnailGateAdmission.contains("replayInteractiveWake") ||
@@ -486,9 +494,14 @@ class BoundedDataAccessArchitectureTest {
                 thumbnailGateAdmission.contains("interactiveActive > 0"),
         )
         assertTrue(
-            "后台 gate 只能在交互 completion 修复 scan target 时追加一次后台 successor",
-            thumbnailGateAdmission.contains("repairedTargets && expectedScanId == null") &&
-                thumbnailGateAdmission.contains("ThumbnailWorker.appendBackgroundSuccessor(context)"),
+            "后台 gate 只能在存在未完成 automatic target 时记录后台 successor 计划",
+            thumbnailGateAdmission.contains("thumbnailWorker =") &&
+                thumbnailGateAdmission.contains("STATE_PENDING") &&
+                thumbnailGateAdmission.contains("STATE_DELAYED"),
+        )
+        assertFalse(
+            "后台 gate 不得在 gate 状态机内部直接触达 WorkManager",
+            thumbnailGateAdmission.contains("ThumbnailWorker.appendBackgroundSuccessor(context)"),
         )
         val failedRetryAdmission = pipelineCoordinator.substringAfter("suspend fun retryFailedThumbnails()")
         val analysisResumePrefs = File(
@@ -496,10 +509,11 @@ class BoundedDataAccessArchitectureTest {
             "com/renyxin/localalbum/data/worker/AnalysisResumePrefs.kt",
         ).readText()
         assertTrue(
-            "手动缩略图失败重试必须转换成交互 ownership 并消费持久 generation wake 权",
+            "手动缩略图失败重试必须转换成交互 ownership 并记录锁外 wake 计划",
             failedRetryAdmission.contains("retryAllFailedInteractive") &&
-                failedRetryAdmission.contains("if (wakeRequired)") &&
-                failedRetryAdmission.contains("ThumbnailWorker.replayInteractiveWake"),
+                failedRetryAdmission.contains("recordWakePlanLocked") &&
+                failedRetryAdmission.contains("thumbnails = true") &&
+                failedRetryAdmission.contains("PipelineWakePlan("),
         )
         assertTrue(
             "手动分析失败重试必须在 ownership 转换前同步持久化用户恢复标记",
@@ -508,7 +522,7 @@ class BoundedDataAccessArchitectureTest {
                 failedRetryAdmission.indexOf("retryFailedAsUserForScopes") &&
                 failedRetryAdmission.contains("analysisPipeline().claimableTaskScopes") &&
                 failedRetryAdmission.contains("countFailedForScopes(scopes)") &&
-                failedRetryAdmission.contains("AnalysisWorker.enqueue(context)") &&
+                failedRetryAdmission.contains("UserTaskAdmission(analysis = true)") &&
                 analysisResumePrefs.contains("fun resumeUserWork(context: Context)") &&
                 analysisResumePrefs.contains(".commit()"),
         )
@@ -520,8 +534,10 @@ class BoundedDataAccessArchitectureTest {
                 failedRetryAdmission.contains("scanId = null") &&
                 failedRetryAdmission.contains("markRetriedForUser") &&
                 failedRetryAdmission.contains("recordUserRetryFailure") &&
-                failedRetryAdmission.contains("ThumbnailWorker.replayInteractiveWake") &&
-                failedRetryAdmission.contains("AnalysisWorker.enqueue(context)"),
+                failedRetryAdmission.contains("UserTaskAdmission(") &&
+                pipelineCoordinator
+                    .substringAfter("private suspend fun dispatchWakePlan")
+                    .contains("enqueueAdmittedUserTasks"),
         )
         assertTrue(
             "失败重试 UI 准入必须观察协调器的同一持久状态规则",
@@ -537,7 +553,8 @@ class BoundedDataAccessArchitectureTest {
             "启动恢复必须覆盖持久 thumbnail-only 阶段且不得绕过流水线门禁",
             container.contains("libraryPipelineCoordinator.wake()") &&
                 pipelineCoordinator.contains("stage.isThumbnail") &&
-                pipelineWorker.contains("ThumbnailWorker.appendBackgroundSuccessor"),
+                pipelineWorker.contains("prepareLibraryWorkerPass()") &&
+                pipelineWorker.contains("-> Unit"),
         )
         assertTrue(
             "启动恢复必须从 Room lane level 重放交互缩略图 wake",
@@ -767,7 +784,7 @@ class BoundedDataAccessArchitectureTest {
 
         val scopeChange = coordinator.substringAfter("suspend fun markScanScopeChanged(")
             .substringBefore("suspend fun startQueuedWorkIfIdle()")
-        assertTrue("范围变化必须受流水线互斥锁保护", scopeChange.contains("mutex.withLock"))
+        assertTrue("范围变化必须受流水线互斥锁保护", scopeChange.contains("withLockAndDispatch"))
         assertTrue("已有基线或 active run 时范围变化只能标记需要重建", scopeChange.contains("dao.requireRebuild("))
         assertFalse("范围变化不得写 rebuildRequested", scopeChange.contains("dao.requestRebuild("))
         val queuedWork = coordinator.substringAfter("private suspend fun startQueuedWorkIfIdleLocked()")

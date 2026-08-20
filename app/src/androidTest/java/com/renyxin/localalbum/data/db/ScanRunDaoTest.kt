@@ -12,6 +12,7 @@ import com.renyxin.localalbum.data.db.entity.IndexAvailability
 import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.db.entity.ScanRunEntity
 import com.renyxin.localalbum.data.db.entity.ThumbnailTaskEntity
+import com.renyxin.localalbum.data.db.entity.LibraryPipelineStage
 import com.renyxin.localalbum.data.db.entity.ScanStagingEntity
 import com.renyxin.localalbum.core.thumbnail.ThumbnailSpec
 import kotlinx.coroutines.runBlocking
@@ -290,6 +291,125 @@ class ScanRunDaoTest {
             EnhancementState.COMPLETED.name,
             database.scanRunDao().getById(scanId)?.enhancementState,
         )
+    }
+
+    @Test
+    fun liteSettlementExcludesThumbnailRepairAtQueryAndProcessingBoundaries() = runBlocking {
+        val genericScanId = "scan-lite-generic-settlement"
+        val repairScanId = "scan-lite-repair-settlement"
+        database.scanRunDao().insert(
+            ScanRunEntity(
+                scanId = genericScanId,
+                generation = 90L,
+                scanType = ScanRunEntity.TYPE_INCREMENTAL,
+                status = ScanRunEntity.STATUS_COMPLETED,
+                coreScanState = CoreScanState.COMPLETED.name,
+                indexAvailability = IndexAvailability.PUBLISHED.name,
+                enhancementState = EnhancementState.QUEUED.name,
+            ),
+        )
+        database.scanRunDao().insert(
+            ScanRunEntity(
+                scanId = repairScanId,
+                generation = 91L,
+                scanType = ScanRunEntity.TYPE_THUMBNAIL_REPAIR,
+                status = ScanRunEntity.STATUS_COMPLETED,
+                coreScanState = CoreScanState.COMPLETED.name,
+                indexAvailability = IndexAvailability.PUBLISHED.name,
+                enhancementState = EnhancementState.QUEUED.name,
+            ),
+        )
+
+        assertEquals(
+            listOf(genericScanId),
+            database.scanRunDao().getUnsettledEnhancementScanIds(),
+        )
+        com.renyxin.localalbum.data.worker.EnhancementHandoffWorker.settleEnhancementScans(
+            database = database,
+            scanIds = setOf(genericScanId, repairScanId),
+            now = 92L,
+        )
+
+        assertEquals(
+            EnhancementState.COMPLETED.name,
+            database.scanRunDao().getById(genericScanId)?.enhancementState,
+        )
+        assertEquals(
+            EnhancementState.QUEUED.name,
+            database.scanRunDao().getById(repairScanId)?.enhancementState,
+        )
+    }
+
+    @Test
+    fun thumbnailRepairTerminalIsIdempotentButRejectsIdentityMismatches() = runBlocking {
+        val dao = database.scanRunDao()
+        val repair = ScanRunEntity(
+            scanId = "repair-terminal-idempotent",
+            generation = 93L,
+            scanType = ScanRunEntity.TYPE_THUMBNAIL_REPAIR,
+            status = ScanRunEntity.STATUS_COMPLETED,
+            coreScanState = CoreScanState.COMPLETED.name,
+            indexAvailability = IndexAvailability.PUBLISHED.name,
+            enhancementState = EnhancementState.QUEUED.name,
+        )
+        dao.insert(repair)
+
+        assertTrue(
+            dao.markThumbnailRepairTerminal(
+                scanId = repair.scanId,
+                generation = repair.generation,
+                state = EnhancementState.COMPLETED.name,
+                now = 94L,
+            ),
+        )
+        assertTrue(
+            dao.markThumbnailRepairTerminal(
+                scanId = repair.scanId,
+                generation = repair.generation,
+                state = EnhancementState.COMPLETED.name,
+                now = 95L,
+            ),
+        )
+        assertEquals(94L, dao.getById(repair.scanId)?.enhancementCompletedAt)
+        assertFalse(
+            dao.markThumbnailRepairTerminal(
+                scanId = "missing-repair-terminal",
+                generation = repair.generation,
+                state = EnhancementState.COMPLETED.name,
+                now = 96L,
+            ),
+        )
+
+        val generationMismatch = runCatching {
+            dao.markThumbnailRepairTerminal(
+                scanId = repair.scanId,
+                generation = repair.generation + 1L,
+                state = EnhancementState.COMPLETED.name,
+                now = 97L,
+            )
+        }.exceptionOrNull()
+        assertTrue(generationMismatch is IllegalStateException)
+
+        val wrongType = ScanRunEntity(
+            scanId = "repair-terminal-wrong-type",
+            generation = 98L,
+            scanType = ScanRunEntity.TYPE_INCREMENTAL,
+            status = ScanRunEntity.STATUS_COMPLETED,
+            coreScanState = CoreScanState.COMPLETED.name,
+            indexAvailability = IndexAvailability.PUBLISHED.name,
+            enhancementState = EnhancementState.QUEUED.name,
+        )
+        dao.insert(wrongType)
+        val typeMismatch = runCatching {
+            dao.markThumbnailRepairTerminal(
+                scanId = wrongType.scanId,
+                generation = wrongType.generation,
+                state = EnhancementState.COMPLETED.name,
+                now = 99L,
+            )
+        }.exceptionOrNull()
+        assertTrue(typeMismatch is IllegalStateException)
+        assertEquals(EnhancementState.QUEUED.name, dao.getById(wrongType.scanId)?.enhancementState)
     }
 
     @Test
@@ -874,6 +994,7 @@ class ScanRunDaoTest {
                 enhancementState = EnhancementState.QUEUED.name,
             ),
         )
+        admitAutomaticThumbnailRun(scanId, 30L)
         database.mediaDao().insertAll(
             listOf(
                 media("/interactive.jpg", modifiedAtMs = 1L, fileSize = 100L),
@@ -925,6 +1046,7 @@ class ScanRunDaoTest {
                 enhancementState = EnhancementState.QUEUED.name,
             ),
         )
+        admitAutomaticThumbnailRun(scanId, 31L)
         database.mediaDao().insertAll(
             listOf(
                 media("/interactive-interrupted.jpg", modifiedAtMs = 3L, fileSize = 300L),
@@ -992,6 +1114,7 @@ class ScanRunDaoTest {
                 enhancementState = EnhancementState.QUEUED.name,
             ),
         )
+        admitAutomaticThumbnailRun(scanId, 34L)
         val dao = database.thumbnailTaskDao()
         dao.enqueueInteractive(
             listOf(
@@ -1042,6 +1165,7 @@ class ScanRunDaoTest {
                 enhancementState = EnhancementState.QUEUED.name,
             ),
         )
+        admitAutomaticThumbnailRun(scanId, 35L)
         database.enhancementOutboxDao().enqueueAll(
             listOf(
                 EnhancementOutboxEntity(
@@ -1118,6 +1242,7 @@ class ScanRunDaoTest {
                 enhancementState = EnhancementState.QUEUED.name,
             ),
         )
+        admitAutomaticThumbnailRun(scanId, 32L)
         val dao = database.thumbnailTaskDao()
         dao.enqueueAll(
             listOf(
@@ -1271,6 +1396,19 @@ class ScanRunDaoTest {
         assertNull(user.single().scanId)
         assertEquals(AnalysisTaskEntity.PRIORITY_USER, user.single().priority)
         assertEquals(1, dao.markDone(user.map { it.taskId }, "retried-analysis-lease", 4L))
+    }
+
+    private suspend fun admitAutomaticThumbnailRun(scanId: String, generation: Long) {
+        val pipelineDao = database.libraryPipelineDao()
+        pipelineDao.ensureInitialized(true, true, generation)
+        check(
+            pipelineDao.transition(
+                from = setOf(LibraryPipelineStage.READY, LibraryPipelineStage.NEEDS_REBUILD),
+                to = LibraryPipelineStage.INCREMENTAL_THUMBNAILS,
+                activeRunId = scanId,
+                candidateGeneration = generation,
+            ),
+        )
     }
 
     private fun media(path: String, modifiedAtMs: Long, fileSize: Long) = MediaEntity(
