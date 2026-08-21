@@ -191,6 +191,7 @@ class HybridIndexer(
         private const val CHANGE_BATCH_SIZE = 500
         private const val CHANGE_LEASE_MS = 60_000L
         private const val CHANGE_RETRY_DELAY_MS = 5_000L
+        internal const val CHANGE_DISCOVERY_PAGE_SIZE = 250
         /** Full/reconciliation recommendation refresh also uses a bounded changed-directory window. */
         private const val RECOMMENDATION_DIRECTORY_WINDOW_LIMIT = 100
         /** 每批入库上限：限制大相册扫描时实体列表和单次 SQLite 事务的内存峰值。 */
@@ -296,6 +297,117 @@ class HybridIndexer(
             changes.map { MediaStoreChangeResolver.toEvent(profileId, it) },
         )
     }
+
+    /**
+     * Discovers precise MediaStore identities that may have changed while no observer was active.
+     *
+     * MediaStore is streamed in fixed batches and never materialized as a full-library list. Existing
+     * references are then validated by bounded keyset pages so deletions are also journaled. The method
+     * writes only durable MEDIA events; the serialized pipeline remains the sole scan admission owner.
+     */
+    suspend fun discoverMediaStoreChanges(
+        roots: List<String>,
+        ignorePatterns: List<String> = emptyList(),
+        now: Long = System.currentTimeMillis(),
+    ): MediaChangeDiscoveryResult = withContext(Dispatchers.IO) {
+        val changeDao = requireMediaChangeDao()
+        var observed = 0
+        var journaled = 0
+        enumerateMediaStoreBatches(ScanRootPolicy.normalize(roots), ignorePatterns) { items ->
+            observed += items.size
+            val references = changeDao.getReferences(
+                items.map { indexed -> indexed.identity.stableKey(profileId) },
+            ).associateBy { it.stableKey }
+            val events = items.mapNotNull { indexed ->
+                val item = indexed.item
+                val key = indexed.identity.stableKey(profileId)
+                val reference = references[key]
+                val canonicalPath = com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity
+                    .canonicalizePath(item.filePath)
+                val persistedFingerprint = reference?.sourceVersion?.let(
+                    com.renyxin.localalbum.core.thumbnail.SourceVersionCodec::decode,
+                )?.fingerprintHead
+                val metadataMatches = reference != null &&
+                    reference.filePath == canonicalPath &&
+                    com.renyxin.localalbum.core.thumbnail.SourceVersionCodec.matchesPhysical(
+                        encoded = reference.sourceVersion,
+                        modifiedAtMs = item.modifiedAt.toEpochMilli(),
+                        fileSize = item.fileSize,
+                        // Discovery intentionally avoids file I/O. Supplying the persisted fingerprint
+                        // makes this comparison cover only MediaStore-visible mtime/size metadata.
+                        fingerprintHead = persistedFingerprint,
+                    )
+                if (metadataMatches) null else discoveryEvent(indexed.identity, now)
+            }
+            if (events.isNotEmpty()) {
+                changeDao.recordAll(events)
+                journaled += events.size
+            }
+        }
+
+        var afterKey: String? = null
+        while (true) {
+            val page = changeDao.getReferencePageAfter(
+                profileId = profileId,
+                afterKey = afterKey,
+                limit = CHANGE_DISCOVERY_PAGE_SIZE,
+            )
+            if (page.isEmpty()) break
+            val identities = page.map { reference ->
+                MediaStoreIdentity(
+                    volumeName = reference.volumeName,
+                    mediaType = MediaType.valueOf(reference.mediaType),
+                    mediaStoreId = reference.mediaStoreId,
+                )
+            }
+            val validation = mediaSource.resolveMediaStoreItems(
+                identities = identities,
+                rootPaths = roots,
+                ignorePatterns = ignorePatterns,
+            ).associateBy { resolved -> resolved.identity.stableKey(profileId) }
+            val missingEvents = page.asSequence()
+                .filter { reference ->
+                    when (validation[reference.stableKey]?.status) {
+                        MediaStoreLookupStatus.INCLUDED,
+                        MediaStoreLookupStatus.UNRESOLVED,
+                        -> false
+                        MediaStoreLookupStatus.EXCLUDED,
+                        null,
+                        -> true
+                    }
+                }
+                .map { reference ->
+                    discoveryEvent(
+                        MediaStoreIdentity(
+                            volumeName = reference.volumeName,
+                            mediaType = MediaType.valueOf(reference.mediaType),
+                            mediaStoreId = reference.mediaStoreId,
+                        ),
+                        now,
+                    )
+                }
+                .toList()
+            if (missingEvents.isNotEmpty()) {
+                changeDao.recordAll(missingEvents)
+                journaled += missingEvents.size
+            }
+            afterKey = page.last().stableKey
+            if (page.size < CHANGE_DISCOVERY_PAGE_SIZE) break
+        }
+        MediaChangeDiscoveryResult(observed = observed, journaled = journaled)
+    }
+
+    private fun discoveryEvent(identity: MediaStoreIdentity, now: Long) = MediaChangeEventEntity(
+        eventKey = identity.stableKey(profileId),
+        profileId = profileId,
+        eventType = MediaChangeEventEntity.TYPE_MEDIA,
+        volumeName = identity.volumeName,
+        mediaType = identity.mediaType.name,
+        mediaStoreId = identity.mediaStoreId,
+        contentUri = identity.canonicalContentUri(),
+        firstObservedAtMs = now,
+        observedAtMs = now,
+    )
 
     suspend fun requestReconciliation(now: Long = System.currentTimeMillis()) {
         requireMediaChangeDao().record(
@@ -1408,6 +1520,13 @@ data class ScanCommitResult(
     val enhancementOutboxCount: Int = 0,
     val affectedDirectoryPaths: Set<String> = emptySet(),
 )
+
+data class MediaChangeDiscoveryResult(
+    val observed: Int,
+    val journaled: Int,
+) {
+    val hasChanges: Boolean get() = journaled > 0
+}
 
 data class IncrementalResult(
     val inserted: Int,

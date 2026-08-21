@@ -395,6 +395,13 @@ class LibraryPipelineCoordinator(
         withLockAndDispatch {
             val state = ensureStateLocked()
             val stage = LibraryPipelineStage.fromPersisted(state.stage)
+            val outstanding = indexer.countOutstandingMediaChanges()
+            val reconciliationHint = indexer.hasPendingReconciliation()
+            Log.i(
+                TAG,
+                "incremental diagnostic: observer recorded stage=$stage " +
+                    "outstandingMedia=$outstanding reconciliationHint=$reconciliationHint",
+            )
             if (stage in IDLE_ADMISSION_STAGES) startQueuedWorkIfIdleLocked()
         }
     }
@@ -404,6 +411,14 @@ class LibraryPipelineCoordinator(
         withLockAndDispatch {
             val state = ensureStateLocked()
             val stage = LibraryPipelineStage.fromPersisted(state.stage)
+            val outstanding = indexer.countOutstandingMediaChanges()
+            val reconciliationHint = indexer.hasPendingReconciliation()
+            Log.i(
+                TAG,
+                "incremental diagnostic: manual request stage=$stage baseline=${state.hasPublishedBaseline} " +
+                    "activeRun=${state.activeRunId != null} outstandingMedia=$outstanding " +
+                    "reconciliationHint=$reconciliationHint",
+            )
             if (
                 !state.hasPublishedBaseline && state.activeRunId == null &&
                 stage in setOf(
@@ -481,6 +496,11 @@ class LibraryPipelineCoordinator(
         // Reconciliation hints are advisories, precise identities are durable work. Both must be
         // handled before the repair barrier so a cold-start gap cannot outrun a queued media change.
         if (indexer.consumeReconciliationHintAsAdvisory()) {
+            Log.w(
+                TAG,
+                "incremental diagnostic: ambiguous/collection MediaStore notification cannot " +
+                    "start incremental scan; preserving rebuild advisory",
+            )
             dao.requireRebuild("ambiguous_media_store_change")
         }
         if (indexer.hasOutstandingMediaChanges()) {
@@ -491,9 +511,14 @@ class LibraryPipelineCoordinator(
                 ),
                 to = LibraryPipelineStage.INCREMENTAL_SCAN,
             )
+            Log.i(TAG, "incremental diagnostic: journal admission stage=$stage advanced=$advanced")
             if (advanced) recordWakePlanLocked(PipelineWakePlan(libraryWorker = true))
             return advanced
         }
+        Log.i(
+            TAG,
+            "incremental diagnostic: no precise journal; wake is a no-op for core incremental scan",
+        )
 
         state = requireNotNull(dao.get())
         stage = LibraryPipelineStage.fromPersisted(state.stage)

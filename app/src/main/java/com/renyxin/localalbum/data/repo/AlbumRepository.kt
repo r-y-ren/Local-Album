@@ -82,6 +82,7 @@ sealed interface ScanState {
         val total: Int = 0,
     ) : ScanState
     data object Done : ScanState
+    data class CheckCompleted(val message: String) : ScanState
     data class Failed(val message: String) : ScanState
 }
 
@@ -602,10 +603,58 @@ class AlbumRepository(
     }
 
     // ---- 扫描 ----
-    /** Normal user refresh authorizes the first traversal; after baseline it only drains journals. */
+    /** Manual refresh first discovers missed MediaStore identities, then drains the durable journal. */
     suspend fun rescan(): Boolean = withContext(Dispatchers.IO) {
-        libraryPipelineCoordinator?.requestUserScan()
-        true
+        val coordinator = libraryPipelineCoordinator ?: return@withContext false
+        val pipeline = coordinator.ensureState()
+        if (!pipeline.hasPublishedBaseline) {
+            coordinator.requestUserScan()
+            return@withContext true
+        }
+        _scanState.value = ScanState.Scanning("正在检查媒体更新…")
+        runCatching {
+            settingsRepository.withStableScanSettings { settings ->
+                requireNotNull(hybridIndexer).discoverMediaStoreChanges(
+                    roots = settings.scanRoots,
+                    ignorePatterns = settings.ignoreDirNames,
+                )
+            }
+        }.fold(
+            onSuccess = { discovery ->
+                val outstanding = requireNotNull(hybridIndexer).countOutstandingMediaChanges()
+                Log.i(TAG, "manual incremental discovery: $discovery outstanding=$outstanding")
+                coordinator.requestUserScan()
+                // Observer events may already have been durable before this explicit discovery. Only
+                // publish "up to date" when the complete precise journal is empty.
+                if (outstanding == 0) {
+                    _scanState.value = ScanState.CheckCompleted("已是最新状态")
+                    _albumSyncState.value = AlbumSyncState.UpToDate(
+                        database?.albumSnapshotDao()?.getMeta()?.updatedAtMs ?: System.currentTimeMillis(),
+                    )
+                }
+                true
+            },
+            onFailure = { error ->
+                Log.e(TAG, "手动增量检查失败", error)
+                _scanState.value = ScanState.Failed(error.message ?: "检查媒体更新失败")
+                false
+            },
+        )
+    }
+
+    /** Foreground compensation discovers changes missed while the observer was unregistered. */
+    suspend fun discoverForegroundChanges(): Boolean = withContext(Dispatchers.IO) {
+        val indexer = hybridIndexer ?: return@withContext false
+        val discovery = settingsRepository.withStableScanSettings { settings ->
+            if (settings.scanRoots.isEmpty()) return@withStableScanSettings null
+            indexer.discoverMediaStoreChanges(
+                roots = settings.scanRoots,
+                ignorePatterns = settings.ignoreDirNames,
+            )
+        } ?: return@withContext false
+        Log.i(TAG, "foreground incremental discovery: $discovery")
+        libraryPipelineCoordinator?.wake()
+        discovery.hasChanges
     }
 
     /** Only this explicit action is allowed to request a complete root traversal. */

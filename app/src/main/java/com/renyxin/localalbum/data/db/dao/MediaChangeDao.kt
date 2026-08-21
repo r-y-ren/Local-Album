@@ -244,6 +244,17 @@ abstract class MediaChangeDao {
     @Query("SELECT * FROM media_store_references WHERE stableKey IN (:stableKeys)")
     abstract suspend fun getReferences(stableKeys: List<String>): List<MediaStoreReferenceEntity>
 
+    /** Bounded keyset page used to validate deletions missed while the observer was unregistered. */
+    @Query(
+        "SELECT * FROM media_store_references WHERE profileId = :profileId " +
+            "AND (:afterKey IS NULL OR stableKey > :afterKey) ORDER BY stableKey LIMIT :limit",
+    )
+    abstract suspend fun getReferencePageAfter(
+        profileId: String,
+        afterKey: String?,
+        limit: Int,
+    ): List<MediaStoreReferenceEntity>
+
     @Query(
         """SELECT * FROM media_store_references
            WHERE profileId = :profileId AND volumeName = :volumeName

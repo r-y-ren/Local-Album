@@ -235,6 +235,14 @@ internal fun ScanControlSection(
                     )
                 }
 
+                is ScanState.CheckCompleted -> {
+                    Text(
+                        text = s.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+
                 is ScanState.Failed -> {
                     Text(
                         text = "扫描失败: ${s.message}",

@@ -120,6 +120,13 @@ class BoundedDataAccessArchitectureTest {
             assertFalse("Incremental 恢复了全根或 generation 对账路径: $forbidden", incrementalScan.contains(forbidden))
         }
 
+        val discovery = source.substringAfter("suspend fun discoverMediaStoreChanges(")
+            .substringBefore("private fun discoveryEvent(")
+        assertTrue("漏失变更发现必须以固定批次流式枚举", discovery.contains("enumerateMediaStoreBatches("))
+        assertTrue("删除校验必须使用 keyset 有界页", discovery.contains("getReferencePageAfter("))
+        assertTrue("删除校验必须限制固定页大小", discovery.contains("CHANGE_DISCOVERY_PAGE_SIZE"))
+        assertFalse("漏失变更发现不得读取整库 MediaEntity", discovery.contains("getModifiedTimeMap("))
+
         listOf(
             "fullScanGuarded(",
             "incrementalScanGuarded(",
@@ -645,8 +652,13 @@ class BoundedDataAccessArchitectureTest {
         val repositoryRefresh = repository.substringAfter("suspend fun rescan(): Boolean")
             .substringBefore("suspend fun requestFullRebuild()")
         assertTrue(
-            "普通刷新必须走仅授权首次扫描/否则只唤醒 journal 的用户扫描入口",
-            repositoryRefresh.contains("libraryPipelineCoordinator?.requestUserScan()"),
+            "普通刷新必须先发现漏失变更，再走 journal 用户扫描入口",
+            repositoryRefresh.contains("discoverMediaStoreChanges(") &&
+                repositoryRefresh.contains("coordinator.requestUserScan()"),
+        )
+        assertTrue(
+            "无变化手动检查必须发布明确结果",
+            repositoryRefresh.contains("ScanState.CheckCompleted(\"已是最新状态\")"),
         )
         assertFalse("普通刷新不得授权完整重建", repositoryRefresh.contains("requestExplicitRebuild"))
         val repositoryRebuild = repository.substringAfter("suspend fun requestFullRebuild()")
@@ -671,10 +683,18 @@ class BoundedDataAccessArchitectureTest {
             .substringBefore("OutlinedButton(")
         assertTrue("普通设置页按钮必须只检查增量更新", incrementalButton.contains("albumViewModel.rescan()"))
         assertFalse("普通设置页按钮不得调用完整重建", incrementalButton.contains("requestFullRebuild"))
+        assertTrue("设置页必须显示无变化检查结果", scanControls.contains("is ScanState.CheckCompleted"))
         val rebuildButton = controlCard.substringAfter("OutlinedButton(")
             .substringBefore("Text(\"完整重建图库\")")
         assertTrue("完整重建按钮必须先打开确认状态", rebuildButton.contains("showRebuildConfirmation.value = true"))
         assertFalse("完整重建按钮不得绕过确认直接提交", rebuildButton.contains("requestFullRebuild"))
+
+        val foregroundRecovery = container.substringAfter("fun maybeRescanOnForeground()")
+            .substringBefore("fun loadPlugins()")
+        assertTrue(
+            "回前台必须执行漏失变更发现，而不是只做流水线空唤醒",
+            foregroundRecovery.contains("albumRepository.discoverForegroundChanges()"),
+        )
 
         fun callSites(call: String): Set<String> = sourceRoot.walkTopDown()
             .filter { it.isFile && it.extension == "kt" && it.readText().contains(call) }

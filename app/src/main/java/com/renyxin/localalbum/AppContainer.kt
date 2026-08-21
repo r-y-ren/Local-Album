@@ -780,7 +780,11 @@ class AppContainer(context: Context) {
                 albumRepository.restoreFromDbIfNeeded()
                 startupRestoreCompleted = true
             }
-            libraryPipelineCoordinator.wake()
+            runCatching { albumRepository.discoverForegroundChanges() }
+                .onFailure { error ->
+                    android.util.Log.e("AppContainer", "前台增量补偿检查失败", error)
+                    libraryPipelineCoordinator.wake()
+                }
         }
     }
 
