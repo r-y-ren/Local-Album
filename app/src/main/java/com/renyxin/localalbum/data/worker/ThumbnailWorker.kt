@@ -329,7 +329,11 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
         const val KEY_DISPATCH_REVISION = "thumbnail_dispatch_revision"
         const val KEY_DISPATCH_TOKEN = "thumbnail_dispatch_token"
         internal const val BATCH_SIZE = 8
-        internal const val MAX_BATCHES_PER_RUN = 8
+        // 派发租约窗口（60s）内每个 run 只会被派发一次；run 上限必须足够大，
+        // 否则形成 64 张/分钟的意外节流。512 张 × 最慢单张（视频帧 ~2s）/并发 3
+        // 约 5.7 分钟，仍在 run 租约（12 分钟，逐批续租）与系统 job 时限内；
+        // 极端情况 isStopped 逐批优雅退出，下一窗口自动续跑。
+        internal const val MAX_BATCHES_PER_RUN = 64
         internal const val MAX_TASKS_PER_RUN = BATCH_SIZE * MAX_BATCHES_PER_RUN
         private const val MAX_ATTEMPTS = 4
         private const val TASK_LEASE_MS = 10 * 60_000L

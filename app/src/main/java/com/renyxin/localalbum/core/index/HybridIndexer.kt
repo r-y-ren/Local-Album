@@ -1,6 +1,7 @@
 package com.renyxin.localalbum.core.index
 
 import android.content.Context
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import androidx.room.withTransaction
@@ -611,6 +612,8 @@ class HybridIndexer(
         ignorePatterns: List<String>,
     ): DeltaDrainResult {
         val changeDao = requireMediaChangeDao()
+        // 与全量扫描同语义的运行级缓存：指纹去重 + 视频超时黑名单，随本次增量运行丢弃。
+        val runCache = ScanRunCache()
         val acknowledgements = mutableListOf<ChangeAcknowledgement>()
         val affectedDirectories = linkedSetOf<String>()
         var inserted = 0
@@ -645,6 +648,7 @@ class HybridIndexer(
                         rootPaths = roots,
                         allowNomedia = allowNomedia,
                         ignorePatterns = ignorePatterns,
+                        scanCache = runCache,
                     )
                     changeDao.renewLease(
                         leaseToken = leaseToken,
@@ -658,6 +662,7 @@ class HybridIndexer(
                     lookups = lookups,
                     generation = generation,
                     scanId = scanId,
+                    runCache = runCache,
                 )
                 // Ambiguous identities are persisted as a rebuild advisory. The pipeline never
                 // turns them into an automatic root traversal; only explicit rebuild may do that.
@@ -738,6 +743,7 @@ class HybridIndexer(
         lookups: List<ResolvedMediaStoreItem>,
         generation: Long,
         scanId: String,
+        runCache: ScanRunCache? = null,
     ): DeltaBatchCommit {
         val changeDao = requireMediaChangeDao()
         val coordinator = requireNotNull(mediaDeletionCoordinator) {
@@ -783,7 +789,7 @@ class HybridIndexer(
                     val oldPath = reference?.filePath
                     val sourceExisting = oldPath?.let(existingByPath::get)
                         ?: existingByPath[mediaItem.filePath]
-                    val fresh = mediaItem.toEntity()
+                    val fresh = mediaItem.toEntity(runCache)
                     val pathChanged = sourceExisting != null && sourceExisting.filePath != fresh.filePath
                     val coreChanged = sourceExisting == null || coreIndexChanged(sourceExisting, fresh)
                     val changed = pathChanged || coreChanged
@@ -974,6 +980,8 @@ class HybridIndexer(
         ignorePatterns: List<String>,
         progress: ((processed: Int, total: Int) -> Unit)?,
     ): ScanCommitResult = coroutineScope {
+        // 扫描运行级缓存：头指纹去重 + 视频元数据超时黑名单，随本次扫描结束丢弃。
+        val runCache = ScanRunCache()
         val staging = requireScanStagingDao()
         val channel = Channel<List<ScanStagingEntity>>(ENUMERATION_CHANNEL_CAPACITY)
         val insertedCounter = AtomicInteger(0)
@@ -988,6 +996,7 @@ class HybridIndexer(
                     mergedRows.map { ScanMediaCodec.merge(it.mediaStoreJson, it.fileSystemJson) },
                     generation,
                     scanId,
+                    runCache,
                 )
                 insertedCounter.addAndGet(committed.inserted)
                 updatedCounter.addAndGet(committed.updated)
@@ -1024,6 +1033,7 @@ class HybridIndexer(
                 progress?.invoke(visible, visible)
             }
         }
+        val mediaStoreStartedAt = SystemClock.elapsedRealtime()
         try {
             enumerateMediaStoreBatches(roots, ignorePatterns) { indexedItems ->
                 val now = System.currentTimeMillis()
@@ -1045,7 +1055,7 @@ class HybridIndexer(
                         sourceVersion = com.renyxin.localalbum.core.thumbnail.SourceVersionCodec.encode(
                             item.modifiedAt.toEpochMilli(),
                             item.fileSize,
-                            computeFingerprintHead(item.filePath),
+                            runCache.fingerprintHead(item.filePath),
                         ),
                         observedAtMs = now,
                         scanGeneration = generation,
@@ -1053,21 +1063,26 @@ class HybridIndexer(
                 })
             }
             requireScanRunDao().markMediaStoreCompleted(scanId)
+            Log.i(TAG, "scan phase=mediastore-enumerate elapsedMs=${SystemClock.elapsedRealtime() - mediaStoreStartedAt}")
+            val fileSystemStartedAt = SystemClock.elapsedRealtime()
             mediaSource.enumerateMediaBatches(
                 roots,
                 allowNomedia = allowNomedia,
                 ignorePatterns = ignorePatterns,
                 batchSize = ENUMERATION_BATCH_SIZE,
+                scanCache = runCache,
             ) { items ->
                 channel.send(items.map { item ->
                     ScanStagingEntity(scanId, item.filePath, SOURCE_FILE_SYSTEM, fileSystemJson = ScanMediaCodec.encode(item))
                 })
             }
             requireScanRunDao().markFileSystemCompleted(scanId)
+            Log.i(TAG, "scan phase=filesystem-enumerate elapsedMs=${SystemClock.elapsedRealtime() - fileSystemStartedAt}")
         } finally {
             channel.close()
         }
         consumer.join()
+        Log.i(TAG, "scan phase=staging-commit-total elapsedMs=${SystemClock.elapsedRealtime() - mediaStoreStartedAt}")
 
         check(requireScanRunDao().canDeleteOrphans(scanId) == true) {
             "扫描来源未完整完成，拒绝提交 staging"
@@ -1129,9 +1144,10 @@ class HybridIndexer(
         items: List<MediaItem>,
         generation: Long,
         scanId: String,
+        runCache: ScanRunCache? = null,
     ): BatchCommitCount {
         val fresh = items.map { item ->
-            item.toEntity().copy(
+            item.toEntity(runCache).copy(
                 filePath = com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity
                     .canonicalizePath(item.filePath),
             )
@@ -1452,11 +1468,11 @@ class HybridIndexer(
     /**
      * 将 MediaItem 转换为 MediaEntity（含 EXIF 字段映射）。
      */
-    private fun MediaItem.toEntity(): MediaEntity {
+    private fun MediaItem.toEntity(runCache: ScanRunCache? = null): MediaEntity {
         val capturedAtMs = capturedAt.toEpochMilli()
         val modifiedAtMs = modifiedAt.toEpochMilli()
         val indexedAtMs = System.currentTimeMillis()
-        val fingerprint = computeFingerprintHead(filePath)
+        val fingerprint = runCache?.fingerprintHead(filePath) ?: computeFingerprintHead(filePath)
 
         return MediaEntity(
             filePath = filePath,

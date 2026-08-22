@@ -17,6 +17,7 @@ import androidx.exifinterface.media.ExifInterface
 import com.renyxin.localalbum.core.index.IgnorePatternMatcher
 import com.renyxin.localalbum.core.index.MediaStoreIdentity
 import com.renyxin.localalbum.core.index.ScanRootPolicy
+import com.renyxin.localalbum.core.index.ScanRunCache
 import com.renyxin.localalbum.core.thumbnail.HeadFingerprint
 import com.renyxin.localalbum.core.thumbnail.SourceVersionCodec
 import com.renyxin.localalbum.core.thumbnail.ThumbnailIdentity
@@ -25,6 +26,11 @@ import com.renyxin.localalbum.core.model.DirectoryNode
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -116,6 +122,7 @@ class MediaSource(
         allowNomedia: Boolean = false,
         ignorePatterns: List<String> = emptyList(),
         cache: MediaMetadataCache? = null,
+        scanCache: ScanRunCache? = null,
     ): List<ResolvedMediaStoreItem> = withContext(Dispatchers.IO) {
         require(identities.size <= MAX_MEDIASTORE_RESOLVE_BATCH) {
             "MediaStore 单批解析超过 $MAX_MEDIASTORE_RESOLVE_BATCH"
@@ -196,7 +203,7 @@ class MediaSource(
                         contentUri = contentUri,
                         status = MediaStoreLookupStatus.INCLUDED,
                         filePath = path,
-                        mediaItem = buildMediaItem(file, mediaType, cache),
+                        mediaItem = buildMediaItem(file, mediaType, cache, scanCache),
                     )
                 }
             }
@@ -259,6 +266,7 @@ class MediaSource(
         allowNomedia: Boolean = false,
         ignorePatterns: List<String> = emptyList(),
         batchSize: Int = 250,
+        scanCache: ScanRunCache? = null,
         emit: suspend (List<MediaItem>) -> Unit,
     ) = withContext(Dispatchers.IO) {
         require(batchSize > 0)
@@ -272,7 +280,7 @@ class MediaSource(
             pendingDirs.addLast(root)
         }
         val visitedDirs = HashSet<String>()
-        val batch = ArrayList<MediaItem>(batchSize)
+        val batch = ArrayList<Pair<File, MediaType>>(batchSize)
         while (pendingDirs.isNotEmpty()) {
             val dir = pendingDirs.removeLast()
             val directoryKey = ScanRootPolicy.directoryKey(dir) ?: continue
@@ -288,16 +296,42 @@ class MediaSource(
                     file.isFile -> {
                         if (shouldIgnoreFile(file.name, compiled)) continue
                         val type = detectMediaType(file.name) ?: continue
-                        batch += buildMediaItem(file, type, cache)
+                        batch += file to type
                         if (batch.size == batchSize) {
-                            emit(batch.toList())
+                            emit(parseMediaBatch(batch.toList(),cache,scanCache))
                             batch.clear()
                         }
                     }
                 }
             }
         }
-        if (batch.isNotEmpty()) emit(batch.toList())
+        if (batch.isNotEmpty()) emit(parseMediaBatch(batch.toList(),cache,scanCache))
+    }
+
+    /**
+     * 批内有界并行解析元数据（EXIF / MediaMetadataRetriever），取代旧的单协程逐文件
+     * 串行解析。批粒度、批内文件顺序（map+awaitAll 保序）与单文件解析语义不变；
+     * 每批打一行耗时日志用于定位扫描瓶颈。
+     */
+    private suspend fun parseMediaBatch(
+        batch: List<Pair<File, MediaType>>,
+        cache: MediaMetadataCache?,
+        scanCache: ScanRunCache?,
+    ): List<MediaItem> {
+        val startedAt = SystemClock.elapsedRealtime()
+        val slots = Semaphore(SCAN_PARSE_CONCURRENCY.coerceIn(1,maxOf(1,batch.size)))
+        val parsed = coroutineScope {
+            batch.map { (file,type) ->
+                async(Dispatchers.IO) { slots.withPermit { buildMediaItem(file,type,cache,scanCache) } }
+            }.awaitAll()
+        }
+        val images = parsed.count { it.type == MediaType.IMAGE }
+        Log.i(
+            TAG,
+            "scan parse batch=${parsed.size} image=$images video=${parsed.size - images} " +
+                "parallel=$SCAN_PARSE_CONCURRENCY elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+        )
+        return parsed
     }
 
     /**
@@ -425,7 +459,8 @@ class MediaSource(
     private fun buildMediaItem(
         file: File,
         type: MediaType,
-        cache: MediaMetadataCache?
+        cache: MediaMetadataCache?,
+        scanCache: ScanRunCache? = null,
     ): MediaItem {
         val modifiedMs = file.lastModified()
 
@@ -446,19 +481,26 @@ class MediaSource(
 
         when (type) {
             MediaType.IMAGE -> {
-                // 单次 ExifInterface 读取拍摄时间 + 全部 EXIF 字段
-                val exif = runCatching { ExifInterface(file.absolutePath) }.getOrNull()
+                // GIF/BMP 不被 androidx ExifInterface 支持，打开只白付一次文件嗅探 I/O；
+                // 跳过后用等价的全默认值映射，字段级结果与真实解析完全一致。
+                val skipExif = file.extension.lowercase() in NO_EXIF_EXTENSIONS
+                val exif = if (skipExif) null
+                    else runCatching { ExifInterface(file.absolutePath) }.getOrNull()
                 capturedAt = if (cachedCapturedAtMs != null) {
                     Instant.ofEpochMilli(cachedCapturedAtMs)
                 } else {
                     exif?.let { readExifDateTimeFromInterface(it) } ?: Instant.ofEpochMilli(modifiedMs)
                 }
-                exifData = exif?.let { readAllExifData(it, file) } ?: emptyMap()
+                exifData = if (skipExif) {
+                    emptyExifDataForUnsupportedFormat(file)
+                } else {
+                    exif?.let { readAllExifData(it, file) } ?: emptyMap()
+                }
                 videoMeta = emptyMap()
             }
             MediaType.VIDEO -> {
-                // F2+F3: 单次 MediaMetadataRetriever 读取全部字段（带超时保护）
-                val meta = readVideoMetaWithTimeout(file)
+                // F2+F3: 单次 MediaMetadataRetriever 读取全部字段（带超时保护与扫描内黑名单）
+                val meta = readVideoMetaWithTimeout(file, scanCache = scanCache)
                 capturedAt = if (cachedCapturedAtMs != null) {
                     Instant.ofEpochMilli(cachedCapturedAtMs)
                 } else {
@@ -470,7 +512,7 @@ class MediaSource(
         }
 
         // 生成缩略图（仅返回已缓存路径，新文件交给 ThumbnailWorker 异步补齐）
-        val thumbPath = generateThumbnail(file, type)
+        val thumbPath = generateThumbnail(file, type, scanCache)
 
         return MediaItem(
             id = UUID.nameUUIDFromBytes(file.absolutePath.toByteArray()).toString(),
@@ -561,6 +603,25 @@ class MediaSource(
     }
 
     /**
+     * androidx ExifInterface 不支持格式的等价结果：属性全空（数值字段为默认 0，
+     * 其余为空串），mimeType 仍按扩展名推断——与真实解析一个无 EXIF 文件的输出逐字段一致。
+     */
+    private fun emptyExifDataForUnsupportedFormat(file: File): Map<String, String> = mapOf(
+        "width" to "0",
+        "height" to "0",
+        "make" to "",
+        "model" to "",
+        "aperture" to "",
+        "focalLength" to "",
+        "iso" to "",
+        "exposureTime" to "",
+        "orientation" to "0",
+        "latitude" to "",
+        "longitude" to "",
+        "mimeType" to mimeTypeForExtension(file.extension),
+    )
+
+    /**
      * 从已打开的 [ExifInterface] 实例提取拍摄时间（F2）。
      * 原实现 [readImageCapturedAt] 每次新建 ExifInterface，与 [readExifData] 重复打开同一文件。
      */
@@ -586,10 +647,20 @@ class MediaSource(
      *
      * 超时后返回 null，调用方用 file.lastModified() 兜底 capturedAt，width/height/duration
      * 由 MediaStore 数据补齐（mergeAndDeduplicate 中 MediaStore 优先）。
+     * 超时的文件会记入 [ScanRunCache] 黑名单：native 提取不可中断，同一扫描内
+     * 重复遇到该文件直接跳过，不再各吃满一次超时。
      *
      * @param timeoutMs 单文件元数据提取超时，默认 3 秒
      */
-    private fun readVideoMetaWithTimeout(file: File, timeoutMs: Long = 3000L): VideoMeta? {
+    private fun readVideoMetaWithTimeout(
+        file: File,
+        timeoutMs: Long = 3000L,
+        scanCache: ScanRunCache? = null,
+    ): VideoMeta? {
+        if (scanCache?.isTimedOutVideo(file.absolutePath) == true) {
+            Log.i(TAG, "视频元数据本扫描已超时过，直接跳过: ${file.absolutePath}")
+            return null
+        }
         val future = mediaMetaExecutor.submit<VideoMeta?> {
             runCatching {
                 val retriever = MediaMetadataRetriever()
@@ -612,6 +683,7 @@ class MediaSource(
         return runCatching { future.get(timeoutMs, TimeUnit.MILLISECONDS) }
             .getOrElse {
                 future.cancel(true)
+                scanCache?.markTimedOutVideo(file.absolutePath)
                 Log.w(TAG, "视频元数据提取超时(${timeoutMs}ms)，跳过: ${file.absolutePath}")
                 null
             }
@@ -624,9 +696,13 @@ class MediaSource(
      * 仅返回已缓存的缩略图路径，新文件的缩略图交给 [ThumbnailWorker] 异步补齐，
      * 避免阻塞扫描主流程。
      */
-    private fun generateThumbnail(file: File, @Suppress("UNUSED_PARAMETER") type: MediaType): String? {
+    private fun generateThumbnail(
+        file: File,
+        @Suppress("UNUSED_PARAMETER") type: MediaType,
+        scanCache: ScanRunCache? = null,
+    ): String? {
         val dir = thumbDir ?: return null
-        val webpThumb = File(dir, thumbnailCacheFileName(file, ThumbnailSpec.SIZE_GRID))
+        val webpThumb = File(dir, thumbnailCacheFileName(file, ThumbnailSpec.SIZE_GRID, scanCache))
         // 兼容历史仅按路径命名的缓存；新缓存的 key 包含修改时间和文件大小，
         // 可在源文件被替换后自动失效。
         val legacyWebpThumb = File(dir, "${file.absolutePath.hashCode()}.webp")
@@ -893,10 +969,18 @@ class MediaSource(
     }
 
     /** 以源身份、尺寸档和格式版本构成缓存文件名。 */
-    private fun thumbnailCacheFileName(file: File, sizeClass: String): String =
+    private fun thumbnailCacheFileName(
+        file: File,
+        sizeClass: String,
+        scanCache: ScanRunCache? = null,
+    ): String =
         thumbnailCacheFileName(
             ThumbnailIdentity.canonicalizePath(file.absolutePath),
-            ThumbnailSpec.sourceVersion(file.lastModified(), file.length(), fingerprintHead(file)),
+            ThumbnailSpec.sourceVersion(
+                file.lastModified(),
+                file.length(),
+                scanCache?.fingerprintHead(file.absolutePath) ?: fingerprintHead(file),
+            ),
             detectMediaType(file.name)?.name ?: ThumbnailIdentity.MEDIA_IMAGE,
             sizeClass,
             ThumbnailSpec.CACHE_FORMAT_VERSION,
@@ -980,6 +1064,12 @@ class MediaSource(
         val VIDEO_EXTS = setOf(
             "mp4", "mkv", "mov", "avi", "webm", "3gp", "m4v", "flv", "ts",
         )
+
+        /** androidx ExifInterface 不支持的图片扩展名：构造实例只会白付一次嗅探 I/O。 */
+        val NO_EXIF_EXTENSIONS = setOf("gif", "bmp")
+
+        /** 扫描批内元数据解析并行度，与 mediaMetaExecutor 池上限对齐。 */
+        const val SCAN_PARSE_CONCURRENCY = 4
 
         val DefaultIgnoreDirs = setOf(
             ".thumbnails", ".thumbnails2",

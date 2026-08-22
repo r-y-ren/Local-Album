@@ -34,8 +34,8 @@ class ThumbnailWorkerTest {
     @Test
     fun `thumbnail pump keeps fixed batch and run bound`() {
         assertEquals(8,ThumbnailWorker.BATCH_SIZE)
-        assertEquals(8,ThumbnailWorker.MAX_BATCHES_PER_RUN)
-        assertEquals(64,ThumbnailWorker.MAX_TASKS_PER_RUN)
+        assertEquals(64,ThumbnailWorker.MAX_BATCHES_PER_RUN)
+        assertEquals(512,ThumbnailWorker.MAX_TASKS_PER_RUN)
     }
 
     @Test
