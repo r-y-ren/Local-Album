@@ -75,7 +75,7 @@ data class AnalysisSchedulingProfile(
 /** 纯策略解析器，集中维护推荐阈值和不可绕过的安全边界。 */
 object AnalysisSchedulingResolver {
     internal const val MIN_THUMBNAIL_CONCURRENCY = 1
-    internal const val MAX_THUMBNAIL_CONCURRENCY = 4
+    internal const val MAX_THUMBNAIL_CONCURRENCY = 6
 
     internal fun clampThumbnailConcurrency(value: Int): Int =
         value.coerceIn(MIN_THUMBNAIL_CONCURRENCY, MAX_THUMBNAIL_CONCURRENCY)
@@ -124,19 +124,19 @@ object AnalysisSchedulingResolver {
                 allowFaceQualityParallel = true,
                 faceConcurrency = 2,
                 sceneConcurrency = 2,
-                thumbnailConcurrency = clampThumbnailConcurrency(2),
+                thumbnailConcurrency = clampThumbnailConcurrency(3),
                 qualityConcurrency = 4,
             )
-            AnalysisSchedulingMode.PERFORMANCE -> AnalysisSchedulingProfile(
-                requestedMode = requestedMode,
-                effectiveMode = protectedMode,
-                workerLeaseGroups = 4,
-                allowFaceQualityParallel = true,
-                faceConcurrency = 2,
-                sceneConcurrency = 2,
-                thumbnailConcurrency = clampThumbnailConcurrency(4),
-                qualityConcurrency = 4,
-            )
+        AnalysisSchedulingMode.PERFORMANCE -> AnalysisSchedulingProfile(
+            requestedMode = requestedMode,
+            effectiveMode = protectedMode,
+            workerLeaseGroups = 4,
+            allowFaceQualityParallel = true,
+            faceConcurrency = 2,
+            sceneConcurrency = 2,
+            thumbnailConcurrency = clampThumbnailConcurrency(6),
+            qualityConcurrency = 4,
+        )
         }
         return base.copy(protectionReason = protectionReason)
     }

@@ -8,6 +8,7 @@ import android.media.ThumbnailUtils
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Size
@@ -651,6 +652,9 @@ class MediaSource(
         val stagedPath: String,
         val signatureBefore: PhysicalSourceSignature,
         val signatureAfter: PhysicalSourceSignature,
+        val decodeMs: Long,
+        val encodeMs: Long,
+        val totalMs: Long,
     )
 
     /** 路径、类型、mtime、size、可用 dev/inode 与 fingerprint 的当前路径签名。 */
@@ -739,17 +743,22 @@ class MediaSource(
             ".staged_${taskId}_${leaseHash}_${identityHash}_${publicationNonce}.tmp",
         )
         return runCatching {
+            val startedAt = SystemClock.elapsedRealtime()
             val canonicalPath = identity.canonicalPath
             RandomAccessFile(canonicalPath,"r").use { source ->
                 val before = physicalFdSignature(source,canonicalPath,type) ?: error("source_missing")
                 check(sourceMatchesIdentity(before,identity)) { "source_changed_before_decode" }
                 val targetPx = ThumbnailSpec.targetPx(identity.sizeClass)
                 source.seek(0L)
+                val decodeStartedAt = SystemClock.elapsedRealtime()
                 val bitmap = when (type) {
                     MediaType.IMAGE -> decodeImageForTarget(source,targetPx)
                     MediaType.VIDEO -> decodeVideoFrameForTarget(source,targetPx)
                 } ?: error("decode_failed")
+                val decodeMs = SystemClock.elapsedRealtime() - decodeStartedAt
+                val encodeStartedAt = SystemClock.elapsedRealtime()
                 encodeThumbnail(bitmap,staged,identity.sizeClass)
+                val encodeMs = SystemClock.elapsedRealtime() - encodeStartedAt
                 check(staged.isFile && staged.length() > 0L && validateGeneratedThumbnail(staged)) {
                     "staging_validation_failed"
                 }
@@ -760,7 +769,10 @@ class MediaSource(
                 check(sourceSnapshotsAllowPublication(before,after,currentPath,identity)) {
                     "source_changed_after_decode"
                 }
-                GeneratedThumbnail(staged.absolutePath,before,after)
+                GeneratedThumbnail(
+                    staged.absolutePath,before,after,decodeMs,encodeMs,
+                    SystemClock.elapsedRealtime() - startedAt,
+                )
             }
         }.onFailure { staged.delete() }.getOrNull()
     }
@@ -870,9 +882,10 @@ class MediaSource(
         } else {
             bitmap
         }
+        // 缩略图是可再生缓存：原子 move + 读回校验已保证一致性，
+        // 逐文件 fsync 在慢闪存上单次可达数百毫秒，不值得为掉电窗口付这个代价。
         FileOutputStream(targetFile).use { out ->
             check(encoded.compress(Bitmap.CompressFormat.WEBP_LOSSY, 80, out))
-            out.fd.sync()
         }
         if (bitmap !== encoded) bitmap.recycle()
         encoded.recycle()

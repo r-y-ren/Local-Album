@@ -193,8 +193,8 @@ private fun AnalysisSchedulingMode.displayName(): String = when (this) {
 }
 
 private fun AnalysisSchedulingMode.description(recommended: AnalysisSchedulingMode): String = when (this) {
-    AnalysisSchedulingMode.AUTO -> "根据设备能力自动选择，当前推荐 ${recommended.displayName()}（对应 1 / 2 / 4 路缩略图）"
+    AnalysisSchedulingMode.AUTO -> "根据设备能力自动选择，当前推荐 ${recommended.displayName()}（对应 1 / 3 / 6 路缩略图）"
     AnalysisSchedulingMode.STABILITY -> "250 个媒体窗口，阶段串行，1 路缩略图，适合低内存或易发热设备"
-    AnalysisSchedulingMode.BALANCED -> "500–1000 个媒体窗口，安全组合并行，2 路缩略图"
-    AnalysisSchedulingMode.PERFORMANCE -> "使用最大安全窗口和并发，4 路缩略图，适合 12 GB 以上高性能设备"
+    AnalysisSchedulingMode.BALANCED -> "500–1000 个媒体窗口，安全组合并行，3 路缩略图"
+    AnalysisSchedulingMode.PERFORMANCE -> "使用最大安全窗口和并发，6 路缩略图，适合 12 GB 以上高性能设备"
 }

@@ -1,6 +1,8 @@
 package com.renyxin.localalbum.data.worker
 
 import com.renyxin.localalbum.data.repo.ThumbnailWakeDispatcher
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
@@ -31,36 +33,50 @@ class ThumbnailWorkerTest {
 
     @Test
     fun `thumbnail pump keeps fixed batch and run bound`() {
-        assertEquals(4,ThumbnailWorker.BATCH_SIZE)
+        assertEquals(8,ThumbnailWorker.BATCH_SIZE)
         assertEquals(8,ThumbnailWorker.MAX_BATCHES_PER_RUN)
-        assertEquals(32,ThumbnailWorker.MAX_TASKS_PER_RUN)
+        assertEquals(64,ThumbnailWorker.MAX_TASKS_PER_RUN)
     }
 
     @Test
-    fun `batch execution waves follow dynamic thumbnail concurrency`() {
-        assertEquals(
-            listOf(listOf(1),listOf(2),listOf(3),listOf(4)),
-            ThumbnailWorker.executionWaves(listOf(1,2,3,4),1),
-        )
-        assertEquals(
-            listOf(listOf(1,2),listOf(3,4)),
-            ThumbnailWorker.executionWaves(listOf(1,2,3,4),2),
-        )
-        assertEquals(
-            listOf(listOf(1,2,3,4)),
-            ThumbnailWorker.executionWaves(listOf(1,2,3,4),4),
-        )
+    fun `concurrent pool runs at most the requested concurrency and keeps order`() = runTest {
+        var running = 0
+        var peak = 0
+        val results = ThumbnailWorker.mapWithConcurrency(listOf(1,2,3,4,5),2) { item ->
+            running += 1
+            peak = maxOf(peak,running)
+            delay(100)
+            running -= 1
+            item * 10
+        }
+        assertEquals(listOf(10,20,30,40,50),results)
+        assertEquals(2,peak)
     }
 
     @Test
-    fun `batch execution clamps illegal concurrency to bitmap safe range`() {
+    fun `concurrent pool clamps illegal concurrency to serial`() = runTest {
+        var running = 0
+        var peak = 0
+        val results = ThumbnailWorker.mapWithConcurrency(listOf(1,2,3),0) { item ->
+            running += 1
+            peak = maxOf(peak,running)
+            delay(10)
+            running -= 1
+            item
+        }
+        assertEquals(listOf(1,2,3),results)
+        assertEquals(1,peak)
+    }
+
+    @Test
+    fun `concurrent pool tolerates empty batch and surplus concurrency`() = runTest {
         assertEquals(
-            listOf(listOf(1),listOf(2),listOf(3),listOf(4)),
-            ThumbnailWorker.executionWaves(listOf(1,2,3,4),0),
+            emptyList<Int>(),
+            ThumbnailWorker.mapWithConcurrency<Int,Int>(emptyList(),4) { it },
         )
         assertEquals(
-            listOf(listOf(1,2,3,4)),
-            ThumbnailWorker.executionWaves(listOf(1,2,3,4),Int.MAX_VALUE),
+            listOf(1,2),
+            ThumbnailWorker.mapWithConcurrency(listOf(1,2),Int.MAX_VALUE) { it },
         )
     }
 

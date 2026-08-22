@@ -8,7 +8,7 @@ import org.junit.Test
 
 class AnalysisSchedulingResolverTest {
     @Test
-    fun `concrete modes map thumbnail concurrency to one two and four`() {
+    fun `concrete modes map thumbnail concurrency to one three and six`() {
         val capabilities = capabilities(totalGb = 12, cores = 8)
 
         assertEquals(
@@ -17,12 +17,12 @@ class AnalysisSchedulingResolverTest {
                 .thumbnailConcurrency,
         )
         assertEquals(
-            2,
+            3,
             AnalysisSchedulingResolver.resolve(AnalysisSchedulingMode.BALANCED,capabilities)
                 .thumbnailConcurrency,
         )
         assertEquals(
-            4,
+            6,
             AnalysisSchedulingResolver.resolve(AnalysisSchedulingMode.PERFORMANCE,capabilities)
                 .thumbnailConcurrency,
         )
@@ -54,9 +54,9 @@ class AnalysisSchedulingResolverTest {
 
         assertEquals(AnalysisSchedulingMode.BALANCED, sixGb.effectiveMode)
         assertEquals(2, sixGb.workerLeaseGroups)
-        assertEquals(2, sixGb.thumbnailConcurrency)
+        assertEquals(3, sixGb.thumbnailConcurrency)
         assertEquals(4, eightGb.workerLeaseGroups)
-        assertEquals(2, eightGb.thumbnailConcurrency)
+        assertEquals(3, eightGb.thumbnailConcurrency)
         assertTrue(eightGb.allowFaceQualityParallel)
     }
 
@@ -69,7 +69,7 @@ class AnalysisSchedulingResolverTest {
 
         assertEquals(AnalysisSchedulingMode.PERFORMANCE, profile.effectiveMode)
         assertEquals(4, profile.workerLeaseGroups)
-        assertEquals(4, profile.thumbnailConcurrency)
+        assertEquals(6, profile.thumbnailConcurrency)
         assertEquals(1, profile.semanticConcurrency)
         assertEquals(1, profile.ocrConcurrency)
     }
@@ -107,8 +107,8 @@ class AnalysisSchedulingResolverTest {
     fun `thumbnail concurrency safety clamp cannot exceed bitmap boundary`() {
         assertEquals(1, AnalysisSchedulingResolver.clampThumbnailConcurrency(Int.MIN_VALUE))
         assertEquals(1, AnalysisSchedulingResolver.clampThumbnailConcurrency(0))
-        assertEquals(4, AnalysisSchedulingResolver.clampThumbnailConcurrency(5))
-        assertEquals(4, AnalysisSchedulingResolver.clampThumbnailConcurrency(Int.MAX_VALUE))
+        assertEquals(5, AnalysisSchedulingResolver.clampThumbnailConcurrency(5))
+        assertEquals(6, AnalysisSchedulingResolver.clampThumbnailConcurrency(Int.MAX_VALUE))
     }
 
     private fun capabilities(

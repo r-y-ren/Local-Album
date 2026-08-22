@@ -253,6 +253,7 @@ dependencies {
 
     add("testImplementation", libs.junit)
     add("testImplementation", libs.kotlin.test)
+    add("testImplementation", libs.kotlinx.coroutines.test)
     add("testImplementation", libs.json)
     add("testImplementation", libs.mockito.core)
     add("testImplementation", libs.opencv.desktop)

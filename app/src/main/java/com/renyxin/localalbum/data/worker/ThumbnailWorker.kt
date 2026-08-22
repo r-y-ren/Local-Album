@@ -1,6 +1,7 @@
 package com.renyxin.localalbum.data.worker
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkManager
@@ -31,6 +32,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 /** 固定双 lane pump；任务 level、延迟和运行租约全部由 Room 保存。 */
@@ -116,26 +119,23 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
                     }
                     if (tasks.isEmpty()) false else {
                         try {
-                            val taskResults = coroutineScope {
-                                val results = ArrayList<TaskProcessingResult>(tasks.size)
-                                executionWaves(tasks,thumbnailConcurrency).forEach { wave ->
-                                    results += wave.map { task ->
-                                        async(Dispatchers.IO) {
-                                            val error = processTask(task,leaseToken,database,mediaSource)
-                                            if (error == null) {
-                                                TaskProcessingResult(processed=1,failed=0)
-                                            } else {
-                                                val completed = System.currentTimeMillis()
-                                                dao.markFailed(
-                                                    task.taskId,leaseToken,error.take(MAX_ERROR_LENGTH),
-                                                    completed + retryDelayMs(task.attemptCount),MAX_ATTEMPTS,completed,
-                                                )
-                                                TaskProcessingResult(processed=0,failed=1)
-                                            }
-                                        }
-                                    }.awaitAll()
+                            // 信号量并发池取代按并发数切波等齐：慢任务（如视频帧提取）
+                            // 不再拖住同批其他任务；coroutineScope 仍保证全部子协程
+                            // 结束后才返回，租约清理语义与波模型一致。
+                            val taskResults = mapWithConcurrency(tasks,thumbnailConcurrency) { task ->
+                                withContext(Dispatchers.IO) {
+                                    val error = processTask(task,laneId,leaseToken,database,mediaSource)
+                                    if (error == null) {
+                                        TaskProcessingResult(processed=1,failed=0)
+                                    } else {
+                                        val completed = System.currentTimeMillis()
+                                        dao.markFailed(
+                                            task.taskId,leaseToken,error.take(MAX_ERROR_LENGTH),
+                                            completed + retryDelayMs(task.attemptCount),MAX_ATTEMPTS,completed,
+                                        )
+                                        TaskProcessingResult(processed=0,failed=1)
+                                    }
                                 }
-                                results
                             }
                             val summary = summarizeBatch(taskResults)
                             processed += summary.processed
@@ -223,18 +223,38 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
     /** null 成功；错误摘要不含隐私路径。 */
     private suspend fun processTask(
         task: ThumbnailTaskEntity,
+        laneId: String,
         leaseToken: String,
         database: AppDatabase,
         mediaSource: MediaSource,
     ): String? {
+        val taskStartedAt = SystemClock.elapsedRealtime()
+        var decodeMs = 0L
+        var encodeMs = 0L
+        var installMs = 0L
+        var publishMs = 0L
+        // 每张一行耗时分解，用于定位慢在解码、编码还是发布；不含隐私路径。
+        fun logTask(outcome: String) {
+            Log.i(
+                TAG,
+                "task lane=$laneId type=${task.mediaType} size=${task.sizeClass} " +
+                    "total=${SystemClock.elapsedRealtime() - taskStartedAt}ms " +
+                    "decode=${decodeMs}ms encode=${encodeMs}ms " +
+                    "install=${installMs}ms publish=${publishMs}ms outcome=$outcome",
+            )
+        }
         val identity = runCatching {
             ThumbnailIdentity(
                 task.filePath,task.mediaType,task.sourceVersion,task.sizeClass,task.formatVersion,
             )
-        }.getOrElse { return "invalid_identity" }
+        }.getOrElse {
+            logTask("invalid_identity")
+            return "invalid_identity"
+        }
         val media = database.mediaDao().getByFilePathLight(task.filePath)
         if (media == null || media.isTrashed || media.mediaType.name != task.mediaType) {
             database.thumbnailTaskDao().supersedeClaimedTask(task.taskId,leaseToken)
+            logTask("superseded")
             return null
         }
         val cacheDao = database.thumbnailCacheDao()
@@ -243,9 +263,12 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
             identity.sizeClass,identity.formatVersion,
         )
         if (existing != null && File(existing.path).isFile && File(existing.path).length() > 0L) {
+            val publishStartedAt = SystemClock.elapsedRealtime()
             val publication = database.thumbnailTaskDao().publishGeneratedThumbnail(
                 task,leaseToken,existing.copy(lastAccessAt=System.currentTimeMillis()),System.currentTimeMillis(),
             )
+            publishMs = SystemClock.elapsedRealtime() - publishStartedAt
+            logTask("cache_hit")
             return if (publication == ThumbnailPublicationResult.LEASE_LOST) null else null
         }
         val publicationNonce = UUID.randomUUID().toString()
@@ -256,12 +279,17 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
                 File(identity.canonicalPath),MediaType.valueOf(identity.mediaType),identity,
                 task.taskId,leaseToken,publicationNonce,
             ) ?: error("decode_or_source_validation_failed")
+            decodeMs = generated.decodeMs
+            encodeMs = generated.encodeMs
             staged = generated.stagedPath
+            val installStartedAt = SystemClock.elapsedRealtime()
             installed = mediaSource.installGeneratedThumbnail(
                 generated.stagedPath,identity,task.taskId,leaseToken,publicationNonce,
             ) ?: error("atomic_install_failed")
+            installMs = SystemClock.elapsedRealtime() - installStartedAt
             val final = File(requireNotNull(installed))
             val timestamp = System.currentTimeMillis()
+            val publishStartedAt = SystemClock.elapsedRealtime()
             val result = database.thumbnailTaskDao().publishGeneratedThumbnail(
                 task,leaseToken,
                 ThumbnailCacheEntryEntity(
@@ -272,6 +300,7 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
                 ),
                 timestamp,
             )
+            publishMs = SystemClock.elapsedRealtime() - publishStartedAt
             if (result != ThumbnailPublicationResult.PUBLISHED) {
                 // final 是本 lease/private nonce 唯一拥有；失败删除不会触碰任何其他发布者。
                 final.delete()
@@ -287,7 +316,9 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
             }
         }.exceptionOrNull()
         if (failure is CancellationException) throw failure
-        return failure?.let { it.message ?: it::class.java.simpleName }
+        val outcome = failure?.let { it.message ?: it::class.simpleName }
+        logTask(outcome ?: "ok")
+        return outcome
     }
 
     internal data class TaskProcessingResult(val processed: Int, val failed: Int)
@@ -297,7 +328,7 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
         const val KEY_LANE_ID = "thumbnail_lane_id"
         const val KEY_DISPATCH_REVISION = "thumbnail_dispatch_revision"
         const val KEY_DISPATCH_TOKEN = "thumbnail_dispatch_token"
-        internal const val BATCH_SIZE = 4
+        internal const val BATCH_SIZE = 8
         internal const val MAX_BATCHES_PER_RUN = 8
         internal const val MAX_TASKS_PER_RUN = BATCH_SIZE * MAX_BATCHES_PER_RUN
         private const val MAX_ATTEMPTS = 4
@@ -308,8 +339,17 @@ class ThumbnailWorker(context: Context, params: WorkerParameters) : CoroutineWor
         internal fun retryDelayMs(attemptCount: Int): Long =
             60_000L * (1L shl (attemptCount - 1).coerceIn(0,10))
 
-        internal fun <T> executionWaves(tasks: List<T>, concurrency: Int): List<List<T>> =
-            tasks.chunked(concurrency.coerceIn(1,BATCH_SIZE))
+        /** 同时运行的解码任务上限；非法并发值钳到 [1, max(1, tasks)]。 */
+        internal suspend fun <T, R> mapWithConcurrency(
+            tasks: List<T>,
+            concurrency: Int,
+            block: suspend (T) -> R,
+        ): List<R> = coroutineScope {
+            val slots = Semaphore(concurrency.coerceIn(1,maxOf(1,tasks.size)))
+            tasks.map { task ->
+                async { slots.withPermit { block(task) } }
+            }.awaitAll()
+        }
 
         internal fun summarizeBatch(results: List<TaskProcessingResult>): TaskProcessingResult =
             TaskProcessingResult(
