@@ -12,6 +12,7 @@ import ai.onnxruntime.OrtSession
 import com.renyxin.localalbum.core.plugin.PluginManifest
 import com.renyxin.localalbum.core.plugin.capability.FaceProvider
 import com.renyxin.localalbum.core.plugin.extension.FaceAligner
+import com.renyxin.localalbum.core.plugin.extension.FaceAlignmentMath
 import com.renyxin.localalbum.core.plugin.model.ModelManager
 import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import kotlinx.coroutines.Dispatchers
@@ -38,8 +39,33 @@ class InsightFaceProvider(
         private const val DET_NMS_THRESHOLD = 0.4f
         private const val MAX_FACES_PER_IMAGE = 8
 
-        /** 是否启用 OpenCV 5 关键点对齐（warpAffine）；见 detectFaces 内注释，当前因原生堆损坏禁用。 */
-        private const val USE_LANDMARK_ALIGNMENT = false
+        /** 是否启用 5 关键点对齐；当前实现为纯 Kotlin 数学 + Canvas 重采样（无 OpenCV）。 */
+        private const val USE_LANDMARK_ALIGNMENT = true
+
+        /**
+         * 用 [android.graphics.Matrix]/[Canvas] 执行相似变换重采样（双线性），黑底对应
+         * OpenCV 时代的 BORDER_CONSTANT 0。等价于 warpAffine(INTER_LINEAR, borderValue=0)。
+         */
+        private fun alignBitmap(source: Bitmap, similarity: FloatArray, size: Int): Bitmap {
+            val a = similarity[0]
+            val b = similarity[1]
+            val tx = similarity[2]
+            val ty = similarity[3]
+            val dst = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(dst)
+            canvas.drawColor(android.graphics.Color.BLACK)
+            val matrix = android.graphics.Matrix()
+            matrix.setValues(
+                floatArrayOf(
+                    a, -b, tx,
+                    b, a, ty,
+                    0f, 0f, 1f,
+                ),
+            )
+            val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+            canvas.drawBitmap(source, matrix, paint)
+            return dst
+        }
     }
 
     override val providerId = "model:insightface"
@@ -108,28 +134,27 @@ class InsightFaceProvider(
                     // ArcFace 嵌入必须基于 5 关键点对齐到 112×112（ReActor ArcFaceONNX.get 的 norm_crop）。
                     // 临时 bitmap 交由 GC 回收：显式 recycle 会与 ART 原生回收并发释放同一内存，
                     // 在大批量分析时曾触发 SIGBUS (BUS_ADRALN) 原生崩溃。
-                    // OpenCV 关键点对齐在 OnePlus PLC110/Android 16 上会破坏原生堆：
-                    // 批量分析数分钟内必现 SIGSEGV/SIGBUS，崩溃点漂移于 Bitmap 生命周期
-                    // （recycle/getInfo/allocate/Bitmap_destruct），受污染指针含跨进程一致的
-                    // UTF-16 残留。二分验证：禁用本路径（保留全部 ONNX 推理）后长时间
-                    // 零崩溃，故改走纯框架 cropFace。待 OpenCV 修复或替换为纯 Kotlin
-                    // 对齐实现后再恢复。
+                    // 5 关键点对齐（ArcFace 精度必需）：相似变换由纯 Kotlin 最小二乘求解
+                    // （FaceAlignmentMath，与 insightface norm_crop 同法），重采样用框架
+                    // Matrix/Canvas 双线性插值。不再走 OpenCV——其 Utils/Geometry 原生路径
+                    // 在本机型（OnePlus PLC110/Android 16）批量分析时破坏原生堆，崩溃点
+                    // 漂移于 Bitmap 生命周期（recycle/getInfo/allocate/Bitmap_destruct）。
+                    // 数值等价性由 FaceAlignmentMathTest 与桌面版 OpenCV 对拍保障。
                     val faceBitmap = if (USE_LANDMARK_ALIGNMENT && face.landmarks != null) {
-                        val lmkPx = FaceAligner.denormalizeLandmarks(
+                        val lmkPx = FaceAlignmentMath.denormalizeLandmarks(
                             face.landmarks,
                             original.width,
                             original.height,
                         )
-                        val affineM = FaceAligner.computeAffineMatrix(lmkPx, REC_INPUT_SIZE)
-                        try {
-                            if (!affineM.empty()) {
-                                FaceAligner.warpAffine(original, affineM, REC_INPUT_SIZE)
-                            } else {
-                                null
-                            }
-                        } finally {
-                            affineM.release()
-                        } ?: cropFace(original, face.box)
+                        val similarity = FaceAlignmentMath.estimateSimilarity(
+                            lmkPx,
+                            FaceAlignmentMath.ARCFACE_TEMPLATE_112,
+                        )
+                        if (similarity != null) {
+                            alignBitmap(original, similarity, REC_INPUT_SIZE)
+                        } else {
+                            cropFace(original, face.box)
+                        }
                     } else {
                         cropFace(original, face.box)
                     }

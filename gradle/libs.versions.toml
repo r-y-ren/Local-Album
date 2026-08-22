@@ -45,6 +45,8 @@ junit = "4.13.2"
 json = "20240303"
 mockito = "5.5.0"
 androidxTestExtJunit = "1.2.1"
+# 仅 JVM 单测使用：桌面版 OpenCV，用于与纯 Kotlin 对齐数学对拍验证等价性
+opencvDesktop = "4.9.0-0"
 
 [libraries]
 # ── AndroidX 基础 ──
@@ -107,6 +109,7 @@ junit = { group = "junit", name = "junit", version.ref = "junit" }
 json = { group = "org.json", name = "json", version.ref = "json" }
 mockito-core = { group = "org.mockito", name = "mockito-core", version.ref = "mockito" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExtJunit" }
+opencv-desktop = { group = "org.openpnp", name = "opencv", version.ref = "opencvDesktop" }
 
 [bundles]
 # 语义与迁移前逐条 add(...) 声明完全一致，仅为便利分组

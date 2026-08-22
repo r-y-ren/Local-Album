@@ -34,15 +34,12 @@ object FaceAligner {
 
     /**
      * ArcFace 官方 112×112 标准 5 点模板（左眼、右眼、鼻、嘴左、嘴右）。
-     * 来源：insightface/python-package/insightface/utils/face_align.py
+     * 数值单一事实源在 [FaceAlignmentMath.ARCFACE_TEMPLATE_112]，此处派生成 OpenCV Point。
      */
-    private val ARCFACE_TEMPLATE_112 = arrayOf(
-        Point(38.2946, 51.6963),  // 左眼
-        Point(73.5318, 51.5014),  // 右眼
-        Point(56.0252, 71.7366),  // 鼻尖
-        Point(41.5493, 92.3655),  // 嘴左
-        Point(70.7299, 92.2041),  // 嘴右
-    )
+    private val ARCFACE_TEMPLATE_112: Array<Point> =
+        FaceAlignmentMath.ARCFACE_TEMPLATE_112.toList().chunked(2).map { (x, y) ->
+            Point(x.toDouble(), y.toDouble())
+        }.toTypedArray()
 
     /**
      * Inswapper 128×128 模板：参照 ReActor inswap.py:INSwapper.get，
