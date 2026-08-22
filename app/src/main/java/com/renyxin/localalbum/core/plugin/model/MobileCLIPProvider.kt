@@ -103,7 +103,6 @@ class MobileCLIPProvider(
         try {
             val resized = Bitmap.createScaledBitmap(bitmap, IMAGE_SIZE, IMAGE_SIZE, true)
             val inputBuffer = preprocessImage(resized)
-            if (resized != bitmap) resized.recycle()
 
             val outputArray = Array(1) { FloatArray(EMBEDDING_DIM) }
             // 通过 Interpreter 池获取线程安全实例，支持文件级并发推理
@@ -115,8 +114,6 @@ class MobileCLIPProvider(
         } catch (e: Exception) {
             Log.w(TAG, "MobileCLIP 图像嵌入失败: ${file.name}", e)
             null
-        } finally {
-            if (!bitmap.isRecycled) bitmap.recycle()
         }
     }
 

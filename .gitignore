@@ -76,3 +76,4 @@ app/src/full/assets/models/PP-OCRv5_mobile_rec_infer/*.onnx
 app/src/full/assets/models/PP-OCRv6_small_det_infer/*.onnx
 # 例外：MobileNetV3 场景分类模型随包打包（~21MB），需纳入版本控制
 !app/src/main/assets/models/MobileNet-v3-Large.tflite
+.zcode/

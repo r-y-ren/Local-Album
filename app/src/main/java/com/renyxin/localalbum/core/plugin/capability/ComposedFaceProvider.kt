@@ -38,31 +38,26 @@ class ComposedFaceProvider(
         val bitmap = decodeBitmap(file) ?: return emptyList()
         val result = mutableListOf<FaceProvider.DetectedFace>()
 
-        try {
-            val w = bitmap.width.toFloat()
-            val h = bitmap.height.toFloat()
+        val w = bitmap.width.toFloat()
+        val h = bitmap.height.toFloat()
 
-            for (box in boxes) {
-                // Step 3: 裁剪人脸区域
-                val left = (box.left * w).toInt().coerceAtLeast(0)
-                val top = (box.top * h).toInt().coerceAtLeast(0)
-                val right = (box.right * w).toInt().coerceAtMost(bitmap.width)
-                val bottom = (box.bottom * h).toInt().coerceAtMost(bitmap.height)
+        for (box in boxes) {
+            // Step 3: 裁剪人脸区域
+            val left = (box.left * w).toInt().coerceAtLeast(0)
+            val top = (box.top * h).toInt().coerceAtLeast(0)
+            val right = (box.right * w).toInt().coerceAtMost(bitmap.width)
+            val bottom = (box.bottom * h).toInt().coerceAtMost(bitmap.height)
 
-                if (right <= left || bottom <= top) continue
+            if (right <= left || bottom <= top) continue
 
-                val crop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
+            val crop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
 
-                // Step 4: 提取嵌入
-                val embedding = embedder.embed(crop)
-                if (crop != bitmap) crop.recycle()
+            // Step 4: 提取嵌入
+            val embedding = embedder.embed(crop)
 
-                if (embedding != null) {
-                    result.add(FaceProvider.DetectedFace(box = box, embedding = embedding))
-                }
+            if (embedding != null) {
+                result.add(FaceProvider.DetectedFace(box = box, embedding = embedding))
             }
-        } finally {
-            if (!bitmap.isRecycled) bitmap.recycle()
         }
 
         return result

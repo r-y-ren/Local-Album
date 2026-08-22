@@ -263,8 +263,6 @@ class Eva02ClipProvider(
         } catch (e: Exception) {
             Log.w(TAG, "EVA02 图像嵌入失败: ${file.name}", e)
             null
-        } finally {
-            if (!bitmap.isRecycled) bitmap.recycle()
         }
     }
 
@@ -355,7 +353,6 @@ class Eva02ClipProvider(
             }
         }
         buf.rewind()
-        if (cropped !== bitmap) cropped.recycle()
         return buf
     }
 

@@ -127,7 +127,6 @@ class GLMOcrProvider(
             val imageFeatures = modelManager.withInterpreter(ENCODER_MODEL_ID) { enc ->
                 encodeImage(resized, enc)
             }
-            if (resized != bitmap) resized.recycle()
 
             val text = modelManager.withInterpreter(DECODER_MODEL_ID) { dec ->
                 decodeText(imageFeatures, dec)
@@ -143,7 +142,6 @@ class GLMOcrProvider(
             Log.w(TAG, "GLM-OCR 推理失败", e)
             OcrProvider.OcrResult("[OCR 推理异常: ${e.message}]", averageConfidence = 0f)
         } finally {
-            if (!bitmap.isRecycled) bitmap.recycle()
             modelManager.unregisterConsumer(ENCODER_MODEL_ID, "GLMOcrProvider")
             modelManager.unregisterConsumer(DECODER_MODEL_ID, "GLMOcrProvider")
         }

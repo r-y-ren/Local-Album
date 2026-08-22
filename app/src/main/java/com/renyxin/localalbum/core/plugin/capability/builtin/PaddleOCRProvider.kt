@@ -162,12 +162,9 @@ class PaddleOCRProvider(
         return try {
             val resized = Bitmap.createScaledBitmap(bitmap, DET_INPUT_SIZE, DET_INPUT_SIZE, true)
             val buf = preprocessDet(resized)
-            if (resized != bitmap) resized.recycle()
 
             val input = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, DET_INPUT_SIZE.toLong(), DET_INPUT_SIZE.toLong()))
-            android.util.Log.i("CrashDebug", ">> PaddleOCR det session.run (线程=${Thread.currentThread().name})")
             val result = session.run(mapOf(session.inputNames.iterator().next() to input))
-            android.util.Log.i("CrashDebug", "<< PaddleOCR det session.run 完成")
             input.close()
 
             // 输出契约为 [1, 1, H, W]。逐层检查而非强制转换，避免模型文件或
@@ -265,12 +262,9 @@ class PaddleOCRProvider(
         return try {
             val resized = Bitmap.createScaledBitmap(crop, REC_IMG_W, REC_IMG_H, true)
             val buf = preprocessRec(resized)
-            if (resized != crop) resized.recycle()
 
             val input = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, REC_IMG_H.toLong(), REC_IMG_W.toLong()))
-            android.util.Log.i("CrashDebug", ">> PaddleOCR rec session.run (线程=${Thread.currentThread().name})")
             val result = session.run(mapOf(session.inputNames.iterator().next() to input))
-            android.util.Log.i("CrashDebug", "<< PaddleOCR rec session.run 完成")
             input.close()
 
             // 输出契约为 [1, W, C]。逐层验证数组层级和元素类型。

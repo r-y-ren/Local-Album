@@ -69,7 +69,6 @@ class ArcFaceProvider(
         return try {
             val resized = Bitmap.createScaledBitmap(faceCrop, INPUT_SIZE, INPUT_SIZE, true)
             val buf = preprocess(resized)
-            if (resized != faceCrop) resized.recycle()
 
             // 通过 session 池获取独立 session（独立 intra-op 线程池），实现多核并行
             modelManager.withOnnxSession(MODEL_ID) { session ->

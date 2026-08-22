@@ -106,8 +106,6 @@ class OcrProvider(private val context: Context) {
                 )
             } catch (e: Exception) {
                 null
-            } finally {
-                if (!bitmap.isRecycled) bitmap.recycle()
             }
         }
 

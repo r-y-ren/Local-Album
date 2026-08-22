@@ -121,7 +121,6 @@ class MobileNetSceneProvider(
             Log.w(TAG, "MobileNet 推理失败: ${file.name}", e)
             fallbackClassify(file)
         } finally {
-            if (!bitmap.isRecycled) bitmap.recycle()
             modelManager.unregisterConsumer(MODEL_ID, "MobileNetSceneProvider")
         }
     }
@@ -149,7 +148,6 @@ class MobileNetSceneProvider(
 
         val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
         resized.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
-        if (resized != bitmap) resized.recycle()
 
         for (pixel in pixels) {
             floatBuffer.put(((pixel shr 16) and 0xFF) / 255.0f) // R
@@ -188,7 +186,6 @@ class MobileNetSceneProvider(
         val h = bitmap.height
         val pixels = IntArray(w * h)
         bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-        bitmap.recycle()
 
         var sumR = 0L
         var sumG = 0L

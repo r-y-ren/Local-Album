@@ -103,7 +103,8 @@ class InsightFaceProvider(
                 // 通过 session 池获取独立 rec session（独立 intra-op 线程池），实现多核并行
                 val emb = modelManager.withOnnxSession(REC_MODEL_ID) { recSession ->
                     // ArcFace 嵌入必须基于 5 关键点对齐到 112×112（ReActor ArcFaceONNX.get 的 norm_crop）。
-                    // Every temporary face bitmap is owned and recycled inside this session block.
+                    // 临时 bitmap 交由 GC 回收：显式 recycle 会与 ART 原生回收并发释放同一内存，
+                    // 在大批量分析时曾触发 SIGBUS (BUS_ADRALN) 原生崩溃。
                     val faceBitmap = if (face.landmarks != null) {
                         val lmkPx = FaceAligner.denormalizeLandmarks(
                             face.landmarks,
@@ -126,20 +127,14 @@ class InsightFaceProvider(
                     if (faceBitmap == null) {
                         FloatArray(EMBEDDING_DIM)
                     } else {
-                        try {
-                            extractEmbedding(faceBitmap, recSession) ?: FloatArray(EMBEDDING_DIM)
-                        } finally {
-                            if (faceBitmap !== original && !faceBitmap.isRecycled) faceBitmap.recycle()
-                        }
+                        extractEmbedding(faceBitmap, recSession) ?: FloatArray(EMBEDDING_DIM)
                     }
                 }
                 results.add(FaceProvider.DetectedFace(face.box, emb, face.landmarks))
             }
             results
         } finally {
-            original?.let { bitmap ->
-                if (!bitmap.isRecycled) bitmap.recycle()
-            }
+            // 不显式 recycle original：避免与 ART 原生回收竞态（SIGBUS 闪退根源）。
             modelManager.unregisterConsumer(REC_MODEL_ID, consumerId)
             modelManager.unregisterConsumer(DET_MODEL_ID, consumerId)
         }
@@ -163,16 +158,12 @@ class InsightFaceProvider(
             val canvas = android.graphics.Canvas(padded)
             canvas.drawColor(android.graphics.Color.BLACK)
             canvas.drawBitmap(scaled, 0f, 0f, null)
-            if (scaled != bitmap) scaled.recycle()
 
             val buf = preprocessDetection(padded)
-            padded.recycle()
 
             val inputName = session.inputNames.iterator().next()
             val tensor = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, DET_INPUT_SIZE.toLong(), DET_INPUT_SIZE.toLong()))
-            Log.i("CrashDebug", ">> InsightFace detect session.run (线程=${Thread.currentThread().name})")
             val result = session.run(mapOf(inputName to tensor))
-            Log.i("CrashDebug", "<< InsightFace detect session.run 完成")
             tensor.close()
 
             // SCRFD det_10g 输出 9 个张量：score/bbox/kps × stride 8/16/32。
@@ -194,13 +185,10 @@ class InsightFaceProvider(
         return try {
             val resized = Bitmap.createScaledBitmap(faceBitmap, REC_INPUT_SIZE, REC_INPUT_SIZE, true)
             val buf = preprocessRecognition(resized)
-            if (resized != faceBitmap) resized.recycle()
 
             val inputName = session.inputNames.iterator().next()
             val tensor = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, REC_INPUT_SIZE.toLong(), REC_INPUT_SIZE.toLong()))
-            Log.i("CrashDebug", ">> InsightFace rec session.run (线程=${Thread.currentThread().name})")
             val result = session.run(mapOf(inputName to tensor))
-            Log.i("CrashDebug", "<< InsightFace rec session.run 完成")
             tensor.close()
 
             val firstOutput = result.iterator().let { iterator ->
