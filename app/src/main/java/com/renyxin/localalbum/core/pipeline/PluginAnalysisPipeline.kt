@@ -217,7 +217,6 @@ class PluginAnalysisPipeline(
     ) {
         val stageStart = System.currentTimeMillis()
         val startPssKb = currentPssKb()
-        Log.i("CrashDebug", "=== 阶段开始 [${stage.stageId}] ${stage.displayName} (依赖=${stage.dependencies}) ===")
         logStageStart(stage)
 
         _stageProgress.emit(

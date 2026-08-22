@@ -353,7 +353,11 @@ class PaddleOCRProvider(
 
     private fun decodeBitmap(file: File): Bitmap? {
         return try {
-            BitmapFactory.decodeFile(file.absolutePath)
+            // 16-bit PNG 会解码为 RGBA_F16，强制 8 位（详见 InsightFaceProvider）
+            BitmapFactory.decodeFile(
+                file.absolutePath,
+                BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 },
+            )
         } catch (_: Exception) { null }
     }
 }

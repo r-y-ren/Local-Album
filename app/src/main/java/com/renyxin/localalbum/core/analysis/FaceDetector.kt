@@ -279,7 +279,11 @@ class FaceDetector(
         while (srcW / sample > MAX_INPUT_DIM || srcH / sample > MAX_INPUT_DIM) {
             sample *= 2
         }
-        val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+        // 16-bit PNG 会解码为 RGBA_F16，强制 8 位（详见 InsightFaceProvider）
+        val decodeOpts = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
         return BitmapFactory.decodeFile(file.absolutePath, decodeOpts)
     }
 

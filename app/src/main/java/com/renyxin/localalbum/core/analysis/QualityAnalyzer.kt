@@ -58,6 +58,8 @@ class QualityAnalyzer {
         val sampleSize = calculateSampleSize(srcWidth, srcHeight, MAX_DIMENSION)
         val opts = BitmapFactory.Options().apply {
             inSampleSize = sampleSize
+            // 16-bit PNG 会解码为 RGBA_F16，强制 8 位（详见 InsightFaceProvider）
+            inPreferredConfig = Bitmap.Config.ARGB_8888
         }
         val bitmap = BitmapFactory.decodeFile(file.absolutePath, opts)
         if (bitmap == null) {
@@ -102,6 +104,7 @@ class QualityAnalyzer {
     suspend fun quickBlurCheck(file: File): Boolean = withContext(Dispatchers.IO) {
         val opts = BitmapFactory.Options().apply {
             inSampleSize = 8 // 极速采样
+            inPreferredConfig = Bitmap.Config.ARGB_8888
         }
         val bitmap = BitmapFactory.decodeFile(file.absolutePath, opts) ?: return@withContext false
         val width = bitmap.width

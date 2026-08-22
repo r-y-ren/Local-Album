@@ -37,6 +37,9 @@ class InsightFaceProvider(
         private const val DET_CONF_THRESHOLD = 0.5f
         private const val DET_NMS_THRESHOLD = 0.4f
         private const val MAX_FACES_PER_IMAGE = 8
+
+        /** 是否启用 OpenCV 5 关键点对齐（warpAffine）；见 detectFaces 内注释，当前因原生堆损坏禁用。 */
+        private const val USE_LANDMARK_ALIGNMENT = false
     }
 
     override val providerId = "model:insightface"
@@ -105,7 +108,13 @@ class InsightFaceProvider(
                     // ArcFace 嵌入必须基于 5 关键点对齐到 112×112（ReActor ArcFaceONNX.get 的 norm_crop）。
                     // 临时 bitmap 交由 GC 回收：显式 recycle 会与 ART 原生回收并发释放同一内存，
                     // 在大批量分析时曾触发 SIGBUS (BUS_ADRALN) 原生崩溃。
-                    val faceBitmap = if (face.landmarks != null) {
+                    // OpenCV 关键点对齐在 OnePlus PLC110/Android 16 上会破坏原生堆：
+                    // 批量分析数分钟内必现 SIGSEGV/SIGBUS，崩溃点漂移于 Bitmap 生命周期
+                    // （recycle/getInfo/allocate/Bitmap_destruct），受污染指针含跨进程一致的
+                    // UTF-16 残留。二分验证：禁用本路径（保留全部 ONNX 推理）后长时间
+                    // 零崩溃，故改走纯框架 cropFace。待 OpenCV 修复或替换为纯 Kotlin
+                    // 对齐实现后再恢复。
+                    val faceBitmap = if (USE_LANDMARK_ALIGNMENT && face.landmarks != null) {
                         val lmkPx = FaceAligner.denormalizeLandmarks(
                             face.landmarks,
                             original.width,
@@ -394,6 +403,10 @@ class InsightFaceProvider(
         return try {
             BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply {
                 inSampleSize = if (file.length() > 5 * 1024 * 1024) 2 else 1
+                // 16-bit PNG（如 ComfyUI 输出）会被解码为 RGBA_F16：OpenCV bitmapToMat
+                // 断言失败，且 F16 的 SkColorInfo 生命周期在本机型上会引发原生崩溃。
+                // 强制 ARGB_8888 让 Skia 落位到 8 位。
+                inPreferredConfig = Bitmap.Config.ARGB_8888
             })
         } catch (_: Exception) { null }
     }

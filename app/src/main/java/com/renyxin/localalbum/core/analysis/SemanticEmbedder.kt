@@ -184,7 +184,11 @@ class SemanticEmbedder {
             sampleSize *= 2
         }
 
-        val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        // 16-bit PNG 会解码为 RGBA_F16，强制 8 位（详见 InsightFaceProvider）
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
         val bitmap = BitmapFactory.decodeFile(file.absolutePath, opts) ?: return null
 
         val w = bitmap.width

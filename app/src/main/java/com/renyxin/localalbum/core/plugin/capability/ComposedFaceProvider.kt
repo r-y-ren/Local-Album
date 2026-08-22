@@ -70,7 +70,11 @@ class ComposedFaceProvider(
 
     private fun decodeBitmap(file: File): Bitmap? {
         return try {
-            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = 2
+                // 16-bit PNG 会解码为 RGBA_F16，强制 8 位（详见 InsightFaceProvider）
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
             BitmapFactory.decodeFile(file.absolutePath, opts)
         } catch (_: Exception) { null }
     }

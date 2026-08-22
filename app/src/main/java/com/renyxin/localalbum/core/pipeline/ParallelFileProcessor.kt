@@ -101,7 +101,6 @@ object ParallelFileProcessor {
                                     FileResult(path, success = true, value = value)
                                 } catch (e: Throwable) {
                                     if (e is CancellationException) throw e
-                                    android.util.Log.e("CrashDebug", "!! 文件处理异常: $path -> ${e.javaClass.name}: ${e.message}", e)
                                     val done = processed.incrementAndGet()
                                     enhancedCallback(done, total, path, FileProcessingStatus.FAILED)
                                     FileResult(path, success = false, error = e)

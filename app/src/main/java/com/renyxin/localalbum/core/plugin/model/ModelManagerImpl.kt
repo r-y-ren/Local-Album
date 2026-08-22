@@ -160,6 +160,9 @@ class ModelManagerImpl(
      * - model:paddleocr_det / model:paddleocr_rec — PP-OCRv5/v6 rec session.run 在
      *   XNNPACK 下 SIGSEGV（det 正常但 rec 崩溃，输入形状已验证匹配，排除形状问题）。
      *   禁用 XNNPACK 后回退到默认 CPU EP，OCR 推理仍可正常完成。
+     * - model:insightface_rec — w600k_r50 session.run 在 XNNPACK 下破坏原生堆，
+     *   后续 Bitmap 操作（recycle/getInfo/allocate）随机命中已释放内存而 SIGBUS/SIGSEGV
+     *   （OnePlus PLC110/Android 16，40000+ 张批量人脸识别时必现；堆损坏特征为崩溃点漂移）。
      */
     private fun createOnnxSessionOptions(modelId: String = ""): OrtSession.SessionOptions =
         OrtSession.SessionOptions().apply {
@@ -184,6 +187,7 @@ class ModelManagerImpl(
                 // XNNPACK 不兼容模型黑名单：禁用 XNNPACK 以避免原生层崩溃
                 val xnnpackBlocklist = setOf(
                     "model:insightface_det",
+                    "model:insightface_rec",
                     "model:paddleocr_det",
                     "model:paddleocr_rec",
                 )
@@ -359,9 +363,7 @@ class ModelManagerImpl(
                     }
                     ModelManager.ModelRuntime.ONNX -> {
                         // intra/inter op = 1 + XNNPACK，配合文件级并行避免 oversubscription
-                        Log.i("CrashDebug", ">> ensureModelReady createSession: $modelId (文件=${modelFile.name}, ${modelFile.length()}B, 线程=${Thread.currentThread().name})")
                         val session = createOnnxSession(modelFile.absolutePath, modelId)
-                        Log.i("CrashDebug", "<< ensureModelReady createSession 完成: $modelId")
                         onnxSessions[modelId] = session
                         // 初始化 session 池：缓存路径 + 首个实例入池 + 信号量
                         onnxModelPaths[modelId] = modelFile.absolutePath
@@ -428,12 +430,7 @@ class ModelManagerImpl(
         return semaphore.withPermit {
             // 优先取空闲 session；无则创建新 session（独立 intra-op 线程池）
             val session = freePool.poll() ?: onnxPoolMutex.withLock {
-                freePool.poll() ?: {
-                    Log.i("CrashDebug", ">> withOnnxSession 池扩容 createSession: $modelId (线程=${Thread.currentThread().name})")
-                    val s = createOnnxSession(path, modelId)
-                    Log.i("CrashDebug", "<< withOnnxSession 池扩容 createSession 完成: $modelId")
-                    s
-                }()
+                freePool.poll() ?: createOnnxSession(path, modelId)
             }
             var reusableSession = session
             try {

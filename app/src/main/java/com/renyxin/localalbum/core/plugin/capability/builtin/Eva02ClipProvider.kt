@@ -187,14 +187,10 @@ class Eva02ClipProvider(
                 // 3. 视觉模型单独尝试 NNAPI；文本模型保持 CPU。
                 visualModelPath = visualFile.absolutePath
 
-                Log.i("CrashDebug", ">> EVA02 createSession visual (${visualFile.length()}B, 线程=${Thread.currentThread().name})")
                 val vs = createVisualSession(visualModelPath!!)
-                Log.i("CrashDebug", "<< EVA02 createSession visual 完成")
                 Log.i(TAG, "视觉编码器会话就绪: inputs=${vs.inputNames}")
 
-                Log.i("CrashDebug", ">> EVA02 createSession text (${textFile.length()}B, 线程=${Thread.currentThread().name})")
                 val ts = env.createSession(textFile.absolutePath, createSessionOptions(false))
-                Log.i("CrashDebug", "<< EVA02 createSession text 完成")
                 Log.i(TAG, "文本编码器会话就绪: inputs=${ts.inputNames}")
 
                 visualInputName = vs.inputNames.first()
@@ -421,7 +417,11 @@ class Eva02ClipProvider(
             var sample = 1
             val maxDim = 768
             while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) sample *= 2
-            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            // inPreferredConfig：16-bit PNG 会解码为 RGBA_F16，强制 8 位 ARGB_8888
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
             BitmapFactory.decodeFile(file.absolutePath, opts)
         } catch (_: Exception) {
             null
