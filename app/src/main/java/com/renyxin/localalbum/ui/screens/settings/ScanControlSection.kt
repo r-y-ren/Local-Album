@@ -49,6 +49,7 @@ internal fun ScanControlSection(
     coreScanState: CoreScanState,
     enhancementState: EnhancementState,
     albumViewModel: AlbumViewModel,
+    onNavigateToFailedTasks: () -> Unit = {},
 ) {
     val showRebuildConfirmation = remember { mutableStateOf(false) }
     val failedThumbnailCount by albumViewModel.failedThumbnailCount.collectAsStateWithLifecycle()
@@ -165,9 +166,20 @@ internal fun ScanControlSection(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
+                OutlinedButton(
+                    onClick = onNavigateToFailedTasks,
+                    enabled = !anyRetryRunning,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Text("查看失败任务")
+                }
                 if (!retryAllowed) {
+                    // 暴露持久化控制行的阶段名：卡在收敛时能直接看出停在哪一阶段。
+                    val pipelineStage by albumViewModel.libraryPipelineState
+                        .collectAsStateWithLifecycle()
                     Text(
-                        text = "当前流水线阶段正在收敛，完成后可手动重试失败项。",
+                        text = "当前流水线阶段：${pipelineStage.stage.name}，收敛后可重试失败项。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.secondary,
                     )

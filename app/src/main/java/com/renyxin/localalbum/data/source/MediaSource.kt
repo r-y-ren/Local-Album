@@ -828,8 +828,11 @@ class MediaSource(
                 source.seek(0L)
                 val decodeStartedAt = SystemClock.elapsedRealtime()
                 val bitmap = when (type) {
-                    MediaType.IMAGE -> decodeImageForTarget(source,targetPx)
-                    MediaType.VIDEO -> decodeVideoFrameForTarget(source,targetPx)
+                    // RobustImageDecode 内含 ImageDecoder 兜底：BitmapFactory 解不了的
+                    // 16-bit PNG 等编码仍可解码，避免被误判为 decode_failed。
+                    MediaType.IMAGE -> com.renyxin.localalbum.core.image.RobustImageDecode
+                        .decodeFd(source, canonicalPath, targetPx)
+                    MediaType.VIDEO -> decodeVideoFrameForTarget(source, targetPx)
                 } ?: error("decode_failed")
                 val decodeMs = SystemClock.elapsedRealtime() - decodeStartedAt
                 val encodeStartedAt = SystemClock.elapsedRealtime()
@@ -893,17 +896,6 @@ class MediaSource(
             check(target.isFile && target.length() > 0L) { "cache_publish_failed" }
             target.absolutePath
         }.onFailure { staged.delete() }.getOrNull()
-    }
-
-    private fun decodeImageForTarget(source: RandomAccessFile, targetPx: Int): Bitmap? {
-        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        source.seek(0L)
-        android.graphics.BitmapFactory.decodeFileDescriptor(source.fd,null,bounds)
-        val options = android.graphics.BitmapFactory.Options().apply {
-            inSampleSize = calculateInSampleSize(bounds.outWidth,bounds.outHeight,targetPx)
-        }
-        source.seek(0L)
-        return android.graphics.BitmapFactory.decodeFileDescriptor(source.fd,null,options)
     }
 
     /** minSdk 29：retriever 始终绑定已校验的同一只读 fd。 */

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop `ThumbnailCacheMaintenanceWorker` from re-enqueuing itself forever once a library has a full page of still-referenced thumbnails older than the 24h TTL (caused constant ~150ms WorkManager churn, 150%+ CPU, multi-second GC pauses that made every incremental scan appear stuck on "loading"); cleanup now advances past all-referenced windows and only continues when a window actually deleted something.
+- Fix the incremental-scan lost-wake deadlock: `ScanWorker`'s unique WorkManager chain accumulated hours of exponential backoff from unbounded `Result.retry()` on deferred journals, and `APPEND_OR_REPLACE` never replaced a still-backing-off chain — deferred drains now self-schedule a fresh request with a fixed delay, poisoned scan/pump chains are reset on app start, and journal poison events terminalize to `FAILED` after 5 attempts instead of blocking the pipeline forever.
+- Include OCR results in keyword search immediately: the OCR stage now rebuilds the FTS row for each recognized file in the same pass (previously `media_items_fts.ocrText` stayed empty until the next full scan, so OCR text was unsearchable).
+- Trash permanent deletion on Android 13+: URI resolution now includes items already in the system trash (previously silently dropped to a doomed `File.delete()`), batch resolution moved off the main thread (clear-all no longer ANRs), unresolved paths are reported instead of silently left in trash, and the failure message no longer points at a permission that no longer exists.
+- Keep the album file-tree scroll position when returning from the photo viewer: directory paging flows are now cached per query (same replay semantics as the timeline) and the tree's expand/view state survives navigation via `rememberSaveable`.
+- Decode 16-bit PNGs (common ComfyUI output): bitmap decoding for thumbnails and semantic analysis falls back from `BitmapFactory` to `ImageDecoder`, so these files no longer fail analysis/thumbnail generation; the failed-tasks page renders their previews instead of showing a broken-file badge.
+- Failed-tasks page: cancelling the ignore/delete confirmation now restores the previous selection state (single-item actions clear their temporary selection; multi-select keeps the user's selection).
 - Restore missing `emap_512.bin` (face-swap emap matrix) — regenerated from `inswapper_128.onnx` via `scripts/extract_emap.py`; its absence silently degraded face-swap output to ≈ input.
 - Make JSON index import atomic across media, FTS, face, and semantic-embedding tables; FTS records are now restored in batches instead of one row at a time.
 - Preserve unchanged media-derived fields during a full scan and invalidate analysis checkpoints when media content changes, preventing completed analysis from being skipped after its result fields were replaced.
@@ -20,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Failed-tasks page (设置 → 扫描操作 → 查看失败任务): merged analysis/thumbnail/handoff failure lanes with per-file previews, unreadable files marked as corrupted, readable failure causes, and per-item or batch adjudication — ignore (keep file, mark corrupted, stop retrying) or move to trash; the settings scan card now also shows the persisted pipeline stage while it is converging.
 - Room schema v16 with the `thumbnail_tasks` queue and migration of existing missing thumbnails.
 - Room schema v17 with media scan generations and a persistent `analysis_tasks` queue.
 - Room schema v28 with versioned album directory snapshots and an album-page synchronization status banner.

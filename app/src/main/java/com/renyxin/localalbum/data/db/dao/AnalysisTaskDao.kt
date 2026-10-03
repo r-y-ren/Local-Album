@@ -484,7 +484,41 @@ abstract class AnalysisTaskDao {
         priority: Int = AnalysisTaskEntity.PRIORITY_USER,
         now: Long = System.currentTimeMillis(),
     ): Int
+
+    /**
+     * 失败任务的可见清单：只列未被用户裁决过的文件（未移入回收站、未标记损坏），
+     * 供失败任务页展示。RUNNING 任务由租约机制独占，不出现在失败清单。
+     */
+    @Query(
+        """SELECT a.filePath AS filePath, m.fileName AS fileName, m.parentPath AS parentPath,
+                  m.mediaType AS mediaType, a.pipelineScope AS pipelineScope,
+                  a.attemptCount AS attemptCount, a.lastError AS lastError, a.updatedAt AS updatedAt
+           FROM analysis_tasks a INNER JOIN media_items m ON a.filePath = m.filePath
+           WHERE a.status = 'FAILED' AND m.isTrashed = 0 AND m.isCorrupted = 0
+           ORDER BY a.updatedAt DESC LIMIT :limit""",
+    )
+    abstract fun observeVisibleFailures(limit: Int): kotlinx.coroutines.flow.Flow<List<AnalysisFailureRow>>
+
+    /** 用户裁决（忽略/删除）后终止这些路径的任务，使其从失败清单与计数中消失。 */
+    @Query(
+        """UPDATE analysis_tasks SET status = 'SUPERSEDED', leaseUntil = 0, leaseToken = NULL,
+              updatedAt = :now
+           WHERE filePath IN (:paths) AND status IN ('PENDING', 'FAILED')""",
+    )
+    abstract suspend fun supersedeByPaths(paths: List<String>, now: Long): Int
 }
+
+/** 失败任务页的分析失败行（关联 media_items 取展示字段，避免逐行回查）。 */
+data class AnalysisFailureRow(
+    override val filePath: String,
+    override val fileName: String,
+    override val parentPath: String,
+    override val mediaType: String,
+    val pipelineScope: String,
+    override val attemptCount: Int,
+    override val lastError: String?,
+    override val updatedAt: Long,
+) : com.renyxin.localalbum.core.model.FailedTaskRow
 
 data class FullReanalysisScopeResult(
     val reset: Int,

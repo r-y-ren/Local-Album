@@ -78,6 +78,15 @@ class LibraryPipelineWorker(
         /** A successful stage transition appends exactly one successor behind a possibly running pump. */
         fun appendSuccessor(context: Context) = enqueue(context, ExistingWorkPolicy.APPEND_OR_REPLACE)
 
+        /**
+         * 启动自愈：历史重试风暴会把本唯一链的 WorkManager 退避毒化到小时级。
+         * 启动点（本进程无运行中 worker）整链取消是安全的；随后的 wake() 按
+         * 持久控制行重建所需 pump。
+         */
+        fun resetPoisonedChain(context: Context) {
+            WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
+        }
+
         private fun enqueue(context: Context, policy: ExistingWorkPolicy) {
             WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                 WORK_NAME,

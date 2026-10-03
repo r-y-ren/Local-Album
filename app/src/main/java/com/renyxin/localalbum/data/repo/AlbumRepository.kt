@@ -10,6 +10,8 @@ import com.renyxin.localalbum.core.index.HybridIndexer
 import com.renyxin.localalbum.core.model.Album
 import com.renyxin.localalbum.core.model.DirectoryNode
 import com.renyxin.localalbum.core.model.DirectoryMediaAnchor
+import com.renyxin.localalbum.core.model.FailedTaskKind
+import com.renyxin.localalbum.core.model.toItem
 import com.renyxin.localalbum.core.model.DirectoryMediaQuery
 import com.renyxin.localalbum.core.model.DirectoryMediaQueryMapper
 import com.renyxin.localalbum.core.model.MediaItem
@@ -239,6 +241,9 @@ class AlbumRepository(
         /** 全量推荐池只保留给显式用户刷新；自动增强使用受影响目录窗口。 */
         private const val RECOMMENDATION_PAGE_SIZE = 1_000
         private const val RECOMMENDATION_DIRECTORY_LIMIT = 1_000
+
+        /** 失败任务页每条车道（分析/缩略图）的最大展示行数。 */
+        private const val FAILURE_LIST_LIMIT = 200
     }
     /** 与 Repository 生命周期绑定的协程作用域，替代 GlobalScope */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -612,13 +617,13 @@ class AlbumRepository(
             return@withContext true
         }
         _scanState.value = ScanState.Scanning("正在检查媒体更新…")
+        // 快照而非持锁：发现遍历可达分钟级，不得占用设置互斥（会饿死扫描的设置读取）。
+        val snapshot = settingsRepository.stableScanSettingsSnapshot()
         runCatching {
-            settingsRepository.withStableScanSettings { settings ->
-                requireNotNull(hybridIndexer).discoverMediaStoreChanges(
-                    roots = settings.scanRoots,
-                    ignorePatterns = settings.ignoreDirNames,
-                )
-            }
+            requireNotNull(hybridIndexer).discoverMediaStoreChanges(
+                roots = snapshot.scanRoots,
+                ignorePatterns = snapshot.ignoreDirNames,
+            )
         }.fold(
             onSuccess = { discovery ->
                 val outstanding = requireNotNull(hybridIndexer).countOutstandingMediaChanges()
@@ -645,13 +650,13 @@ class AlbumRepository(
     /** Foreground compensation discovers changes missed while the observer was unregistered. */
     suspend fun discoverForegroundChanges(): Boolean = withContext(Dispatchers.IO) {
         val indexer = hybridIndexer ?: return@withContext false
-        val discovery = settingsRepository.withStableScanSettings { settings ->
-            if (settings.scanRoots.isEmpty()) return@withStableScanSettings null
-            indexer.discoverMediaStoreChanges(
-                roots = settings.scanRoots,
-                ignorePatterns = settings.ignoreDirNames,
-            )
-        } ?: return@withContext false
+        // 快照而非持锁：前台补偿的全量发现遍历同样不得占用设置互斥。
+        val snapshot = settingsRepository.stableScanSettingsSnapshot()
+        if (snapshot.scanRoots.isEmpty()) return@withContext false
+        val discovery = indexer.discoverMediaStoreChanges(
+            roots = snapshot.scanRoots,
+            ignorePatterns = snapshot.ignoreDirNames,
+        )
         Log.i(TAG, "foreground incremental discovery: $discovery")
         libraryPipelineCoordinator?.wake()
         discovery.hasChanges
@@ -714,6 +719,8 @@ class AlbumRepository(
             // a later mutation sees activeRunId and remains queued for explicit rebuilding.
             val admitted = withTimeoutOrNull(5000L) {
                 settingsRepository.withStableScanSettings { settings ->
+                    // 诊断：区分 5s 超时耗在设置读取（本行未打出）还是 run 预订（打出后超时）
+                    Log.i(TAG, "rescan: 进入稳定设置块 roots=${settings.scanRoots.size}")
                     settings to if (settings.scanRoots.isEmpty()) {
                         null
                     } else {
@@ -950,6 +957,70 @@ class AlbumRepository(
                     mediaDao.moveToTrash(chunk, deletedAt)
                     database.homeMediaSnapshotDao().deleteByPaths(chunk)
                 }
+            }
+        } else {
+            mediaDao.moveToTrash(distinct, deletedAt)
+        }
+        removeFromMemoryTree(distinct.toSet())
+        refreshStats()
+    }
+
+    // ---- 失败任务裁决（大概率是损坏文件，交用户决定忽略或删除） ----
+
+    /**
+     * 三条车道（分析/缩略图/交接）的可见 FAILED 清单合并，按更新时间倒序。
+     * 仅列未被用户裁决过的文件（未回收、未标记损坏）；清单是 Room Flow，
+     * 忽略/删除后自动刷新，设置页失败计数同步联动。
+     */
+    val failedTaskItems: kotlinx.coroutines.flow.Flow<List<com.renyxin.localalbum.core.model.FailedTaskItem>> =
+        kotlinx.coroutines.flow.combine(
+            database?.analysisTaskDao()?.observeVisibleFailures(FAILURE_LIST_LIMIT)
+                ?: kotlinx.coroutines.flow.flowOf(emptyList()),
+            database?.thumbnailTaskDao()?.observeVisibleFailures(FAILURE_LIST_LIMIT)
+                ?: kotlinx.coroutines.flow.flowOf(emptyList()),
+            database?.enhancementOutboxDao()?.observeVisibleFailures(FAILURE_LIST_LIMIT)
+                ?: kotlinx.coroutines.flow.flowOf(emptyList()),
+        ) { analysis, thumbnails, handoff ->
+            (analysis.map { row -> row.toItem(FailedTaskKind.ANALYSIS) } +
+                thumbnails.map { row -> row.toItem(FailedTaskKind.THUMBNAIL) } +
+                handoff.map { row -> row.toItem(FailedTaskKind.HANDOFF) })
+                .sortedByDescending { it.updatedAt }
+        }
+
+    /** 忽略：标记损坏并终止三条车道的排队/失败行，文件保留在图库中不再参与增强。 */
+    suspend fun ignoreFailedTaskFiles(paths: List<String>) = withContext(Dispatchers.IO) {
+        val distinct = paths.distinct()
+        if (distinct.isEmpty()) return@withContext 0
+        val now = System.currentTimeMillis()
+        val superseded = if (database != null) {
+            database.withTransaction {
+                mediaDao.markCorruptedBatch(distinct)
+                database.analysisTaskDao().supersedeByPaths(distinct, now) +
+                    database.thumbnailTaskDao().supersedeByPaths(distinct, now) +
+                    database.enhancementOutboxDao().supersedeByPaths(distinct, now)
+            }
+        } else {
+            mediaDao.markCorruptedBatch(distinct)
+            0
+        }
+        superseded
+    }
+
+    /** 删除：移入回收站（可恢复）并终止三条车道的任务行，失败清单即时收敛。 */
+    suspend fun deleteFailedTaskFiles(paths: List<String>) = withContext(Dispatchers.IO) {
+        val distinct = paths.distinct()
+        if (distinct.isEmpty()) return@withContext
+        val now = System.currentTimeMillis()
+        val deletedAt = System.currentTimeMillis()
+        if (database != null) {
+            database.withTransaction {
+                distinct.chunked(MediaDeletionCoordinator.CHUNK_SIZE).forEach { chunk ->
+                    mediaDao.moveToTrash(chunk, deletedAt)
+                    database.homeMediaSnapshotDao().deleteByPaths(chunk)
+                }
+                database.analysisTaskDao().supersedeByPaths(distinct, now)
+                database.thumbnailTaskDao().supersedeByPaths(distinct, now)
+                database.enhancementOutboxDao().supersedeByPaths(distinct, now)
             }
         } else {
             mediaDao.moveToTrash(distinct, deletedAt)

@@ -32,6 +32,11 @@ class LocalAlbumApplication : Application(), ImageLoaderFactory {
         container = AppContainer(this)
         // Phase 1: 核心扫描与后台增强使用独立通知渠道。
         com.renyxin.localalbum.data.worker.ScanServiceController.ensureChannels(this)
+        // 历史重试风暴会把扫描/流水线唯一链的 WorkManager 指数退避毒化到小时级，
+        // APPEND_OR_REPLACE 又不会替换"仍在退避中"的链。启动点（本进程无运行中
+        // worker）整链取消是安全的；下方 wake() 会按持久状态即时重建。
+        com.renyxin.localalbum.data.worker.ScanWorker.resetPoisonedChain(this)
+        com.renyxin.localalbum.data.worker.LibraryPipelineWorker.resetPoisonedChain(this)
         TrashCleanupWorker.schedule(this)
         DeletionRetryWorker.enqueue(this)
         com.renyxin.localalbum.data.worker.ThumbnailCacheMaintenanceWorker.enqueue(this)

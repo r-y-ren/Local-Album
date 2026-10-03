@@ -45,5 +45,8 @@ data class EnhancementOutboxEntity(
         const val STATUS_RUNNING = "RUNNING"
         const val STATUS_DONE = "DONE"
         const val STATUS_FAILED = "FAILED"
+
+        /** 用户已在失败任务页裁决（忽略/删除），不再是可重试工作。 */
+        const val STATUS_SUPERSEDED = "SUPERSEDED"
     }
 }

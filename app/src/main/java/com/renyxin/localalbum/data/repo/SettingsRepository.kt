@@ -149,29 +149,38 @@ class SettingsRepository(
     }
     suspend fun setOnboardingCompleted(completed: Boolean) = store.setOnboardingCompleted(completed)
 
-    suspend fun addScanRoot(path: String) = scanScopeMutex.withLock {
-        if (store.addScanRoot(path)) submitScanScopeChange("scan_root_added")
+    // 作用域变更提交：DataStore 写在 scanScopeMutex 内序列化，协调器回调（可能携带
+    // 分钟级的流水线收敛事务）在锁外执行——持锁回调会饿死 withStableScanSettings，
+    // 使所有扫描在 5s 读取窗内反复超时（历史增量"一直加载"的触发链）。
+    suspend fun addScanRoot(path: String) {
+        val changed = scanScopeMutex.withLock { store.addScanRoot(path) }
+        if (changed) submitScanScopeChange("scan_root_added")
     }
 
-    suspend fun removeScanRoot(path: String) = scanScopeMutex.withLock {
-        if (store.removeScanRoot(path)) submitScanScopeChange("scan_root_removed")
+    suspend fun removeScanRoot(path: String) {
+        val changed = scanScopeMutex.withLock { store.removeScanRoot(path) }
+        if (changed) submitScanScopeChange("scan_root_removed")
     }
 
-    suspend fun addIgnoreDir(name: String) = scanScopeMutex.withLock {
-        if (store.addIgnoreDir(name)) submitScanScopeChange("ignore_rule_added")
+    suspend fun addIgnoreDir(name: String) {
+        val changed = scanScopeMutex.withLock { store.addIgnoreDir(name) }
+        if (changed) submitScanScopeChange("ignore_rule_added")
     }
 
-    suspend fun removeIgnoreDir(name: String) = scanScopeMutex.withLock {
-        if (store.removeIgnoreDir(name)) submitScanScopeChange("ignore_rule_removed")
+    suspend fun removeIgnoreDir(name: String) {
+        val changed = scanScopeMutex.withLock { store.removeIgnoreDir(name) }
+        if (changed) submitScanScopeChange("ignore_rule_removed")
     }
 
-    suspend fun setShowNomediaDirectories(show: Boolean) = scanScopeMutex.withLock {
-        if (store.setShowNomediaDirectories(show)) submitScanScopeChange("nomedia_policy_changed")
+    suspend fun setShowNomediaDirectories(show: Boolean) {
+        val changed = scanScopeMutex.withLock { store.setShowNomediaDirectories(show) }
+        if (changed) submitScanScopeChange("nomedia_policy_changed")
     }
 
     /** Replays the DataStore half of an interrupted DataStore -> Room scope-change commit. */
-    suspend fun replayPendingScanScopeChange() = scanScopeMutex.withLock {
-        store.pendingScanScopeChangeReason.first()?.let { reason -> submitScanScopeChange(reason) }
+    suspend fun replayPendingScanScopeChange() {
+        val pending = scanScopeMutex.withLock { store.pendingScanScopeChangeReason.first() }
+        pending?.let { reason -> submitScanScopeChange(reason) }
     }
 
     /**
@@ -182,6 +191,16 @@ class SettingsRepository(
         scanScopeMutex.withLock {
             block(state.first())
         }
+
+    /**
+     * 设置快照：只持锁读值即释放，供长时间任务（如 MediaStore 全量发现遍历）使用。
+     * 这类任务若走 [withStableScanSettings]，分钟级的遍历会全程占住设置互斥，
+     * 使扫描侧 5s 的设置读取窗反复超时（增量"一直加载"的触发链之一）。
+     * 根集合在遍历期间被用户修改的竞态由下一次发现的增量收敛，无需持锁防护。
+     */
+    suspend fun stableScanSettingsSnapshot(): SettingsState = scanScopeMutex.withLock {
+        state.first()
+    }
 
     private suspend fun submitScanScopeChange(reason: String) {
         onScanScopeChanged(reason)

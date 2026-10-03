@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,9 +42,13 @@ fun AlbumSyncStatusBanner(
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var successVisible by remember(state) { mutableStateOf(state is AlbumSyncState.UpToDate) }
+    // "相册已更新"每个应用会话只展示一次（首次进入相册页）；软件内来回切换 Tab
+    // 不再重复弹出。其余状态（检查中/更新中/失败）始终如实展示。
+    var upToDateShownThisSession by rememberSaveable { mutableStateOf(false) }
+    var successVisible by remember { mutableStateOf(false) }
     LaunchedEffect(state) {
-        if (state is AlbumSyncState.UpToDate) {
+        if (state is AlbumSyncState.UpToDate && !upToDateShownThisSession) {
+            upToDateShownThisSession = true
             successVisible = true
             delay(3_000L)
             successVisible = false
@@ -63,7 +69,9 @@ fun AlbumSyncStatusBanner(
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp),
+                .padding(horizontal = 16.dp, vertical = 4.dp)
+                // 成功提示可点击立即关闭，不必等 3 秒自动消失
+                .clickable(enabled = state is AlbumSyncState.UpToDate) { successVisible = false },
             shape = RoundedCornerShape(14.dp),
             color = if (failed) MaterialTheme.colorScheme.errorContainer
             else MaterialTheme.colorScheme.secondaryContainer,

@@ -63,7 +63,9 @@ import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.core.saf.MediaStoreDeleteRequest
 import com.renyxin.localalbum.ui.vm.AlbumViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
@@ -94,17 +96,27 @@ fun TrashScreen(
     val operationInFlight = operationState is AlbumViewModel.TrashOperationState.Running
     var pendingSystemDeletePaths by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingClearTrash by remember { mutableStateOf(false) }
+    var pendingUnresolvedCount by remember { mutableIntStateOf(0) }
 
     val systemDeleteLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { result ->
         val paths = pendingSystemDeletePaths
         val clear = pendingClearTrash
+        val unresolved = pendingUnresolvedCount
         pendingSystemDeletePaths = emptyList()
         pendingClearTrash = false
+        pendingUnresolvedCount = 0
         if (result.resultCode == Activity.RESULT_OK) {
             // 系统已删除文件；Repository 将其识别为 MISSING 并原子清理关联数据。
             if (clear) onClearTrash() else onPermanentlyDelete(paths)
+            if (unresolved > 0) {
+                scope.launch {
+                    snackbarHostState.showSnackbar(
+                        "另有 $unresolved 项不在系统媒体库中，已尝试应用内删除；失败项将保留在回收站",
+                    )
+                }
+            }
         } else {
             scope.launch { snackbarHostState.showSnackbar("已取消系统删除授权") }
         }
@@ -112,17 +124,26 @@ fun TrashScreen(
 
     fun requestPermanentDelete(paths: List<String>, clearTrash: Boolean = false) {
         val distinct = paths.distinct()
-        val request = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            MediaStoreDeleteRequest.create(context, distinct)
-        } else null
-        if (request != null) {
-            pendingSystemDeletePaths = distinct
-            pendingClearTrash = clearTrash
-            systemDeleteLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
-        } else if (clearTrash) {
-            onClearTrash()
-        } else {
-            onPermanentlyDelete(distinct)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            if (clearTrash) onClearTrash() else onPermanentlyDelete(distinct)
+            return
+        }
+        scope.launch {
+            // 逐路径反查 MediaStore 是每路径一次 query：清空回收站时可达数千条，
+            // 必须离开主线程执行；启动系统授权弹窗仍回主线程。
+            val request = withContext(Dispatchers.IO) {
+                MediaStoreDeleteRequest.create(context, distinct)
+            }
+            if (request == null) {
+                if (clearTrash) onClearTrash() else onPermanentlyDelete(distinct)
+            } else {
+                pendingSystemDeletePaths = distinct
+                pendingClearTrash = clearTrash
+                pendingUnresolvedCount = request.unresolvedPaths.size
+                systemDeleteLauncher.launch(
+                    IntentSenderRequest.Builder(request.intentSender).build(),
+                )
+            }
         }
     }
 

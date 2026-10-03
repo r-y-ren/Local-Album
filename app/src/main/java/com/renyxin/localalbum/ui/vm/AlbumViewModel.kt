@@ -318,8 +318,19 @@ class AlbumViewModel(
 
     fun findAlbumById(id: String): Album? = repository.findAlbumById(id)
 
+    /**
+     * 目录详情 Paging 流按查询缓存：从查看器返回时 collectAsLazyPagingItems 重新收集的是
+     * 同一 cachedIn 流，缓存重放让 itemCount 不归零，SaveableStateProvider 恢复的
+     * LazyGridState 才不会被空数据早退销毁（时间线 pagedMedia 单例流即此模式）。
+     */
+    private val directoryMediaFlows =
+        android.util.LruCache<DirectoryMediaQuery, Flow<PagingData<MediaItem>>>(DIRECTORY_FLOW_CACHE_SIZE)
+
     fun pagedMediaForDirectory(query: DirectoryMediaQuery): Flow<PagingData<MediaItem>> =
-        repository.pagedMediaForDirectory(query).cachedIn(viewModelScope)
+        directoryMediaFlows.get(query)
+            ?: repository.pagedMediaForDirectory(query)
+                .cachedIn(viewModelScope)
+                .also { flow -> directoryMediaFlows.put(query, flow) }
 
     fun deleteMediaItems(paths: List<String>) {
         viewModelScope.launch { repository.deleteMediaItems(paths) }
@@ -376,14 +387,69 @@ class AlbumViewModel(
         }
     }
 
+    // ---- 失败任务裁决 ----
+
+    sealed interface FailedTaskOperationState {
+        data object Idle : FailedTaskOperationState
+        data class Running(val operation: String) : FailedTaskOperationState
+        data class Completed(val message: String) : FailedTaskOperationState
+        data class Failed(val message: String) : FailedTaskOperationState
+    }
+
+    private val _failedTaskOperationState =
+        MutableStateFlow<FailedTaskOperationState>(FailedTaskOperationState.Idle)
+    val failedTaskOperationState: StateFlow<FailedTaskOperationState> =
+        _failedTaskOperationState.asStateFlow()
+
+    /** 失败任务清单（大概率是损坏文件），仅未被裁决过的文件可见。 */
+    val failedTaskItems: StateFlow<List<com.renyxin.localalbum.core.model.FailedTaskItem>> =
+        repository.failedTaskItems
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 忽略：标记损坏并终止任务，文件保留在图库中不再参与增强。 */
+    fun ignoreFailedTaskFiles(paths: List<String>) {
+        if (_failedTaskOperationState.value is FailedTaskOperationState.Running) return
+        viewModelScope.launch {
+            _failedTaskOperationState.value = FailedTaskOperationState.Running("正在忽略")
+            _failedTaskOperationState.value = runCatching {
+                repository.ignoreFailedTaskFiles(paths)
+                FailedTaskOperationState.Completed("已忽略 ${paths.distinct().size} 个文件的失败任务")
+            }.getOrElse { error ->
+                FailedTaskOperationState.Failed(error.message ?: "忽略失败")
+            }
+        }
+    }
+
+    /** 删除：移入回收站（可恢复）并终止任务。 */
+    fun deleteFailedTaskFiles(paths: List<String>) {
+        if (_failedTaskOperationState.value is FailedTaskOperationState.Running) return
+        viewModelScope.launch {
+            _failedTaskOperationState.value = FailedTaskOperationState.Running("正在移入回收站")
+            _failedTaskOperationState.value = runCatching {
+                repository.deleteFailedTaskFiles(paths)
+                FailedTaskOperationState.Completed("已将 ${paths.distinct().size} 个文件移入回收站")
+            }.getOrElse { error ->
+                FailedTaskOperationState.Failed(error.message ?: "移入回收站失败")
+            }
+        }
+    }
+
+    fun consumeFailedTaskOperationResult() {
+        if (_failedTaskOperationState.value !is FailedTaskOperationState.Running) {
+            _failedTaskOperationState.value = FailedTaskOperationState.Idle
+        }
+    }
+
     private fun deletionResultState(result: TrashOperationResult): TrashOperationState = when {
         result.requested == 0 -> TrashOperationState.Completed("没有需要删除的项目")
         result.failed == 0 -> TrashOperationState.Completed("已永久删除 ${result.completed} 项")
         result.completed == 0 -> TrashOperationState.Failed(
-            "未能删除文件，请授予文件管理权限后重试（${result.failed} 项）",
+            // Android 13+ 无"文件管理权限"可授予（MANAGE_EXTERNAL_STORAGE 已随 targetSdk 失效），
+            // 如实指出可行出路而不是指向不存在的开关。
+            "未能删除 ${result.failed} 项：文件不在系统媒体库或被系统拒绝，请用系统文件管理器删除",
         )
         else -> TrashOperationState.Completed(
-            "已删除 ${result.completed} 项，${result.failed} 项因权限不足保留在回收站",
+            "已删除 ${result.completed} 项，${result.failed} 项无法直接删除，保留在回收站",
         )
     }
 
@@ -693,6 +759,7 @@ class AlbumViewModel(
 
     private companion object {
         const val RETRY_NOT_ADMITTED_MESSAGE = "当前流水线阶段尚未结束，请稍后重试"
+        const val DIRECTORY_FLOW_CACHE_SIZE = 16
     }
 
     /** 取消待确认的导入，清理临时文件。 */

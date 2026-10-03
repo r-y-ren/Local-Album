@@ -760,6 +760,28 @@ abstract class ThumbnailTaskDao {
     @Query("SELECT COUNT(*) FROM thumbnail_tasks WHERE status='FAILED'")
     abstract fun observeFailedCount(): Flow<Int>
 
+    /**
+     * 失败任务的可见清单：只列未被用户裁决过的文件（未移入回收站、未标记损坏），
+     * 供失败任务页展示；与分析任务清单语义一致。
+     */
+    @Query(
+        """SELECT t.filePath AS filePath, m.fileName AS fileName, m.parentPath AS parentPath,
+                  t.mediaType AS mediaType, t.sizeClass AS sizeClass,
+                  t.attemptCount AS attemptCount, t.lastError AS lastError, t.updatedAt AS updatedAt
+           FROM thumbnail_tasks t INNER JOIN media_items m ON t.filePath = m.filePath
+           WHERE t.status = 'FAILED' AND m.isTrashed = 0 AND m.isCorrupted = 0
+           ORDER BY t.updatedAt DESC LIMIT :limit""",
+    )
+    abstract fun observeVisibleFailures(limit: Int): Flow<List<ThumbnailFailureRow>>
+
+    /** 用户裁决（忽略/删除）后终止这些路径的缩略图任务，使其从失败清单与计数中消失。 */
+    @Query(
+        """UPDATE thumbnail_tasks SET status='SUPERSEDED', leaseUntil=0, leaseToken=NULL,
+                 updatedAt=:now
+           WHERE filePath IN (:paths) AND status IN ('PENDING', 'FAILED')""",
+    )
+    abstract suspend fun supersedeByPaths(paths: List<String>, now: Long): Int
+
     @Query(
         """UPDATE thumbnail_tasks SET status='PENDING',attemptCount=0,nextRetryAt=0,
              leaseUntil=0,leaseToken=NULL,lastError=NULL,priority=MAX(priority,:priority),
@@ -931,3 +953,15 @@ abstract class ThumbnailTaskDao {
             processOwnerPrefix(processEpoch) + token
     }
 }
+
+/** 失败任务页的缩略图失败行（关联 media_items 取展示字段，避免逐行回查）。 */
+data class ThumbnailFailureRow(
+    override val filePath: String,
+    override val fileName: String,
+    override val parentPath: String,
+    override val mediaType: String,
+    val sizeClass: String,
+    override val attemptCount: Int,
+    override val lastError: String?,
+    override val updatedAt: Long,
+) : com.renyxin.localalbum.core.model.FailedTaskRow

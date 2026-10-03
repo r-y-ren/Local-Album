@@ -39,6 +39,12 @@ data class MediaChangeEventEntity(
 
         const val STATUS_PENDING = "PENDING"
         const val STATUS_LEASED = "LEASED"
+
+        /**
+         * 终态：同一事件按上限次数重试仍失败（如 resolver 对某身份持续抛错）。
+         * 终态行不再阻塞流水线准入；对应文件的真相由下一次显式全量/校准扫描收敛。
+         */
+        const val STATUS_FAILED = "FAILED"
     }
 }
 

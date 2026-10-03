@@ -149,14 +149,21 @@ abstract class MediaChangeDao {
         return deleteLeasedEvents(leaseToken)
     }
 
+    /**
+     * 批失败回退 PENDING 并推后重试；attemptCount 在租约时已自增，达到 [maxAttempts]
+     * 的行转 FAILED 终态——否则单条毒事件（如 resolver 持续抛错）会让 journal
+     * 永远 drain 不完，把流水线卡在 INCREMENTAL_SCAN。
+     */
     @Query(
         """UPDATE media_change_events
-           SET status = 'PENDING', nextAttemptAt = :nextAttemptAt, leaseUntil = 0,
+           SET status = CASE WHEN attemptCount >= :maxAttempts THEN 'FAILED' ELSE 'PENDING' END,
+               nextAttemptAt = :nextAttemptAt, leaseUntil = 0,
                leaseToken = NULL, lastError = :error, updatedAtMs = :now
            WHERE leaseToken = :leaseToken AND status = 'LEASED'""",
     )
     abstract suspend fun failLease(
         leaseToken: String,
+        maxAttempts: Int,
         nextAttemptAt: Long,
         error: String,
         now: Long,

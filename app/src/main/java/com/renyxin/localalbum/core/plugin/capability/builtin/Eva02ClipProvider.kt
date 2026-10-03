@@ -231,7 +231,11 @@ class Eva02ClipProvider(
         context: SemanticEmbedProvider.ImageContext?,
     ): FloatArray? = withContext(Dispatchers.IO) {
         if (!ensureLoaded()) return@withContext null
-        val bitmap = decodeBitmap(file) ?: return@withContext null
+        // RobustImageDecode 内含 ImageDecoder 兜底：16-bit PNG（ComfyUI 常见输出）
+        // 在 BitmapFactory 返回 null 时仍可解码，避免误报 semantic_empty_vector。
+        val bitmap = com.renyxin.localalbum.core.image.RobustImageDecode
+            .decodeFile(file, maxDim = 768)
+            ?: return@withContext null
         try {
             val input = preprocessImage(bitmap)
             // 视觉模型是语义扫描主瓶颈；统一记录 CPU/NNAPI 的 P50/P95 对照数据。
@@ -265,8 +269,7 @@ class Eva02ClipProvider(
     /**
      * 从视觉 session 池获取一个独立实例执行推理（多核并行）。
      * 池大小 [visualPoolSize]，每个 session 独立 intra-op 线程池。
-     */
-    private suspend fun <T> withVisualSession(block: suspend (OrtSession) -> T): T {
+     */    private suspend fun <T> withVisualSession(block: suspend (OrtSession) -> T): T {
         val path = visualModelPath ?: throw IllegalStateException("EVA02 visual 未加载")
         return visualSemaphore.withPermit {
             var reusableSession = visualSessionPool.poll() ?: visualPoolMutex.withLock {
@@ -409,22 +412,4 @@ class Eva02ClipProvider(
         return vec
     }
 
-    private fun decodeBitmap(file: File): Bitmap? {
-        return try {
-            // 仅解码尺寸以决定采样率，避免大图 OOM
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(file.absolutePath, bounds)
-            var sample = 1
-            val maxDim = 768
-            while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) sample *= 2
-            // inPreferredConfig：16-bit PNG 会解码为 RGBA_F16，强制 8 位 ARGB_8888
-            val opts = BitmapFactory.Options().apply {
-                inSampleSize = sample
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-            }
-            BitmapFactory.decodeFile(file.absolutePath, opts)
-        } catch (_: Exception) {
-            null
-        }
-    }
 }

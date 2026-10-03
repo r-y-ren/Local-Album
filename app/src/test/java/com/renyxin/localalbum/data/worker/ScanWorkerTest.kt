@@ -14,9 +14,11 @@ class ScanWorkerTest {
     }
 
     @Test
-    fun `deferred persisted drain always retries`() {
+    fun `deferred persisted drain never consumes failure budget nor workmanager backoff`() {
+        // Deferred 走自调度固定延迟（DEFERRED），不得映射为 RETRY 烧 WorkManager 指数退避，
+        // 也不得计入有限失败预算。
         assertEquals(
-            ScanWorker.ScanWorkDecision.RETRY,
+            ScanWorker.ScanWorkDecision.DEFERRED,
             ScanWorker.scanWorkDecision(PersistedScanDrainResult.Deferred, runAttemptCount = 99),
         )
     }

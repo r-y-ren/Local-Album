@@ -192,6 +192,8 @@ class HybridIndexer(
         private const val CHANGE_BATCH_SIZE = 500
         private const val CHANGE_LEASE_MS = 60_000L
         private const val CHANGE_RETRY_DELAY_MS = 5_000L
+        /** 单条变更事件的最大尝试次数；超限转 FAILED 终态，防止毒事件无限阻塞流水线。 */
+        private const val CHANGE_MAX_ATTEMPTS = 5
         internal const val CHANGE_DISCOVERY_PAGE_SIZE = 250
         /** Full/reconciliation recommendation refresh also uses a bounded changed-directory window. */
         private const val RECOMMENDATION_DIRECTORY_WINDOW_LIMIT = 100
@@ -709,6 +711,7 @@ class HybridIndexer(
                 val now = System.currentTimeMillis()
                 changeDao.failLease(
                     leaseToken = leaseToken,
+                    maxAttempts = CHANGE_MAX_ATTEMPTS,
                     nextAttemptAt = now + CHANGE_RETRY_DELAY_MS,
                     error = error.javaClass.simpleName.take(80),
                     now = now,

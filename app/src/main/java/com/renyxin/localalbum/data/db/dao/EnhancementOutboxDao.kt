@@ -251,6 +251,27 @@ abstract class EnhancementOutboxDao {
     )
     abstract suspend fun getFailedForUserRetry(limit: Int): List<EnhancementOutboxEntity>
 
+    /** 失败任务页的交接失败清单；只列未被用户裁决过的文件，语义与两条任务车道一致。 */
+    @Query(
+        """SELECT o.filePath AS filePath, m.fileName AS fileName, m.parentPath AS parentPath,
+                  o.mediaType AS mediaType, o.attemptCount AS attemptCount,
+                  o.lastError AS lastError, o.updatedAt AS updatedAt
+           FROM enhancement_outbox o INNER JOIN media_items m ON o.filePath = m.filePath
+           WHERE o.status = 'FAILED' AND m.isTrashed = 0 AND m.isCorrupted = 0
+           ORDER BY o.updatedAt DESC LIMIT :limit""",
+    )
+    abstract fun observeVisibleFailures(
+        limit: Int,
+    ): kotlinx.coroutines.flow.Flow<List<OutboxFailureRow>>
+
+    /** 用户裁决（忽略/删除）后终止这些路径的交接行，使其退出失败计数与清单。 */
+    @Query(
+        """UPDATE enhancement_outbox
+           SET status = 'SUPERSEDED', leaseUntil = 0, leaseToken = NULL, updatedAt = :now
+           WHERE filePath IN (:paths) AND status IN ('PENDING', 'FAILED')""",
+    )
+    abstract suspend fun supersedeByPaths(paths: List<String>, now: Long): Int
+
     /** Marks only rows that were expanded into independent user-owned tasks. */
     @Query(
         """UPDATE enhancement_outbox
@@ -281,3 +302,14 @@ abstract class EnhancementOutboxDao {
     @Query("DELETE FROM enhancement_outbox WHERE status = 'DONE' AND updatedAt < :before")
     abstract suspend fun deleteCompletedBefore(before: Long): Int
 }
+
+/** 失败任务页的交接失败行（关联 media_items 取展示字段）。 */
+data class OutboxFailureRow(
+    override val filePath: String,
+    override val fileName: String,
+    override val parentPath: String,
+    override val mediaType: String,
+    override val attemptCount: Int,
+    override val lastError: String?,
+    override val updatedAt: Long,
+) : com.renyxin.localalbum.core.model.FailedTaskRow

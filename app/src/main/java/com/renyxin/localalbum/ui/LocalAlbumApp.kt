@@ -26,6 +26,8 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -149,6 +151,7 @@ import com.renyxin.localalbum.ui.screens.RecommendationDetailScreen
 import com.renyxin.localalbum.ui.screens.RecommendationTab
 import com.renyxin.localalbum.ui.screens.SearchScreen
 import com.renyxin.localalbum.ui.screens.DuplicatePhotosScreen
+import com.renyxin.localalbum.ui.screens.FailedTasksScreen
 import com.renyxin.localalbum.ui.screens.TrashScreen
 import com.renyxin.localalbum.ui.screens.ModelImportWizardScreen
 import com.renyxin.localalbum.ui.screens.ModelJsonEditorScreen
@@ -192,6 +195,7 @@ sealed interface Screen {
     data object Search : Screen
     data object Timeline : Screen
     data object Trash : Screen
+    data object FailedTasks : Screen
     data object DuplicatePhotos : Screen
     data object Favorites : Screen
     data object Recommendations : Screen
@@ -453,6 +457,19 @@ fun LocalAlbumApp(
             )
         }
 
+        is Screen.FailedTasks -> {
+            val failedItems by albumViewModel.failedTaskItems.collectAsStateWithLifecycle()
+            val failedOpState by albumViewModel.failedTaskOperationState.collectAsStateWithLifecycle()
+            FailedTasksScreen(
+                items = failedItems,
+                operationState = failedOpState,
+                onOperationMessageConsumed = albumViewModel::consumeFailedTaskOperationResult,
+                onIgnore = { paths -> albumViewModel.ignoreFailedTaskFiles(paths) },
+                onDelete = { paths -> albumViewModel.deleteFailedTaskFiles(paths) },
+                onBack = { goBack() },
+            )
+        }
+
         is Screen.Favorites -> {
             val pagedFavorites = albumViewModel.pagedFavorites.collectAsLazyPagingItems()
             Scaffold(
@@ -615,29 +632,40 @@ fun LocalAlbumApp(
             val configuration = LocalConfiguration.current
             val isTablet = configuration.screenWidthDp >= 600
 
+            // Tab 级状态保持器：切走 Tab 时保存其内部 rememberSaveable（横幅"已显示"标记、
+            // 文件树展开状态等），切回时恢复；没有这层 Provider，Tab 内容离开组合即丢失。
+            val tabStateHolder = rememberSaveableStateHolder()
+
             Scaffold(
                 topBar = {
-                    Column {
-                        TopAppBar(
-                            title = {
-                                Text(
-                                    text = navDestinations[currentTab].title,
-                                    style = MaterialTheme.typography.headlineMedium,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            },
-                            actions = {
-                                // 扫描状态快捷入口（仅在非设置页显示，避免冗余）
-                                if (currentTab != MainTabIndex.SETTINGS && coreScanActive) {
-                                    IconButton(onClick = { currentTab = MainTabIndex.SETTINGS }) {
-                                        Icon(Icons.Default.Refresh, contentDescription = "扫描中")
-                                    }
+                    // 紧凑头部：替代 64dp 的 M3 TopAppBar，标题与扫描入口保持不变，
+                    // 视觉高度约减三分之一；surface 背景顺带覆盖状态栏区域（edge-to-edge）。
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface)
+                            .statusBarsPadding(),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 44.dp)
+                                .padding(horizontal = 16.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = navDestinations[currentTab].title,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f),
+                            )
+                            // 扫描状态快捷入口（仅在非设置页显示，避免冗余）
+                            if (currentTab != MainTabIndex.SETTINGS && coreScanActive) {
+                                IconButton(onClick = { currentTab = MainTabIndex.SETTINGS }) {
+                                    Icon(Icons.Default.Refresh, contentDescription = "扫描中")
                                 }
-                            },
-                            colors = TopAppBarDefaults.topAppBarColors(
-                                containerColor = MaterialTheme.colorScheme.surface,
-                            ),
-                        )
+                            }
+                        }
                         // 预留固定高度避免扫描开始/结束时布局跳动
                         Box(modifier = Modifier.fillMaxWidth().height(4.dp)) {
                             if (coreScanActive) {
@@ -699,14 +727,16 @@ fun LocalAlbumApp(
                             Spacer(Modifier.weight(1f))
                         }
                     Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                        currentTabContent(
-                            currentTab = currentTab,
-                            albumViewModel = albumViewModel,
-                            settingsViewModel = settingsViewModel,
-                            editionFeatures = editionFeatures,
-                            navigateTo = ::navigateTo,
-                            onSwitchTab = { currentTab = it },
-                        )
+                        tabStateHolder.SaveableStateProvider("main-tab:$currentTab") {
+                            currentTabContent(
+                                currentTab = currentTab,
+                                albumViewModel = albumViewModel,
+                                settingsViewModel = settingsViewModel,
+                                editionFeatures = editionFeatures,
+                                navigateTo = ::navigateTo,
+                                onSwitchTab = { currentTab = it },
+                            )
+                        }
                         // Phase 5.2: 全局进度指示器浮层；设置仅隐藏 UI，不中止后台扫描/识别。
                         if (shouldShowGlobalProgressIndicator(
                             showAnalysisProgressUi = settingsState.showAnalysisProgressUi,
@@ -727,14 +757,16 @@ fun LocalAlbumApp(
                 }
             } else {
                 Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-                    currentTabContent(
-                        currentTab = currentTab,
-                        albumViewModel = albumViewModel,
-                        settingsViewModel = settingsViewModel,
-                        editionFeatures = editionFeatures,
-                        navigateTo = ::navigateTo,
-                        onSwitchTab = { currentTab = it },
-                    )
+                    tabStateHolder.SaveableStateProvider("main-tab:$currentTab") {
+                        currentTabContent(
+                            currentTab = currentTab,
+                            albumViewModel = albumViewModel,
+                            settingsViewModel = settingsViewModel,
+                            editionFeatures = editionFeatures,
+                            navigateTo = ::navigateTo,
+                            onSwitchTab = { currentTab = it },
+                        )
+                    }
                     // Phase 5.2: 全局进度指示器浮层；设置仅隐藏 UI，不中止后台扫描/识别。
                     if (shouldShowGlobalProgressIndicator(
                         showAnalysisProgressUi = settingsState.showAnalysisProgressUi,
@@ -774,6 +806,7 @@ internal fun navigationStateKey(screen: Screen): String = when (screen) {
     Screen.Search -> "search"
     Screen.Timeline -> "timeline"
     Screen.Trash -> "trash"
+    Screen.FailedTasks -> "failed-tasks"
     Screen.DuplicatePhotos -> "duplicates"
     Screen.Favorites -> "favorites"
     Screen.Recommendations -> "recommendations"
@@ -873,6 +906,7 @@ private fun currentTabContent(
             albumViewModel = albumViewModel,
             editionFeatures = editionFeatures,
             onNavigateToTrash = { navigateTo(Screen.Trash) },
+            onNavigateToFailedTasks = { navigateTo(Screen.FailedTasks) },
             onNavigateToPluginManager = { navigateTo(Screen.PluginManager) },
             onNavigateToFaceSwap = { navigateTo(Screen.FaceSwap) },
             onNavigateToAnalysisPerformance = { navigateTo(Screen.AnalysisPerformance) },

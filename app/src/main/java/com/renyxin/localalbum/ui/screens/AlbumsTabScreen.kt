@@ -53,7 +53,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -84,8 +87,8 @@ internal fun AlbumsTab(
     val scanState by viewModel.scanState.collectAsStateWithLifecycle()
     val syncState by viewModel.albumSyncState.collectAsStateWithLifecycle()
 
-    // 视图模式：树形展开 / 平铺网格
-    var isTreeView by remember { mutableStateOf(true) }
+    // 视图模式：树形展开 / 平铺网格。进入相册详情会离开组合树，须跨导航存活。
+    var isTreeView by rememberSaveable { mutableStateOf(true) }
 
     // 将树形结构扁平化为相册列表（用于平铺网格视图）
     val flatAlbums = remember(tree) { flattenAlbums(tree) }
@@ -199,8 +202,15 @@ private fun AlbumTreeView(
     onAlbumClick: (Album) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // 展开状态映射：albumId -> 是否展开
-    val expandedIds = remember { mutableStateMapOf<String, Boolean>() }
+    // 展开状态映射：albumId -> 是否展开。跨导航可保存（只存展开项），返回时树不再被重置。
+    val expandedIds = rememberSaveable(
+        saver = listSaver<SnapshotStateMap<String, Boolean>, String>(
+            save = { map -> map.filterValues { expanded -> expanded }.keys.toList() },
+            restore = { ids ->
+                mutableStateMapOf<String, Boolean>().apply { ids.forEach { id -> put(id, true) } }
+            },
+        ),
+    ) { mutableStateMapOf() }
 
     // 首次加载时默认展开根节点
     LaunchedEffect(tree) {

@@ -302,6 +302,25 @@ interface MediaDao {
     suspend fun deleteFtsEntries(filePaths: List<String>)
 
     /**
+     * 以主表当前值重建这些路径的 FTS 行。FTS4 独立表不随主表 UPDATE 传播，
+     * OCR 等增强字段落库后必须显式同步，否则搜索 MATCH 只能读到旧值
+     * （直到下次全量扫描整表重建才偶然修复）。主表已不存在的路径自然只删不插。
+     */
+    @Query("""
+        INSERT INTO media_items_fts (filePath, fileName, parentPath, ocrText, make, model)
+        SELECT filePath, fileName, parentPath, ocrText, make, model FROM media_items
+        WHERE filePath IN (:filePaths)
+    """)
+    suspend fun insertFtsFromMedia(filePaths: List<String>)
+
+    @Transaction
+    suspend fun syncFtsRowsFromMainTable(filePaths: List<String>) {
+        if (filePaths.isEmpty()) return
+        deleteFtsEntries(filePaths)
+        insertFtsFromMedia(filePaths)
+    }
+
+    /**
      * 查询全部 FTS 索引条目（Phase 4.2 数据库导出使用）。
      */
     @Query("SELECT filePath, fileName, parentPath, ocrText, make, model FROM media_items_fts")
@@ -444,6 +463,15 @@ interface MediaDao {
     // ---- 损坏文件标记 ----
     @Query("UPDATE media_items SET isCorrupted = 1 WHERE filePath = :path")
     suspend fun markCorrupted(path: String)
+
+    /**
+     * 批量标记用户裁决为"忽略"的损坏文件。isCorrupted 同时是失败任务清单的过滤条件，
+     * 标记后即便后续扫描重新生成任务，这些文件也不会再出现在失败清单里。
+     */
+    @Transaction
+    suspend fun markCorruptedBatch(paths: List<String>) {
+        paths.distinct().forEach { path -> markCorrupted(path) }
+    }
 
     /** Bounded automatic recommendation refresh for explicitly affected directories. */
     @Query(

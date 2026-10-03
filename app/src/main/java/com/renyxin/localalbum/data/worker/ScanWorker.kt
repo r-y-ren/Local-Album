@@ -42,7 +42,15 @@ class ScanWorker(
             val drainResult = container.albumRepository.drainPersistedScanRequests()
             when (scanWorkDecision(drainResult, runAttemptCount)) {
                 ScanWorkDecision.SUCCESS -> Result.success()
+                // 有界失败重试（受 MAX_RETRIES 约束）仍用 WorkManager 退避。
                 ScanWorkDecision.RETRY -> Result.retry()
+                // Deferred（journal 全部处于重试延迟窗）改为自调度固定延迟的新请求：
+                // 新 WorkSpec 的退避计数从零开始。若走 Result.retry()，本唯一链的
+                // 指数退避会累积到小时级，把后续所有增量扫描压在毒化链后面。
+                ScanWorkDecision.DEFERRED -> {
+                    scheduleDeferred(applicationContext)
+                    Result.success()
+                }
                 ScanWorkDecision.FAILURE -> {
                     val failed = drainResult as PersistedScanDrainResult.Failed
                     container.libraryPipelineCoordinator.markActiveScanFailed(
@@ -96,6 +104,8 @@ class ScanWorker(
         SUCCESS,
         RETRY,
         FAILURE,
+        /** journal 存在但全部处于重试延迟窗：不消耗失败预算，也不烧 WorkManager 退避。 */
+        DEFERRED,
     }
 
     companion object {
@@ -108,7 +118,7 @@ class ScanWorker(
         ): ScanWorkDecision = when (result) {
             PersistedScanDrainResult.Completed -> ScanWorkDecision.SUCCESS
             // Durable work that is not claimable yet must never consume the finite failure budget.
-            PersistedScanDrainResult.Deferred -> ScanWorkDecision.RETRY
+            PersistedScanDrainResult.Deferred -> ScanWorkDecision.DEFERRED
             is PersistedScanDrainResult.Failed ->
                 if (runAttemptCount < MAX_RETRIES) {
                     ScanWorkDecision.RETRY
@@ -119,6 +129,8 @@ class ScanWorker(
         private const val UNIQUE_WORK_NAME = "localalbum_scan_worker"
         /** Worker 自身前台通知 ID，与 ScanServiceController.NOTIFICATION_ID 区分。 */
         private const val WORKER_NOTIFICATION_ID = 1002
+        /** Deferred 自调度延迟，对齐 journal 的重试延迟窗。 */
+        private const val DEFERRED_RESCHEDULE_SECONDS = 5L
 
         /**
          * Called only by the durable pipeline pump after scan-stage admission. Appending preserves a
@@ -126,16 +138,42 @@ class ScanWorker(
          * external event bursts are deduplicated earlier by LibraryPipelineWorker's KEEP policy.
          */
         fun schedule(context: Context) {
-            val request = OneTimeWorkRequestBuilder<ScanWorker>()
+            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+                UNIQUE_WORK_NAME,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                buildRequest(initialDelaySeconds = 0L),
+            )
+        }
+
+        /** Deferred 重排：与 journal 重试窗对齐的固定延迟；每次都是全新 WorkSpec。 */
+        internal fun scheduleDeferred(context: Context) {
+            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+                UNIQUE_WORK_NAME,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                buildRequest(initialDelaySeconds = DEFERRED_RESCHEDULE_SECONDS),
+            )
+        }
+
+        /**
+         * 启动自愈：历史重试风暴会把本唯一链的指数退避毒化到小时级，且
+         * APPEND_OR_REPLACE 不会替换"仍在退避重试中"的链。启动时点（本进程尚无
+         * 运行中 worker）整链取消是安全的；随后 wake() 依持久状态重建所需队列。
+         */
+        fun resetPoisonedChain(context: Context) {
+            WorkManager.getInstance(context.applicationContext)
+                .cancelUniqueWork(UNIQUE_WORK_NAME)
+        }
+
+        private fun buildRequest(initialDelaySeconds: Long): androidx.work.OneTimeWorkRequest {
+            val builder = OneTimeWorkRequestBuilder<ScanWorker>()
                 .setConstraints(
                     Constraints.Builder()
                         .setRequiresBatteryNotLow(true)
                         .build(),
                 )
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.SECONDS)
-                .build()
-            WorkManager.getInstance(context.applicationContext)
-                .enqueueUniqueWork(UNIQUE_WORK_NAME, ExistingWorkPolicy.APPEND_OR_REPLACE, request)
+            if (initialDelaySeconds > 0L) builder.setInitialDelay(initialDelaySeconds, TimeUnit.SECONDS)
+            return builder.build()
         }
     }
 }

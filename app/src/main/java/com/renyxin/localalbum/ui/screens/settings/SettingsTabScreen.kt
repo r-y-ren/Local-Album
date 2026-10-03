@@ -34,6 +34,7 @@ internal fun SettingsTab(
     albumViewModel: AlbumViewModel,
     editionFeatures: EditionFeatures,
     onNavigateToTrash: () -> Unit = {},
+    onNavigateToFailedTasks: () -> Unit = {},
     onNavigateToPluginManager: () -> Unit = {},
     onNavigateToFaceSwap: () -> Unit = {},
     onNavigateToAnalysisPerformance: () -> Unit = {},
@@ -132,6 +133,7 @@ internal fun SettingsTab(
                 coreScanState = coreScanState,
                 enhancementState = enhancementState,
                 albumViewModel = albumViewModel,
+                onNavigateToFailedTasks = onNavigateToFailedTasks,
             )
         }
 

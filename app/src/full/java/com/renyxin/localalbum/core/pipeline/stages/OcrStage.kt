@@ -11,6 +11,8 @@ import com.renyxin.localalbum.core.pipeline.StageType
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import java.io.File
 
+private const val FTS_SYNC_BATCH_SIZE = 500
+
 /**
  * OCR 文字识别阶段（Phase 2 重构）。
  *
@@ -94,6 +96,12 @@ class OcrStage(
         results.filter { !it.success }.forEach {
             Log.w("OcrStage", "OCR 识别失败: ${it.path}", it.error)
         }
+        // FTS4 独立表不随主表 UPDATE 传播：识别成功的行按批重建 FTS，
+        // 保证 setOcrText 写入的文本能立即被关键词搜索命中。批大小受
+        // SQLite 宿主变量上限（旧版本 999）约束取 500。
+        results.asSequence().filter { it.success }.map { it.path }
+            .chunked(FTS_SYNC_BATCH_SIZE)
+            .forEach { batch -> mediaDao.syncFtsRowsFromMainTable(batch) }
 
         return StageResult(
             successCount = success,
