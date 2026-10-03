@@ -268,6 +268,59 @@ class HybridIndexer(
         AnalysisWorker.publishQueueReplacement(context, hasRunnableTasks = runnable > 0)
     }
 
+    /**
+     * 仅重跑单个分析阶段的用户任务：为全部图片按该阶段当前 stage-task scope
+     * （含 modelVersion）重排 PENDING 用户优先级任务。
+     *
+     * 与 [requestFullReanalysis] 的区别：不动其他阶段的任务，也不清 analysis_state
+     * 检查点——阶段 modelVersion 升级后，旧 done 记录在 getDonePaths 按版本过滤时
+     * 天然失效，重跑不需要抹掉检查点。
+     *
+     * @return 排入后立即可领取的任务数（0 表示该阶段在当前版本下无待执行任务）。
+     */
+    suspend fun requestStageRerun(stageId: String): Int {
+        val pipeline = pluginPipeline ?: return 0
+        val dao = analysisTaskDao ?: return 0
+        val scope = pipeline.stageTaskScopes[stageId]
+        if (scope == null) {
+            Log.w(TAG, "stage-rerun ignored: current edition has no stage $stageId")
+            return 0
+        }
+
+        // 与全量重分析同语义的队列边界：取消旧链并回收中断租约，防止在途 Stage
+        // 批次与本请求的种子写入交错。
+        AnalysisWorker.cancelForQueueReplacement(context)
+        EnhancementResourceGate.withInteractiveAi {
+            val now = System.currentTimeMillis()
+            dao.recoverInterruptedLeases(now)
+            database?.withTransaction {
+                dao.prepareFullReanalysisScope(
+                    scope = scope,
+                    scanId = null,
+                    mediaType = MediaType.IMAGE.name,
+                    priority = AnalysisTaskEntity.PRIORITY_USER,
+                    now = now,
+                )
+            } ?: dao.resetAll(AnalysisTaskEntity.PRIORITY_USER, now, scope)
+        }
+        val runnable = dao.countRunnable(scope)
+        Log.i(TAG, "stage-rerun prepared: stage=$stageId runnable=$runnable")
+        AnalysisWorker.publishQueueReplacement(context, hasRunnableTasks = runnable > 0)
+        return runnable
+    }
+
+    /** 按阶段重建页的清单：当前版本流水线的全部阶段（DAG 顺序）。 */
+    suspend fun stageRerunTargets(): List<StageRerunTarget> {
+        val pipeline = pluginPipeline ?: return emptyList()
+        return pipeline.admittedStages.map { stage ->
+            StageRerunTarget(
+                stageId = stage.stageId,
+                displayName = stage.displayName,
+                modelVersion = stage.modelVersion,
+            )
+        }
+    }
+
     /** 当前已注册的 ContentObserver，用于注销时引用 */
     @Volatile
     private var registeredObserver: MediaContentObserver? = null
@@ -1567,4 +1620,10 @@ private data class ChangeAcknowledgement(
 private data class DeltaDrainResult(
     val result: ScanCommitResult,
     val acknowledgements: List<ChangeAcknowledgement>,
+)
+/** 按阶段重建页的展示项：阶段身份、用户向名称与当前模型版本。 */
+data class StageRerunTarget(
+    val stageId: String,
+    val displayName: String,
+    val modelVersion: Int,
 )

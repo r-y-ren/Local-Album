@@ -596,6 +596,59 @@ class AlbumViewModel(
         viewModelScope.launch { repository.setPersonName(clusterId, name) }
     }
 
+    // ---- 按阶段重建（分析维护页） ----
+
+    data class AnalysisStageTarget(
+        val stageId: String,
+        val displayName: String,
+        val modelVersion: Int,
+    )
+
+    sealed interface StageRerunState {
+        data object Idle : StageRerunState
+        data class Running(val stageId: String) : StageRerunState
+        data class Completed(val stageId: String, val queued: Int) : StageRerunState
+        data class Failed(val stageId: String, val message: String) : StageRerunState
+    }
+
+    private val _stageRerunState = MutableStateFlow<StageRerunState>(StageRerunState.Idle)
+    val stageRerunState: StateFlow<StageRerunState> = _stageRerunState.asStateFlow()
+
+    private val _analysisStageTargets =
+        MutableStateFlow<List<AnalysisStageTarget>>(emptyList())
+    val analysisStageTargets: StateFlow<List<AnalysisStageTarget>> =
+        _analysisStageTargets.asStateFlow()
+
+    fun loadAnalysisStageTargets() {
+        viewModelScope.launch {
+            runCatching { repository.analysisStageRerunTargets() }
+                .onSuccess { targets ->
+                    _analysisStageTargets.value = targets.map {
+                        AnalysisStageTarget(it.stageId, it.displayName, it.modelVersion)
+                    }
+                }
+        }
+    }
+
+    /** 仅重跑单个分析阶段（用户优先级任务，不动其他阶段与检查点）。 */
+    fun rerunAnalysisStage(stageId: String) {
+        if (_stageRerunState.value is StageRerunState.Running) return
+        viewModelScope.launch {
+            _stageRerunState.value = StageRerunState.Running(stageId)
+            _stageRerunState.value = runCatching {
+                StageRerunState.Completed(stageId, repository.rerunAnalysisStage(stageId))
+            }.getOrElse { error ->
+                StageRerunState.Failed(stageId, error.message ?: "重跑任务创建失败")
+            }
+        }
+    }
+
+    fun consumeStageRerunResult() {
+        if (_stageRerunState.value !is StageRerunState.Running) {
+            _stageRerunState.value = StageRerunState.Idle
+        }
+    }
+
     /** 仅启动显式人物原型维护，不触发图片全量重分析。 */
     fun maintainFaceClusters() = repository.startFaceClusterMaintenance()
 

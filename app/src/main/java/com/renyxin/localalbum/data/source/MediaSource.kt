@@ -898,24 +898,51 @@ class MediaSource(
         }.onFailure { staged.delete() }.getOrNull()
     }
 
-    /** minSdk 29：retriever 始终绑定已校验的同一只读 fd。 */
+    /**
+     * 损坏/异常视频的 MediaMetadataRetriever 原生提取单次可卡 20-40 秒甚至挂死，
+     * 曾整段占住后台增强资源道。视频帧提取统一走本线程池，调用侧用看门狗超时兜底。
+     */
+    private val videoDecodeExecutor: java.util.concurrent.ExecutorService by lazy {
+        java.util.concurrent.Executors.newCachedThreadPool { runnable ->
+            Thread(runnable, "video-frame-decode").apply { isDaemon = true }
+        }
+    }
+
+    /** minSdk 29：retriever 始终绑定已校验的同一只读 fd；超时即判本文件解码失败。 */
     private fun decodeVideoFrameForTarget(source: RandomAccessFile, targetPx: Int): Bitmap? {
-        return runCatching {
-            val retriever = MediaMetadataRetriever()
-            try {
-                retriever.setDataSource(source.fd)
-                val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                val frameTimeUs = if (durationMs > 0) durationMs * 1000 / 3 else 0L
-                retriever.getScaledFrameAtTime(
-                    frameTimeUs,
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                    targetPx,
-                    targetPx,
-                )
-            } finally {
-                retriever.release()
-            }
-        }.getOrNull()
+        val retriever = MediaMetadataRetriever()
+        val future = videoDecodeExecutor.submit(
+            java.util.concurrent.Callable {
+                try {
+                    retriever.setDataSource(source.fd)
+                    val durationMs = retriever.extractMetadata(
+                        MediaMetadataRetriever.METADATA_KEY_DURATION,
+                    )?.toLongOrNull() ?: 0L
+                    val frameTimeUs = if (durationMs > 0) durationMs * 1000 / 3 else 0L
+                    retriever.getScaledFrameAtTime(
+                        frameTimeUs,
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                        targetPx,
+                        targetPx,
+                    )
+                } finally {
+                    runCatching { retriever.release() }
+                }
+            },
+        )
+        return try {
+            future.get(VIDEO_FRAME_DECODE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: java.util.concurrent.TimeoutException) {
+            // 从调用侧 release 以中断原生提取；超时文件经任务重试走向 FAILED 终态，
+            // 不再以每条 20-40s 的代价反复重试拖死缩略图车道。
+            runCatching { retriever.release() }
+            future.cancel(true)
+            null
+        } catch (e: java.util.concurrent.ExecutionException) {
+            null
+        } catch (e: InterruptedException) {
+            null
+        }
     }
 
     private fun validateGeneratedThumbnail(file: File): Boolean {
@@ -1047,6 +1074,8 @@ class MediaSource(
     }
 
     internal companion object {
+        /** 单个视频帧提取的看门狗上限；4K 长视频的合法提取远低于此值。 */
+        internal const val VIDEO_FRAME_DECODE_TIMEOUT_MS = 10_000L
         const val MAX_MEDIASTORE_RESOLVE_BATCH = 500
         const val TAG = "MediaSource"
 

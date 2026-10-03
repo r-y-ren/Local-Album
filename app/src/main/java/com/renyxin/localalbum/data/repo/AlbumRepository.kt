@@ -928,6 +928,31 @@ class AlbumRepository(
     }
 
     /**
+     * 仅重跑单个分析阶段（不重新扫描、不动其他阶段）。预处理/模型升级后由用户
+     * 显式触发；modelVersion 升级本身只让检查点失效，不会自动排新任务。
+     *
+     * @return 排入后立即可领取的任务数。
+     */
+    suspend fun rerunAnalysisStage(stageId: String): Int = withContext(Dispatchers.IO) {
+        scanMutex.withLock {
+            val indexer = hybridIndexer
+                ?: error("HybridIndexer 未注入，无法创建阶段重跑任务")
+            _scanState.value = ScanState.Scanning("正在创建重跑任务…")
+            try {
+                indexer.requestStageRerun(stageId)
+            } finally {
+                _scanState.value = ScanState.Done
+            }
+        }
+    }
+
+    /** 按阶段重建页的清单（当前版本流水线的全部阶段，DAG 顺序）。 */
+    suspend fun analysisStageRerunTargets(): List<com.renyxin.localalbum.core.index.StageRerunTarget> =
+        withContext(Dispatchers.IO) {
+            hybridIndexer?.stageRerunTargets().orEmpty()
+        }
+
+    /**
      * Phase 1: 分析完成度统计，供 UI 显示「已分析 x/y」。
      *
      * @return (已完成去重文件数, 媒体总数)

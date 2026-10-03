@@ -35,6 +35,7 @@ internal fun SettingsTab(
     editionFeatures: EditionFeatures,
     onNavigateToTrash: () -> Unit = {},
     onNavigateToFailedTasks: () -> Unit = {},
+    onNavigateToAnalysisMaintenance: () -> Unit = {},
     onNavigateToPluginManager: () -> Unit = {},
     onNavigateToFaceSwap: () -> Unit = {},
     onNavigateToAnalysisPerformance: () -> Unit = {},
@@ -134,6 +135,7 @@ internal fun SettingsTab(
                 enhancementState = enhancementState,
                 albumViewModel = albumViewModel,
                 onNavigateToFailedTasks = onNavigateToFailedTasks,
+                onNavigateToAnalysisMaintenance = onNavigateToAnalysisMaintenance,
             )
         }
 

@@ -75,7 +75,10 @@ class PluginAnalysisPipeline(
     }
 
     /** Worker uses this to reject partial DAG results as task completion. */
-    val requiredStageIds: Set<String> by lazy { stages.mapTo(linkedSetOf()) { it.stageId } }
+    val requiredStageIds: Set<String> get() = stages.mapTo(linkedSetOf()) { it.stageId }
+
+    /** 按阶段重建入口的展示清单（DAG 顺序，含 stageId/displayName/modelVersion）。 */
+    val admittedStages: List<AnalysisStage> get() = sortedStages.toList()
 
     /**
      * Durable identity for each admitted Stage. The scope includes the complete policy/provider

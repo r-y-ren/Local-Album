@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cap video frame extraction at 10s with a watchdog (dedicated pool + external retriever release on timeout): corrupted videos previously blocked 20-40s each — or indefinitely — in MediaMetadataRetriever native calls, stalling the entire background enhancement lane.
+
+### Added
+
+- Analysis rebuild page (设置 → 扫描操作 → 分析重建): per-stage full re-runs (OCR / faces / scene / quality / semantic) with engine versions shown — stage version bumps invalidate checkpoints but never enqueue work on their own, so upgrades now have an explicit re-run entry; replaces the interim "重新识别文字" button.
+
 - Chinese keyword search now matches text inside OCR lines and Chinese folder/file names: FTS rows are indexed as per-character + adjacent-bigram sequences and CJK queries become exact-token or consecutive-bigram phrase matches (unicode61's single-token CJK runs previously made only whole-sentence prefixes searchable); all FTS write paths (scan delta, staged commit, backup import, OCR sync) emit the expanded format.
 - OCR accuracy: detection preprocessing now scales uniformly to the 640 square with mean-value padding instead of stretching any aspect ratio into it, and recognition crops are height-normalized to 48px with right padding instead of being squeezed into 320×48 — distorted glyphs were the dominant source of misrecognized characters; decode goes through the shared robust decoder (16-bit PNG support) at a 1280 cap, and up to 32 text regions per image are recognized (was 12, which silently dropped most text on long screenshots/posters).
 

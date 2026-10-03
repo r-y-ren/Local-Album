@@ -30,6 +30,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -51,6 +52,7 @@ internal fun ScanControlSection(
     enhancementState: EnhancementState,
     albumViewModel: AlbumViewModel,
     onNavigateToFailedTasks: () -> Unit = {},
+    onNavigateToAnalysisMaintenance: () -> Unit = {},
 ) {
     val showRebuildConfirmation = remember { mutableStateOf(false) }
     val failedThumbnailCount by albumViewModel.failedThumbnailCount.collectAsStateWithLifecycle()
@@ -147,6 +149,15 @@ internal fun ScanControlSection(
                 shape = RoundedCornerShape(12.dp),
             ) {
                 Text("完整重建图库")
+            }
+
+            OutlinedButton(
+                onClick = onNavigateToAnalysisMaintenance,
+                enabled = hasScanRoots,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Text("分析重建（按阶段重跑）")
             }
 
             Text(

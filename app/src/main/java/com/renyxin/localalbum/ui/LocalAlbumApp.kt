@@ -151,6 +151,7 @@ import com.renyxin.localalbum.ui.screens.RecommendationDetailScreen
 import com.renyxin.localalbum.ui.screens.RecommendationTab
 import com.renyxin.localalbum.ui.screens.SearchScreen
 import com.renyxin.localalbum.ui.screens.DuplicatePhotosScreen
+import com.renyxin.localalbum.ui.screens.AnalysisMaintenanceScreen
 import com.renyxin.localalbum.ui.screens.FailedTasksScreen
 import com.renyxin.localalbum.ui.screens.TrashScreen
 import com.renyxin.localalbum.ui.screens.ModelImportWizardScreen
@@ -196,6 +197,7 @@ sealed interface Screen {
     data object Timeline : Screen
     data object Trash : Screen
     data object FailedTasks : Screen
+    data object AnalysisMaintenance : Screen
     data object DuplicatePhotos : Screen
     data object Favorites : Screen
     data object Recommendations : Screen
@@ -466,6 +468,19 @@ fun LocalAlbumApp(
                 onOperationMessageConsumed = albumViewModel::consumeFailedTaskOperationResult,
                 onIgnore = { paths -> albumViewModel.ignoreFailedTaskFiles(paths) },
                 onDelete = { paths -> albumViewModel.deleteFailedTaskFiles(paths) },
+                onBack = { goBack() },
+            )
+        }
+
+        is Screen.AnalysisMaintenance -> {
+            val stageTargets by albumViewModel.analysisStageTargets.collectAsStateWithLifecycle()
+            val rerunState by albumViewModel.stageRerunState.collectAsStateWithLifecycle()
+            AnalysisMaintenanceScreen(
+                targets = stageTargets,
+                rerunState = rerunState,
+                onRerun = albumViewModel::rerunAnalysisStage,
+                onStateConsumed = albumViewModel::consumeStageRerunResult,
+                onLoadTargets = albumViewModel::loadAnalysisStageTargets,
                 onBack = { goBack() },
             )
         }
@@ -807,6 +822,7 @@ internal fun navigationStateKey(screen: Screen): String = when (screen) {
     Screen.Timeline -> "timeline"
     Screen.Trash -> "trash"
     Screen.FailedTasks -> "failed-tasks"
+    Screen.AnalysisMaintenance -> "analysis-maintenance"
     Screen.DuplicatePhotos -> "duplicates"
     Screen.Favorites -> "favorites"
     Screen.Recommendations -> "recommendations"
@@ -907,6 +923,7 @@ private fun currentTabContent(
             editionFeatures = editionFeatures,
             onNavigateToTrash = { navigateTo(Screen.Trash) },
             onNavigateToFailedTasks = { navigateTo(Screen.FailedTasks) },
+            onNavigateToAnalysisMaintenance = { navigateTo(Screen.AnalysisMaintenance) },
             onNavigateToPluginManager = { navigateTo(Screen.PluginManager) },
             onNavigateToFaceSwap = { navigateTo(Screen.FaceSwap) },
             onNavigateToAnalysisPerformance = { navigateTo(Screen.AnalysisPerformance) },
