@@ -13,6 +13,7 @@ import com.renyxin.localalbum.core.plugin.model.ModelManager
 import com.renyxin.localalbum.core.runtime.NativeAiRuntime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.math.min
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -44,7 +45,15 @@ class PaddleOCRProvider(
         private const val MIN_BOX_AREA = 100
         private const val MIN_REC_BOX_WIDTH = 12
         private const val MIN_REC_BOX_HEIGHT = 10
-        private const val MAX_TEXT_REGIONS = 12
+        // 预处理等比缩放后短边/右侧的填充色 = ImageNet 均值（与官方"归一化后补 0"等价）
+        private const val PAD_GRAY = 0xFF7C7468.toInt()
+        /** OCR 解码源图的最长边上限：识别 crop 取自源图，上限直接决定小字可读性。 */
+        private const val DECODE_MAX_DIM = 1280
+        /**
+         * 每图参与识别的文字区域上限。原值 12 导致长截图/海报大量文字被直接跳过、
+         * 搜索无文本可索引；mobile 级识别单次推理 ~20ms，32 个区域仍在一秒级。
+         */
+        private const val MAX_TEXT_REGIONS = 32
 
         // 检测使用 ImageNet 归一化
         private val DET_MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
@@ -160,8 +169,20 @@ class PaddleOCRProvider(
     private fun detectTextRegions(bitmap: Bitmap, session: OrtSession): List<IntArray> {
         val env = NativeAiRuntime.getOrtEnvironment()
         return try {
-            val resized = Bitmap.createScaledBitmap(bitmap, DET_INPUT_SIZE, DET_INPUT_SIZE, true)
-            val buf = preprocessDet(resized)
+            // 等比缩放到最长边 640 后把短边填充到 640×640（官方 DB 预处理）。
+            // 原实现直接把任意比例的图硬拉伸成正方形，纵横比破坏导致小字在检测阶段就糊掉。
+            val scale = min(
+                DET_INPUT_SIZE.toFloat() / bitmap.width,
+                DET_INPUT_SIZE.toFloat() / bitmap.height,
+            )
+            val rw = (bitmap.width * scale).toInt().coerceIn(1, DET_INPUT_SIZE)
+            val rh = (bitmap.height * scale).toInt().coerceIn(1, DET_INPUT_SIZE)
+            val resized = Bitmap.createScaledBitmap(bitmap, rw, rh, true)
+            val padded = Bitmap.createBitmap(DET_INPUT_SIZE, DET_INPUT_SIZE, Bitmap.Config.ARGB_8888)
+            padded.eraseColor(PAD_GRAY)
+            val canvas = android.graphics.Canvas(padded)
+            canvas.drawBitmap(resized, 0f, 0f, null)
+            val buf = preprocessDet(padded)
 
             val input = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, DET_INPUT_SIZE.toLong(), DET_INPUT_SIZE.toLong()))
             val result = session.run(mapOf(session.inputNames.iterator().next() to input))
@@ -177,15 +198,13 @@ class PaddleOCRProvider(
             if (probMap == null || probMap.isEmpty()) return emptyList()
 
             val boxes = findTextBoxes(probMap, DET_THRESH)
-            // 缩放回原图坐标
-            val sx = bitmap.width.toFloat() / DET_INPUT_SIZE
-            val sy = bitmap.height.toFloat() / DET_INPUT_SIZE
+            // 等比映射回原图坐标（框只可能落在缩放图内，填充区不会有文字框）
             boxes.map { b ->
                 intArrayOf(
-                    (b[0] * sx).toInt().coerceIn(0, bitmap.width - 1),
-                    (b[1] * sy).toInt().coerceIn(0, bitmap.height - 1),
-                    (b[2] * sx).toInt().coerceIn(1, bitmap.width),
-                    (b[3] * sy).toInt().coerceIn(1, bitmap.height),
+                    (b[0] / scale).toInt().coerceIn(0, bitmap.width - 1),
+                    (b[1] / scale).toInt().coerceIn(0, bitmap.height - 1),
+                    (b[2] / scale).toInt().coerceIn(1, bitmap.width),
+                    (b[3] / scale).toInt().coerceIn(1, bitmap.height),
                 )
             }.filter { it[2] - it[0] > 0 && it[3] - it[1] > 0 }
                 .sortedWith(compareBy({ it[1] }, { it[0] }))
@@ -260,8 +279,16 @@ class PaddleOCRProvider(
     private fun recognizeText(crop: Bitmap, session: OrtSession): String {
         val env = NativeAiRuntime.getOrtEnvironment()
         return try {
-            val resized = Bitmap.createScaledBitmap(crop, REC_IMG_W, REC_IMG_H, true)
-            val buf = preprocessRec(resized)
+            // 官方识别预处理：高度等比缩放到 48，右侧填充到 320（填充=ImageNet 均值）。
+            // 原实现把任意长宽比硬拉伸到 320×48，长文本行被水平压扁 2-3 倍，
+            // 字形失真是"很多错字"的直接原因；只有行宽超过 6.7:1 时才允许截断式压缩。
+            val ratio = REC_IMG_H.toFloat() / crop.height
+            val targetW = (crop.width * ratio).toInt().coerceIn(1, REC_IMG_W)
+            val resized = Bitmap.createScaledBitmap(crop, targetW, REC_IMG_H, true)
+            val recInput = Bitmap.createBitmap(REC_IMG_W, REC_IMG_H, Bitmap.Config.ARGB_8888)
+            recInput.eraseColor(PAD_GRAY)
+            android.graphics.Canvas(recInput).drawBitmap(resized, 0f, 0f, null)
+            val buf = preprocessRec(recInput)
 
             val input = OnnxTensor.createTensor(env, buf, longArrayOf(1, 3, REC_IMG_H.toLong(), REC_IMG_W.toLong()))
             val result = session.run(mapOf(session.inputNames.iterator().next() to input))
@@ -351,13 +378,8 @@ class PaddleOCRProvider(
         return if (w > 0 && h > 0) Bitmap.createBitmap(source, x, y, w, h) else null
     }
 
-    private fun decodeBitmap(file: File): Bitmap? {
-        return try {
-            // 16-bit PNG 会解码为 RGBA_F16，强制 8 位（详见 InsightFaceProvider）
-            BitmapFactory.decodeFile(
-                file.absolutePath,
-                BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 },
-            )
-        } catch (_: Exception) { null }
-    }
+    private fun decodeBitmap(file: File): Bitmap? =
+        // RobustImageDecode 内含 ImageDecoder 兜底（16-bit PNG 等），并按 1280 采样
+        // 上限平衡内存与小字可读性——识别 crop 取自解码后的源图。
+        com.renyxin.localalbum.core.image.RobustImageDecode.decodeFile(file, maxDim = DECODE_MAX_DIM)
 }

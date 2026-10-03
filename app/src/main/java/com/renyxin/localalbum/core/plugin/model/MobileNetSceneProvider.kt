@@ -140,7 +140,9 @@ class MobileNetSceneProvider(
      * - V3: ByteBuffer 存 float32 归一化值 (pixel / 255.0f)
      */
     private fun preprocess(bitmap: Bitmap): ByteBuffer {
-        val resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
+        // 短边等比缩放 + 中心裁剪（官方分类预处理）：硬拉伸会压扁全景图/长截图，
+        // 场景误判直接影响 OCR 的 scope 过滤（screenshot/document 标签）。
+        val resized = com.renyxin.localalbum.core.image.centerCropSquare(bitmap, INPUT_SIZE)
         // float32: 每个值 4 字节
         val buffer = ByteBuffer.allocateDirect(INPUT_SIZE * INPUT_SIZE * INPUT_CHANNELS * 4)
         buffer.order(ByteOrder.nativeOrder())

@@ -35,7 +35,8 @@ class OcrStage(
     override val dependencies = listOf(AnalysisStage.STAGE_FACE)
     override val fileConcurrency = 1
     // 字典从 ppocr_keys_v1.txt (6623) 升级到 ppocrv5_dict.txt (18383)，bump 版本号强制重跑
-    override val modelVersion: Int = 2
+    // v3: 检测/识别预处理重构（等比缩放+填充替代硬拉伸），错字率显著变化，强制全量重跑
+    override val modelVersion: Int = 3
 
     override suspend fun execute(
         filePaths: List<String>,

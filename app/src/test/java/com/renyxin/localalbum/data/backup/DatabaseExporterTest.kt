@@ -152,20 +152,8 @@ class DatabaseExporterTest {
         override suspend fun insertFtsAll(entries: List<MediaFts>) {
             for (e in entries) ftsStore[e.filePath] = e
         }
-        override suspend fun insertFtsFromMedia(filePaths: List<String>) {
-            for (p in filePaths) {
-                store[p]?.let { entity ->
-                    ftsStore[p] = MediaFts(
-                        filePath = entity.filePath,
-                        fileName = entity.fileName,
-                        parentPath = entity.parentPath,
-                        ocrText = entity.ocrText,
-                        make = entity.make,
-                        model = entity.model,
-                    )
-                }
-            }
-        }
+        override suspend fun getEntitiesByPaths(filePaths: List<String>): List<MediaEntity> =
+            filePaths.mapNotNull { store[it] }
         override suspend fun updateQualityScore(path: String, score: Float) {}
         override suspend fun setQualityScore(path: String, score: Float) {}
         override suspend fun updatePerceptualHash(path: String, hash: Long) {}

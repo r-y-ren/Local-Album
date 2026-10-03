@@ -38,4 +38,34 @@ class FtsQueryBuilderTest {
         })
         assertTrue("operator-shaped input must remain a lowercase token", "fileName:or*" in query)
     }
+
+    @Test
+    fun `single cjk char queries exact token without prefix star`() {
+        val query = FtsQueryBuilder.build("天", KeywordSearchProfile.FULL)
+        // 单字走精确 token（带引号转义），绝不能带 * 前缀——否则二元词组会大量误命中
+        assertTrue("\"天\"" in query)
+        assertFalse("*" in query)
+    }
+
+    @Test
+    fun `two cjk char queries exact bigram token`() {
+        val query = FtsQueryBuilder.build("天气", KeywordSearchProfile.LITE)
+        assertTrue("\"天气\"" in query)
+        assertFalse("*" in query)
+    }
+
+    @Test
+    fun `long cjk phrase becomes consecutive bigram phrase query`() {
+        val query = FtsQueryBuilder.build("天气很好", KeywordSearchProfile.FULL)
+        // ≥3 字 → 相邻二元词组短语（等价精确子串匹配）；FTS4 不支持列过滤短语，不带列名
+        assertTrue("\"天气 气很 很好\"" in query)
+        assertFalse("ocrText:" in query.split("\"天气 气很 很好\"")[0])
+    }
+
+    @Test
+    fun `mixed latin and cjk tokens keep their respective strategies`() {
+        val query = FtsQueryBuilder.build("sunset 天气", KeywordSearchProfile.FULL)
+        assertTrue("ocrText:sunset*" in query)
+        assertTrue("\"天气\"" in query)
+    }
 }

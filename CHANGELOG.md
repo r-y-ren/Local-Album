@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Chinese keyword search now matches text inside OCR lines and Chinese folder/file names: FTS rows are indexed as per-character + adjacent-bigram sequences and CJK queries become exact-token or consecutive-bigram phrase matches (unicode61's single-token CJK runs previously made only whole-sentence prefixes searchable); all FTS write paths (scan delta, staged commit, backup import, OCR sync) emit the expanded format.
+- OCR accuracy: detection preprocessing now scales uniformly to the 640 square with mean-value padding instead of stretching any aspect ratio into it, and recognition crops are height-normalized to 48px with right padding instead of being squeezed into 320×48 — distorted glyphs were the dominant source of misrecognized characters; decode goes through the shared robust decoder (16-bit PNG support) at a 1280 cap, and up to 32 text regions per image are recognized (was 12, which silently dropped most text on long screenshots/posters).
+
+### Added
+
+- OCR stage version bumped to 3 to force re-recognition with the fixed preprocessing; as files are re-recognized their FTS rows are rebuilt in the new CJK-expanded format on the fly.
 - Stop `ThumbnailCacheMaintenanceWorker` from re-enqueuing itself forever once a library has a full page of still-referenced thumbnails older than the 24h TTL (caused constant ~150ms WorkManager churn, 150%+ CPU, multi-second GC pauses that made every incremental scan appear stuck on "loading"); cleanup now advances past all-referenced windows and only continues when a window actually deleted something.
 - Fix the incremental-scan lost-wake deadlock: `ScanWorker`'s unique WorkManager chain accumulated hours of exponential backoff from unbounded `Result.retry()` on deferred journals, and `APPEND_OR_REPLACE` never replaced a still-backing-off chain — deferred drains now self-schedule a fresh request with a fixed delay, poisoned scan/pump chains are reset on app start, and journal poison events terminalize to `FAILED` after 5 attempts instead of blocking the pipeline forever.
 - Include OCR results in keyword search immediately: the OCR stage now rebuilds the FTS row for each recognized file in the same pass (previously `media_items_fts.ocrText` stayed empty until the next full scan, so OCR text was unsearchable).

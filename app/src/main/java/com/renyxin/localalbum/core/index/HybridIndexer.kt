@@ -25,6 +25,7 @@ import com.renyxin.localalbum.data.db.entity.ScanStagingEntity
 import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.worker.AnalysisWorker
 import com.renyxin.localalbum.data.db.entity.MediaFts
+import com.renyxin.localalbum.data.db.entity.indexedMediaFtsOf
 import com.renyxin.localalbum.data.repo.DeletionFailurePolicy
 import com.renyxin.localalbum.data.source.MediaSource
 import com.renyxin.localalbum.data.source.MediaStoreLookupStatus
@@ -863,16 +864,7 @@ class HybridIndexer(
             if (entities.isNotEmpty()) {
                 mediaDao.insertAll(entities)
                 mediaDao.deleteFtsEntries(entities.map { it.filePath })
-                mediaDao.insertFtsAll(entities.map {
-                    MediaFts(
-                        filePath = it.filePath,
-                        fileName = it.fileName,
-                        parentPath = it.parentPath,
-                        ocrText = it.ocrText,
-                        make = it.make,
-                        model = it.model,
-                    )
-                })
+                mediaDao.insertFtsAll(entities.map { indexedMediaFtsOf(it) })
                 enqueueEnhancementOutbox(entities, scanId, now)
             }
             val references = upserts.map { upsert ->
@@ -1201,16 +1193,7 @@ class HybridIndexer(
             }
             mediaDao.insertAll(upserts)
             mediaDao.deleteFtsEntries(upserts.map { it.filePath })
-            mediaDao.insertFtsAll(upserts.map {
-                MediaFts(
-                    filePath = it.filePath,
-                    fileName = it.fileName,
-                    parentPath = it.parentPath,
-                    ocrText = it.ocrText,
-                    make = it.make,
-                    model = it.model,
-                )
-            })
+            mediaDao.insertFtsAll(upserts.map { indexedMediaFtsOf(it) })
             enqueueEnhancementOutbox(changed, scanId, now)
         }
         if (database != null) database.withTransaction { commit() } else commit()

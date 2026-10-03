@@ -301,23 +301,27 @@ interface MediaDao {
     @Query("DELETE FROM media_items_fts WHERE filePath IN (:filePaths)")
     suspend fun deleteFtsEntries(filePaths: List<String>)
 
-    /**
-     * 以主表当前值重建这些路径的 FTS 行。FTS4 独立表不随主表 UPDATE 传播，
-     * OCR 等增强字段落库后必须显式同步，否则搜索 MATCH 只能读到旧值
-     * （直到下次全量扫描整表重建才偶然修复）。主表已不存在的路径自然只删不插。
-     */
-    @Query("""
-        INSERT INTO media_items_fts (filePath, fileName, parentPath, ocrText, make, model)
-        SELECT filePath, fileName, parentPath, ocrText, make, model FROM media_items
-        WHERE filePath IN (:filePaths)
-    """)
-    suspend fun insertFtsFromMedia(filePaths: List<String>)
+    /** 批量按路径读取主表实体（FTS 重建共用）。 */
+    @Query("SELECT * FROM media_items WHERE filePath IN (:filePaths)")
+    suspend fun getEntitiesByPaths(filePaths: List<String>): List<MediaEntity>
 
     @Transaction
     suspend fun syncFtsRowsFromMainTable(filePaths: List<String>) {
         if (filePaths.isEmpty()) return
-        deleteFtsEntries(filePaths)
-        insertFtsFromMedia(filePaths)
+        rebuildFtsRowsFromEntities(getEntitiesByPaths(filePaths))
+    }
+
+    /** 全量回填一批：主表读取 → CJK 展开 → 重建 FTS 行。 */
+    @Transaction
+    suspend fun rebuildFtsRowsFromEntities(entities: List<MediaEntity>) {
+        if (entities.isEmpty()) return
+        val paths = entities.map { it.filePath }
+        deleteFtsEntries(paths)
+        insertFtsAll(
+            entities.map {
+                com.renyxin.localalbum.data.db.entity.indexedMediaFtsOf(it)
+            },
+        )
     }
 
     /**

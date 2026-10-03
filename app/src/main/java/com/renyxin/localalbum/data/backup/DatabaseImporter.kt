@@ -11,6 +11,7 @@ import com.renyxin.localalbum.data.db.entity.toImportStaging
 import com.renyxin.localalbum.data.db.entity.MediaEmbedding
 import com.renyxin.localalbum.data.db.entity.MediaEntity
 import com.renyxin.localalbum.data.db.entity.MediaFts
+import com.renyxin.localalbum.data.db.entity.indexedMediaFts
 import com.renyxin.localalbum.data.db.entity.BackupImportStagingEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -671,7 +672,7 @@ class DatabaseImporter(
             val obj = arr.getJSONObject(i)
             val filePath = obj.getString("filePath")
             list.add(
-                MediaFts(
+                indexedMediaFts(
                     filePath = filePath,
                     fileName = obj.getString("fileName"),
                     parentPath = obj.optStringOrNull("parentPath")

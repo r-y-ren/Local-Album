@@ -2,7 +2,7 @@ package com.renyxin.localalbum.data.db.entity
 
 import androidx.room.Entity
 import androidx.room.Fts4
-import androidx.room.FtsOptions
+import com.renyxin.localalbum.core.search.FtsTextCodec
 
 /**
  * FTS4 全文索引虚拟表 (独立表, 带 Unicode 分词器)。
@@ -20,4 +20,35 @@ data class MediaFts(
     val ocrText: String?,
     val make: String?,
     val model: String?,
+)
+
+/**
+ * 统一的 FTS 行构造入口：所有文本列先经 [FtsTextCodec.indexable] 展开
+ * （汉字按字 + 二元词组），使中文子串可通过短语查询命中；拉丁片段原样保留。
+ * 原始文本以 media_items 主表为准，FTS 内容是可再生的派生数据。
+ */
+fun indexedMediaFts(
+    filePath: String,
+    fileName: String?,
+    parentPath: String?,
+    ocrText: String?,
+    make: String?,
+    model: String?,
+): MediaFts = MediaFts(
+    filePath = filePath,
+    fileName = FtsTextCodec.indexable(fileName),
+    parentPath = FtsTextCodec.indexable(parentPath),
+    ocrText = FtsTextCodec.indexable(ocrText),
+    make = make,
+    model = model,
+)
+
+/** 主表实体 → FTS 行的便捷入口（扫描提交路径统一使用）。 */
+fun indexedMediaFtsOf(entity: MediaEntity): MediaFts = indexedMediaFts(
+    filePath = entity.filePath,
+    fileName = entity.fileName,
+    parentPath = entity.parentPath,
+    ocrText = entity.ocrText,
+    make = entity.make,
+    model = entity.model,
 )

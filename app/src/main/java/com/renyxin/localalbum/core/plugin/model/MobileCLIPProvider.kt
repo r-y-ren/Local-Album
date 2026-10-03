@@ -101,7 +101,8 @@ class MobileCLIPProvider(
 
         val bitmap = decodeBitmap(file) ?: return@withContext null
         try {
-            val resized = Bitmap.createScaledBitmap(bitmap, IMAGE_SIZE, IMAGE_SIZE, true)
+            // CLIP 家族官方预处理：短边等比缩放 + 中心裁剪，与 Eva02 默认 Provider 一致
+            val resized = com.renyxin.localalbum.core.image.centerCropSquare(bitmap, IMAGE_SIZE)
             val inputBuffer = preprocessImage(resized)
 
             val outputArray = Array(1) { FloatArray(EMBEDDING_DIM) }

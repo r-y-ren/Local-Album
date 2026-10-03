@@ -23,15 +23,26 @@ internal object FtsQueryBuilder {
 
         if (tokens.isEmpty()) return "fileName:\"\""
 
-        return tokens
-            .flatMap { token ->
-                // FTS4 only recognizes the prefix marker on an unquoted token. The token extractor
-                // removes query grammar, while lower-casing prevents AND/OR/NOT/NEAR from becoming
-                // operators, so this remains safe for untrusted text and actually performs prefixes.
-                profile.columns.map { column -> "$column:$token*" }
-            }
+        return tokens.flatMap { token -> matchExpressions(token, profile) }
             .joinToString(" OR ")
+            .ifEmpty { "fileName:\"\"" }
     }
+
+    /**
+     * CJK 片段（unicode61 分词不可拆）走 [FtsTextCodec] 的字/二元词组方案：
+     * 短语不带列过滤——FTS4 不支持 `col:"..."` 组合，且中文本就应跨列命中
+     * （搜"真人"同时找文件夹名与 OCR 文本）。拉丁片段保持列限定前缀匹配。
+     */
+    private fun matchExpressions(token: String, profile: KeywordSearchProfile): List<String> =
+        FtsTextCodec.queryTerms(token).flatMap { term ->
+            when (term) {
+                is FtsTextCodec.QueryTerm.CjkExact -> listOf("\"${term.token}\"")
+                is FtsTextCodec.QueryTerm.CjkPhrase ->
+                    listOf("\"${term.bigrams.joinToString(" ")}\"")
+                is FtsTextCodec.QueryTerm.Other ->
+                    profile.columns.map { column -> "$column:${term.token}*" }
+            }
+        }
 
     private val SEARCH_TOKEN = Regex("""[\p{L}\p{N}][\p{L}\p{N}\p{M}_]*""")
 }
