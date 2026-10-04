@@ -108,14 +108,19 @@ fun MediaViewerScreen(
         ?.let { snapshot.placeholdersBefore + it }
         ?: 0
     val pagerState = rememberPagerState(initialPage = initialIndex) { mediaItems.itemCount }
-    var initialPathPositioned by remember(initialPath) { mutableStateOf(false) }
+    // 定位闭锁只在"首个多元素快照"上落位：快速首帧的单条快照（无占位符、
+    // 绝对索引未知）临时显示在第 0 页，分页窗口/完整列表到达时才是真实定位。
+    // 旧实现在单条快照上就闭锁，分页数据到达后不再定位——错停在第一张。
+    var positionedOnFullSnapshot by remember(initialPath) { mutableStateOf(false) }
     LaunchedEffect(initialPath, snapshot.items, snapshot.placeholdersBefore) {
-        if (!initialPathPositioned) {
-            val loadedIndex = snapshot.items.indexOfFirst { it.filePath == initialPath }
-            if (loadedIndex >= 0) {
-                // snapshot.items 不包含占位符，Pager 页码则是完整数据集中的绝对索引。
-                pagerState.scrollToPage(snapshot.placeholdersBefore + loadedIndex)
-                initialPathPositioned = true
+        val loadedIndex = snapshot.items.indexOfFirst { it.filePath == initialPath }
+        if (loadedIndex >= 0) {
+            val absolute = snapshot.placeholdersBefore + loadedIndex
+            if (snapshot.items.size == 1 && snapshot.placeholdersBefore == 0) {
+                if (pagerState.currentPage != 0) pagerState.scrollToPage(0)
+            } else if (!positionedOnFullSnapshot) {
+                pagerState.scrollToPage(absolute)
+                positionedOnFullSnapshot = true
             }
         }
     }

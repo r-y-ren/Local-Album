@@ -207,6 +207,7 @@ dependencies {
 
     add("implementation", libs.androidx.datastore.preferences)
     add("implementation", libs.androidx.exifinterface)
+    add("implementation", "androidx.documentfile:documentfile:1.0.1")
     add("implementation", libs.kotlinx.coroutines.android)
 
     // Coil for image loading (含视频帧解码，使视频预览图可直接从视频文件提取)

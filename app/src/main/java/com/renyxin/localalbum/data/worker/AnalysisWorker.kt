@@ -99,7 +99,14 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
         if (admittedScanId == null && !includeUserTasks) return Result.success()
         try {
-            if (container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested) return Result.retry()
+            if (container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested) {
+                // 核心扫描优先时让路，但绝不能走 Result.retry()：WM 指数退避会翻倍累积
+                // （上限 5h），与重试延迟窗叠加后表现为"几小时不动、重启才跑一批"。
+                // 自调度固定延迟的新请求（全新 WorkSpec，退避从零起算），核心完成时的
+                // 级联唤醒同样会命中 KEEP 复用本请求。
+                scheduleDeferred(applicationContext, CORE_PREEMPTION_RESCHEDULE_SECONDS)
+                return Result.success()
+            }
             val diagnosticNow = System.currentTimeMillis()
             val activeAtStart = activeTaskCount(
                 dao,
@@ -283,7 +290,13 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                             appendSuccessor(applicationContext)
                             Result.success()
                         }
-                        ContinuationDecision.RETRY_BACKOFF -> Result.retry()
+                        // 有任务但都在重试延迟窗：自调度固定延迟而非 Result.retry()，
+                        // 否则 WM 指数退避逐次翻倍（上限 5h）毒化整条链——重试延迟的
+                        // 任务没有定时唤醒者，表现为"几小时不动、重启才跑一批"。
+                        ContinuationDecision.RETRY_BACKOFF -> {
+                            scheduleDeferred(applicationContext, RETRY_WAIT_RESCHEDULE_SECONDS)
+                            Result.success()
+                        }
                         ContinuationDecision.COMPLETE -> Result.success()
                     }
                 } catch (cancelled: CancellationException) {
@@ -317,10 +330,18 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
                         includeUserTasks,
                         admittedScanId,
                     )
-                    if (active > 0) Result.retry() else Result.success()
+                    if (active > 0) {
+                        scheduleDeferred(applicationContext, RETRY_WAIT_RESCHEDULE_SECONDS)
+                        Result.success()
+                    } else {
+                        Result.success()
+                    }
                 }
             }
-            val result = laneResult ?: Result.retry()
+            val result = laneResult ?: run {
+                scheduleDeferred(applicationContext, RETRY_WAIT_RESCHEDULE_SECONDS)
+                Result.success()
+            }
             if (admittedScanId != null) {
                 container.libraryPipelineCoordinator.finishAnalysisIfIdle(admittedScanId)
             }
@@ -330,6 +351,8 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
             throw cancelled
         } catch (error: Throwable) {
             Log.e(TAG, "增强任务执行失败", error)
+            // 真实异常保留有限次 WM 重试（默认 30s 起步）；连续异常的兜底由失败
+            // 任务的 attemptCount 上限终态化，不构成退避毒化的主路径。
             return Result.retry()
         } finally {
             ScanServiceController.clearEnhancementProgress(applicationContext)
@@ -447,6 +470,10 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         private const val WORK_NAME = "analysis_task_queue"
         private const val BATCH_SIZE = 250
         private const val MAX_BATCHES_PER_RUN = 4
+        /** 重试延迟窗的轮询间隔；任务退避下限即 60s，60s 轮询不漏批。 */
+        private const val RETRY_WAIT_RESCHEDULE_SECONDS = 60L
+        /** 核心扫描让路后的回来间隔；核心完成时有级联唤醒，此值仅兜底。 */
+        private const val CORE_PREEMPTION_RESCHEDULE_SECONDS = 60L
         private const val MAX_ATTEMPTS = 3
         private const val RETIRED_POLICY_REASON = "retired_automatic_policy"
         private const val LEASE_MS = 30 * 60 * 1000L
@@ -458,6 +485,28 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         /** Ordinary bounded continuation appends behind the currently running consumer. */
         internal fun appendSuccessor(context: Context) =
             enqueue(context, ExistingWorkPolicy.APPEND_OR_REPLACE)
+
+        /**
+         * 等待型续跑（重试延迟窗/核心让路）：固定延迟的全新 WorkSpec，退避计数从零
+         * 起算。任务的重试延迟下限即 60s（retryDelay），固定 60s 轮询代价可忽略。
+         */
+        internal fun scheduleDeferred(context: Context, delaySeconds: Long) {
+            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+                WORK_NAME,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                OneTimeWorkRequestBuilder<AnalysisWorker>()
+                    .setInitialDelay(delaySeconds, java.util.concurrent.TimeUnit.SECONDS)
+                    .build(),
+            )
+        }
+
+        /**
+         * 启动自愈：历史毒化（Result.retry 累积到小时级退避）的分析链与扫描/泵链同样
+         * 需要整链重置；启动点无在途消费者，随后 wake() 依持久任务重建。
+         */
+        fun resetPoisonedChain(context: Context) {
+            WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
+        }
 
         private fun enqueue(context: Context, policy: ExistingWorkPolicy) {
             WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(

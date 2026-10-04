@@ -37,6 +37,7 @@ class LocalAlbumApplication : Application(), ImageLoaderFactory {
         // worker）整链取消是安全的；下方 wake() 会按持久状态即时重建。
         com.renyxin.localalbum.data.worker.ScanWorker.resetPoisonedChain(this)
         com.renyxin.localalbum.data.worker.LibraryPipelineWorker.resetPoisonedChain(this)
+        com.renyxin.localalbum.data.worker.AnalysisWorker.resetPoisonedChain(this)
         TrashCleanupWorker.schedule(this)
         DeletionRetryWorker.enqueue(this)
         com.renyxin.localalbum.data.worker.ThumbnailCacheMaintenanceWorker.enqueue(this)

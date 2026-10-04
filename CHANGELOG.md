@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Analysis lane no longer stalls for hours between batches: waiting-type continuations (retry-delay windows, core-scan preemption) previously returned `Result.retry()`, compounding WorkManager's exponential backoff up to the 5-hour cap and leaving retry-delayed tasks with no timer to wake them — perceived as "runs a batch after each restart, then stops"; they now self-schedule fresh fixed-delay requests, and the analysis chain joins the startup poison-reset like the scan/pump chains. The legacy analysis pause marker (set by older "stop" buttons with no UI to resume) now also surfaces the "继续扫描" button.
+- Tapping a photo from the home grid opens the tapped photo again (the instant-first-frame change briefly regressed positioning to the first item; positioning now lands on the first multi-element snapshot with its real absolute index).
+
+### Added
+
+- SAF folder-authorization fallback for trash deletion: files invisible to MediaStore (.nomedia dirs, unindexed custom roots) are the only undeletable class left on Android 13+; after the system dialog cannot cover them, the app explains why, asks for a one-time persistent folder grant, and deletes via document-tree traversal — subsequent deletions under a granted folder are silent. Per-row restore/delete buttons (long-press multi-select retained) and pending-delete rows show a spinner over a darkened thumbnail with actions disabled until the flow settles.
+
 ## [0.2.0] - 2026-10-04
 
 ### Fixed

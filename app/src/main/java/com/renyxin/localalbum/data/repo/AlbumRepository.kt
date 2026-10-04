@@ -518,14 +518,14 @@ class AlbumRepository(
                 emit(PagingData.from(emptyList()))
                 return@flow
             }
-            // 快速首帧：先用已取到的被点击条目立即渲染，查看器不再等偏移计算与
-            // 分页首页往返（大图库上该等待可达数秒乃至更长的白屏）。
-            // 分页上下文随后接管，查看器的定位副作用会在新快照上重新定位到同一文件。
-            emit(PagingData.from(listOf(initial.toMediaItem())))
             if (context == MediaQueryContext.Single) {
+                emit(PagingData.from(listOf(initial.toMediaItem())))
                 return@flow
             }
             if (context is MediaQueryContext.StablePaths) {
+                // 快速首帧：先渲染被点击项，完整路径表随后接管（查看器会在
+                // 首个多元素快照上重新定位，见 MediaViewerScreen 的定位副作用）
+                emit(PagingData.from(listOf(initial.toMediaItem())))
                 val entities = if (context.paths.isEmpty()) emptyList()
                 else mediaDao.getByFilePathsLight(context.paths)
                 val byPath = entities.associateBy { it.filePath }
@@ -550,6 +550,10 @@ class AlbumRepository(
                 MediaQueryContext.Favorites -> mediaDao.favoritesOffset(initial.capturedAtMs, initialPath)
                 else -> 0
             }
+            // 快速首帧：先用已取到的条目立即渲染（不等分页首页往返这一真正的慢源）。
+            // 单条快照不含占位符，绝对索引未知——查看器先临时显示在第 0 页，
+            // 并在首个多元素快照（分页窗口/完整列表）到达时定位到真实绝对索引。
+            emit(PagingData.from(listOf(initial.toMediaItem())))
             val source = when (context) {
                 MediaQueryContext.Timeline -> { { mediaDao.pagingSource() } }
                 is MediaQueryContext.Directory -> { {
@@ -1004,6 +1008,14 @@ class AlbumRepository(
     suspend fun isCorePauseRequested(): Boolean = withContext(Dispatchers.IO) {
         appContext?.let { com.renyxin.localalbum.data.worker.CoreScanPausePrefs.isRequested(it) }
             ?: false
+    }
+
+    /**
+     * 分析车道的历史用户暂停标记（旧版"停止本次分析"遗留的 userPaused）。
+     * 它同样会停摆分析队列且此前无任何 UI 恢复入口——"继续扫描"按钮必须覆盖。
+     */
+    suspend fun isAnalysisUserPaused(): Boolean = withContext(Dispatchers.IO) {
+        appContext?.let { AnalysisResumePrefs.isUserPaused(it) } ?: false
     }
 
     // ---- 删除/回收站 ----

@@ -94,9 +94,117 @@ fun TrashScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val operationInFlight = operationState is AlbumViewModel.TrashOperationState.Running
+    // 删除全流程的即时反馈：确认→路径解析→（系统弹窗/SAF 授权/树下钻删除）→清库，
+    // 中间每段都有可见指示，避免"点了没反应"的空窗（解析与 SAF 下钻均可能在后台耗时）
+    var deleteFlowBusy by remember { mutableStateOf(false) }
+    val anyDeleteBusy = operationInFlight || deleteFlowBusy
     var pendingSystemDeletePaths by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingClearTrash by remember { mutableStateOf(false) }
     var pendingUnresolvedCount by remember { mutableIntStateOf(0) }
+    // MediaStore 解析不到、等待用户 SAF 目录授权后删除的路径（Android 13+ 唯一途径）
+    var pendingSafPaths by remember { mutableStateOf<List<String>>(emptyList()) }
+    var safClearTrash by remember { mutableStateOf(false) }
+    var pendingUnresolvedPaths by remember { mutableStateOf<List<String>>(emptyList()) }
+    var showSafOffer by remember { mutableStateOf(false) }
+    // 处于删除流程中的文件：缩略图叠转圈、行加深、不可再操作；
+    // 流程结束（成功清库/失败保留/用户取消）后清除
+    val pendingDeletePaths = remember { mutableStateMapOf<String, Boolean>() }
+
+    fun clearPendingDelete(paths: List<String>) {
+        paths.forEach { pendingDeletePaths.remove(it) }
+    }
+
+    val safTreeLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        val paths = pendingSafPaths
+        val clear = safClearTrash
+        pendingSafPaths = emptyList()
+        safClearTrash = false
+        if (uri == null) {
+            scope.launch { snackbarHostState.showSnackbar("已取消文件夹授权") }
+            return@rememberLauncherForActivityResult
+        }
+        // 持久化授权：同一目录后续删除不再弹选择器
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
+        scope.launch {
+            deleteFlowBusy = true
+            val outcome = withContext(Dispatchers.IO) {
+                com.renyxin.localalbum.core.saf.SafTreeDelete.deleteUnderTree(context, uri, paths)
+            }
+            if (outcome.deleted.isNotEmpty()) {
+                // SAF 已物理删除；走仓库清库链路（文件不存在 → MISSING → 原子清理）
+                if (clear) onClearTrash() else onPermanentlyDelete(outcome.deleted)
+            }
+            deleteFlowBusy = false
+            clearPendingDelete(paths)
+            val remaining = paths.size - outcome.deleted.size
+            val message = when {
+                outcome.deleted.isNotEmpty() && remaining > 0 ->
+                    "已通过文件夹授权删除 ${outcome.deleted.size} 项；$remaining 项不在授权目录内，保留在回收站"
+                outcome.deleted.isNotEmpty() -> "已通过文件夹授权删除 ${outcome.deleted.size} 项"
+                else -> "授权目录未覆盖所选文件，未删除（可尝试授权其所在的具体文件夹）"
+            }
+            snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Long)
+        }
+    }
+
+    /**
+     * 先消费已持久化的目录授权：覆盖到的文件直接删除，不再弹任何选择器/说明框。
+     * 返回仍未删除的路径（无覆盖授权或授权树下已找不到）。
+     */
+    suspend fun deleteViaPersistedTrees(paths: List<String>): List<String> =
+        withContext(Dispatchers.IO) {
+            var remaining = paths.distinct()
+            val granted = context.contentResolver.persistedUriPermissions
+                .filter { it.isWritePermission }
+            for (perm in granted) {
+                if (remaining.isEmpty()) break
+                val covered = remaining.filter {
+                    com.renyxin.localalbum.core.saf.SafTreeDelete.covers(context, perm.uri, it)
+                }
+                if (covered.isEmpty()) continue
+                val outcome = com.renyxin.localalbum.core.saf.SafTreeDelete.deleteUnderTree(
+                    context, perm.uri, covered,
+                )
+                if (outcome.deleted.isNotEmpty()) {
+                    if (safClearTrash) onClearTrash() else onPermanentlyDelete(outcome.deleted)
+                }
+                remaining = remaining - outcome.deleted.toSet()
+            }
+            remaining
+        }
+
+    fun offerSafFor(paths: List<String>, clear: Boolean) {
+        scope.launch {
+            deleteFlowBusy = true
+            // 已授权目录能覆盖的直接删；剩下没有授权覆盖的才引导用户授权
+            val remaining = deleteViaPersistedTrees(paths)
+            deleteFlowBusy = false
+            if (remaining.isEmpty()) {
+                clearPendingDelete(paths)
+                snackbarHostState.showSnackbar("已删除 ${paths.size} 项", duration = SnackbarDuration.Long)
+            } else if (remaining.size < paths.size) {
+                clearPendingDelete(paths - remaining.toSet())
+                snackbarHostState.showSnackbar(
+                    "已删除 ${paths.size - remaining.size} 项；${remaining.size} 项需要新的文件夹授权",
+                )
+                pendingSafPaths = remaining
+                safClearTrash = clear
+                showSafOffer = true
+            } else {
+                pendingSafPaths = remaining
+                safClearTrash = clear
+                showSafOffer = true
+            }
+        }
+    }
 
     val systemDeleteLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
@@ -104,21 +212,26 @@ fun TrashScreen(
         val paths = pendingSystemDeletePaths
         val clear = pendingClearTrash
         val unresolved = pendingUnresolvedCount
+        val unresolvedPaths = pendingUnresolvedPaths
         pendingSystemDeletePaths = emptyList()
         pendingClearTrash = false
         pendingUnresolvedCount = 0
+        pendingUnresolvedPaths = emptyList()
         if (result.resultCode == Activity.RESULT_OK) {
             // 系统已删除文件；Repository 将其识别为 MISSING 并原子清理关联数据。
             if (clear) onClearTrash() else onPermanentlyDelete(paths)
-            if (unresolved > 0) {
-                scope.launch {
-                    snackbarHostState.showSnackbar(
-                        "另有 $unresolved 项不在系统媒体库中，已尝试应用内删除；失败项将保留在回收站",
-                    )
-                }
+            if (unresolvedPaths.isNotEmpty()) {
+                // 未解析项优先消费已有目录授权，无覆盖授权才引导新的 SAF 授权
+                offerSafFor(unresolvedPaths, clear)
             }
+            // 待删态由仓库操作完成回调清除（operationState 观察者）
         } else {
-            scope.launch { snackbarHostState.showSnackbar("已取消系统删除授权") }
+            clearPendingDelete(paths)
+            if (unresolvedPaths.isNotEmpty()) {
+                offerSafFor(unresolvedPaths, clear)
+            } else {
+                scope.launch { snackbarHostState.showSnackbar("已取消系统删除授权") }
+            }
         }
     }
 
@@ -128,18 +241,27 @@ fun TrashScreen(
             if (clearTrash) onClearTrash() else onPermanentlyDelete(distinct)
             return
         }
+        // 即将删除的文件立即进入待删态：缩略图转圈 + 行加深 + 行内操作禁用
+        distinct.forEach { pendingDeletePaths[it] = true }
+        // 路径解析与后续授权链路可能耗时：先亮指示条并给出文字反馈
+        deleteFlowBusy = true
         scope.launch {
+            snackbarHostState.showSnackbar("正在处理删除…", duration = SnackbarDuration.Short)
             // 逐路径反查 MediaStore 是每路径一次 query：清空回收站时可达数千条，
             // 必须离开主线程执行；启动系统授权弹窗仍回主线程。
             val request = withContext(Dispatchers.IO) {
                 MediaStoreDeleteRequest.create(context, distinct)
             }
             if (request == null) {
-                if (clearTrash) onClearTrash() else onPermanentlyDelete(distinct)
+                // 全部无法解析（.nomedia/未索引目录）：先消费已有授权，无覆盖再引导 SAF
+                offerSafFor(distinct, clearTrash)
             } else {
                 pendingSystemDeletePaths = distinct
                 pendingClearTrash = clearTrash
                 pendingUnresolvedCount = request.unresolvedPaths.size
+                pendingUnresolvedPaths = request.unresolvedPaths
+                // 系统弹窗即反馈，指示条让位；弹窗结束后由回调/仓库状态接管
+                deleteFlowBusy = false
                 systemDeleteLauncher.launch(
                     IntentSenderRequest.Builder(request.intentSender).build(),
                 )
@@ -160,9 +282,50 @@ fun TrashScreen(
             else -> null
         }
         if (message != null) {
+            // 清库终态（成功或失败）：全部待删态结束——成功的行已被数据流移除，
+            // 失败保留的行恢复可操作
+            pendingDeletePaths.clear()
             snackbarHostState.showSnackbar(message, duration = SnackbarDuration.Long)
             onOperationMessageConsumed()
         }
+    }
+
+    // SAF 文件夹授权引导：MediaStore 解析不到的文件在 Android 13+ 上唯一的删除途径
+    if (showSafOffer && pendingSafPaths.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { showSafOffer = false },
+            icon = {
+                Icon(
+                    Icons.Default.DeleteForever,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            },
+            title = { Text("需要文件夹授权") },
+            text = {
+                Text(
+                    "有 ${pendingSafPaths.size} 个文件不在系统媒体库中（如 .nomedia 目录），" +
+                        "Android 13+ 不允许应用直接删除这类文件。\n\n" +
+                        "授权其所在的文件夹后即可删除；授权一次长期有效。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showSafOffer = false
+                    safTreeLauncher.launch(
+                        com.renyxin.localalbum.core.saf.SafTreeDelete.initialUriHint(),
+                    )
+                }) { Text("选择文件夹") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showSafOffer = false
+                    // 用户拒绝授权：仍走仓库链路尽力删（多数会 MISSING/FAILED 落墓碑）
+                    if (safClearTrash) onClearTrash() else onPermanentlyDelete(pendingSafPaths)
+                    pendingSafPaths = emptyList()
+                }) { Text("暂不授权") }
+            },
+        )
     }
 
     // 永久删除确认对话框
@@ -182,7 +345,7 @@ fun TrashScreen(
                 Text("确定要永久删除选中的 $count 个文件吗？此操作不可撤销，文件将无法恢复！")
             },
             confirmButton = {
-                TextButton(enabled = !operationInFlight, onClick = {
+                TextButton(enabled = !anyDeleteBusy, onClick = {
                     requestPermanentDelete(selectedPaths.keys.toList())
                     selectedPaths.clear()
                     isSelectionMode = false
@@ -215,7 +378,7 @@ fun TrashScreen(
                 Text("确定要清空回收站中的所有 $totalCount 个文件吗？此操作不可撤销！")
             },
             confirmButton = {
-                TextButton(enabled = !operationInFlight, onClick = {
+                TextButton(enabled = !anyDeleteBusy, onClick = {
                     scope.launch {
                         requestPermanentDelete(loadAllTrashedPaths(), clearTrash = true)
                     }
@@ -250,7 +413,7 @@ fun TrashScreen(
                     },
                     actions = {
                         // 恢复按钮
-                        IconButton(enabled = !operationInFlight, onClick = {
+                        IconButton(enabled = !anyDeleteBusy, onClick = {
                             if (selectedPaths.isNotEmpty()) {
                                 onRestore(selectedPaths.keys.toList())
                                 selectedPaths.clear()
@@ -266,7 +429,7 @@ fun TrashScreen(
                             )
                         }
                         // 永久删除按钮
-                        IconButton(enabled = !operationInFlight, onClick = {
+                        IconButton(enabled = !anyDeleteBusy, onClick = {
                             if (selectedPaths.isNotEmpty()) showDeleteConfirm = true
                         }) {
                             Icon(
@@ -292,7 +455,7 @@ fun TrashScreen(
                     },
                     actions = {
                         if (totalCount > 0) {
-                            IconButton(enabled = !operationInFlight, onClick = { showClearConfirm = true }) {
+                            IconButton(enabled = !anyDeleteBusy, onClick = { showClearConfirm = true }) {
                                 Icon(
                                     Icons.Default.DeleteForever,
                                     contentDescription = "清空回收站",
@@ -309,7 +472,7 @@ fun TrashScreen(
                 // 快捷恢复按钮
                 ExtendedFloatingActionButton(
                     onClick = {
-                        if (!operationInFlight && selectedPaths.isNotEmpty()) {
+                        if (!anyDeleteBusy && selectedPaths.isNotEmpty()) {
                             onRestore(selectedPaths.keys.toList())
                             selectedPaths.clear()
                             isSelectionMode = false
@@ -323,7 +486,7 @@ fun TrashScreen(
         },
     ) { padding ->
         AnimatedVisibility(
-            visible = operationInFlight,
+            visible = anyDeleteBusy,
             enter = expandVertically(),
             exit = shrinkVertically(),
         ) {
@@ -436,6 +599,7 @@ fun TrashScreen(
                     item = item,
                     isSelected = selectedPaths[item.filePath] == true,
                     isSelectionMode = isSelectionMode,
+                    isPendingDelete = pendingDeletePaths[item.filePath] == true,
                     onClick = {
                         if (isSelectionMode) {
                             if (selectedPaths[item.filePath] == true) {
@@ -450,7 +614,15 @@ fun TrashScreen(
                         selectedPaths[item.filePath] = true
                     },
                     onRestore = {
-                        if (!operationInFlight) onRestore(listOf(item.filePath))
+                        if (!anyDeleteBusy) onRestore(listOf(item.filePath))
+                    },
+                    onDelete = {
+                        if (!anyDeleteBusy) {
+                            // 单张永久删除：借用确认弹窗（读 selectedPaths），选中即此一项
+                            selectedPaths.clear()
+                            selectedPaths[item.filePath] = true
+                            showDeleteConfirm = true
+                        }
                     },
                     now = now,
                 )
@@ -465,22 +637,28 @@ private fun TrashItemRow(
     item: MediaItem,
     isSelected: Boolean,
     isSelectionMode: Boolean,
+    isPendingDelete: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onRestore: () -> Unit,
+    onDelete: () -> Unit,
     now: Instant,
 ) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(
+                enabled = !isPendingDelete,
                 onClick = onClick,
                 onLongClick = onLongClick,
             ),
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected)
-                MaterialTheme.colorScheme.primaryContainer
-            else MaterialTheme.colorScheme.surface,
+            // 待删行用更深的容器色；选择态只在非待删时生效
+            containerColor = when {
+                isPendingDelete -> MaterialTheme.colorScheme.surfaceContainerHighest
+                isSelected -> MaterialTheme.colorScheme.primaryContainer
+                else -> MaterialTheme.colorScheme.surface
+            },
         ),
     ) {
         Row(
@@ -516,8 +694,23 @@ private fun TrashItemRow(
                         .clip(RoundedCornerShape(6.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant),
                     contentScale = ContentScale.Crop,
+                    alpha = if (isPendingDelete) 0.5f else 1f,
                 )
-                if (item.type == MediaType.VIDEO) {
+                if (isPendingDelete) {
+                    // 待删态：半透明压暗 + 中央转圈，明确指示该文件正在被处理
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.25f)),
+                    )
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .align(Alignment.Center),
+                        strokeWidth = 2.dp,
+                    )
+                }
+                if (item.type == MediaType.VIDEO && !isPendingDelete) {
                     Icon(
                         imageVector = Icons.Default.PlayCircle,
                         contentDescription = "视频",
@@ -577,13 +770,22 @@ private fun TrashItemRow(
                 )
             }
 
-            // 恢复按钮（非选择模式下显示）
+            // 恢复/永久删除按钮（非选择模式下逐项可用；长按行进入多选批量操作）
             if (!isSelectionMode) {
-                IconButton(onClick = onRestore) {
+                IconButton(onClick = onRestore, enabled = !isPendingDelete) {
                     Icon(
                         Icons.Default.RestoreFromTrash,
                         contentDescription = "恢复",
-                        tint = MaterialTheme.colorScheme.primary,
+                        tint = if (isPendingDelete) MaterialTheme.colorScheme.outlineVariant
+                        else MaterialTheme.colorScheme.primary,
+                    )
+                }
+                IconButton(onClick = onDelete, enabled = !isPendingDelete) {
+                    Icon(
+                        Icons.Default.DeleteForever,
+                        contentDescription = "永久删除",
+                        tint = if (isPendingDelete) MaterialTheme.colorScheme.outlineVariant
+                        else MaterialTheme.colorScheme.error,
                     )
                 }
             }

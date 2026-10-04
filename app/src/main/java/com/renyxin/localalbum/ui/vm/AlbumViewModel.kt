@@ -229,7 +229,10 @@ class AlbumViewModel(
 
     /** 进入设置页时刷新持久暂停标记（无活动运行行时"继续扫描"按钮的唯一依据）。 */
     fun refreshCorePauseRequested() {
-        viewModelScope.launch { _corePauseRequested.value = repository.isCorePauseRequested() }
+        viewModelScope.launch {
+            _corePauseRequested.value =
+                repository.isCorePauseRequested() || repository.isAnalysisUserPaused()
+        }
     }
 
     /**
