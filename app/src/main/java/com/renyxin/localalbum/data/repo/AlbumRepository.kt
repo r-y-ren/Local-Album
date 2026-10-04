@@ -514,8 +514,15 @@ class AlbumRepository(
     fun viewerMedia(context: MediaQueryContext, initialPath: String): Flow<PagingData<MediaItem>> =
         kotlinx.coroutines.flow.flow {
             val initial = mediaDao.getByFilePathLight(initialPath)
-            if (context == MediaQueryContext.Single || initial == null) {
-                emit(PagingData.from(listOfNotNull(initial?.toMediaItem())))
+            if (initial == null) {
+                emit(PagingData.from(emptyList()))
+                return@flow
+            }
+            // 快速首帧：先用已取到的被点击条目立即渲染，查看器不再等偏移计算与
+            // 分页首页往返（大图库上该等待可达数秒乃至更长的白屏）。
+            // 分页上下文随后接管，查看器的定位副作用会在新快照上重新定位到同一文件。
+            emit(PagingData.from(listOf(initial.toMediaItem())))
+            if (context == MediaQueryContext.Single) {
                 return@flow
             }
             if (context is MediaQueryContext.StablePaths) {
@@ -610,6 +617,10 @@ class AlbumRepository(
     // ---- 扫描 ----
     /** Manual refresh first discovers missed MediaStore identities, then drains the durable journal. */
     suspend fun rescan(): Boolean = withContext(Dispatchers.IO) {
+        // 用户显式发起扫描等同解除暂停（"继续扫描"的主路径之外的第二入口）
+        appContext?.let { context ->
+            com.renyxin.localalbum.data.worker.CoreScanPausePrefs.setRequested(context, false)
+        }
         val coordinator = libraryPipelineCoordinator ?: return@withContext false
         val pipeline = coordinator.ensureState()
         if (!pipeline.hasPublishedBaseline) {
@@ -969,6 +980,30 @@ class AlbumRepository(
         val context = appContext ?: return@withContext
         AnalysisResumePrefs.setUserPaused(context, true)
         AnalysisResumePrefs.setPending(context, false)
+    }
+
+    /**
+     * 用户暂停全部后台流水线：核心扫描运行标记 PAUSED（保留已发布快照），
+     * 增强车道持久暂停。持久化的暂停标记由各 Worker 在阶段边界兑现。
+     */
+    suspend fun pausePipelineByUser() = withContext(Dispatchers.IO) {
+        libraryPipelineCoordinator?.markActiveScanPausedByUser()
+        pauseEnhancementsByUser()
+    }
+
+    /** 用户恢复：清除核心暂停标记、恢复分析准入，并按持久状态唤醒流水线。 */
+    suspend fun resumePipelineByUser() = withContext(Dispatchers.IO) {
+        appContext?.let { context ->
+            com.renyxin.localalbum.data.worker.CoreScanPausePrefs.setRequested(context, false)
+            AnalysisResumePrefs.resumeUserWork(context)
+        }
+        libraryPipelineCoordinator?.wake()
+    }
+
+    /** 持久暂停标记的读取（UI 据此显示"继续扫描"，覆盖无活动运行行也能暂停的场景）。 */
+    suspend fun isCorePauseRequested(): Boolean = withContext(Dispatchers.IO) {
+        appContext?.let { com.renyxin.localalbum.data.worker.CoreScanPausePrefs.isRequested(it) }
+            ?: false
     }
 
     // ---- 删除/回收站 ----

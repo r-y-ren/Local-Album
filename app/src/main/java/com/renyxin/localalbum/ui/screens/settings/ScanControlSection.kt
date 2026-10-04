@@ -142,6 +142,20 @@ internal fun ScanControlSection(
                 )
             }
 
+            // 用户暂停后的恢复入口；CoreScanState.PAUSED 的状态文案由上方状态行显示。
+            // 持久标记覆盖"暂停时无活动运行行"的场景（纯分析任务期间暂停）。
+            val corePauseRequested by albumViewModel.corePauseRequested.collectAsStateWithLifecycle()
+            LaunchedEffect(Unit) { albumViewModel.refreshCorePauseRequested() }
+            if (coreScanState == CoreScanState.PAUSED || corePauseRequested) {
+                Button(
+                    onClick = albumViewModel::resumePipeline,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Text("继续扫描")
+                }
+            }
+
             OutlinedButton(
                 onClick = { showRebuildConfirmation.value = true },
                 enabled = hasScanRoots,

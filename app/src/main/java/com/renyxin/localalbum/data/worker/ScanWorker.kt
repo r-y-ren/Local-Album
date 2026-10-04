@@ -155,11 +155,22 @@ class ScanWorker(
         }
 
         /**
-         * 启动自愈：历史重试风暴会把本唯一链的指数退避毒化到小时级，且
-         * APPEND_OR_REPLACE 不会替换"仍在退避重试中"的链。启动时点（本进程尚无
+         * 启动自愈：历史重试风暴会把本唯一链的 WorkManager 指数退避毒化到小时级，
+         * 且 APPEND_OR_REPLACE 不会替换"仍在退避重试中"的链。启动时点（本进程尚无
          * 运行中 worker）整链取消是安全的；随后 wake() 依持久状态重建所需队列。
          */
         fun resetPoisonedChain(context: Context) {
+            WorkManager.getInstance(context.applicationContext)
+                .cancelUniqueWork(UNIQUE_WORK_NAME)
+        }
+
+        /**
+         * 用户暂停核心扫描：置持久暂停标记（泵在阶段边界兑现）并取消当前链。
+         * 与 resetPoisonedChain 的区别仅在语义命名；行为同为整链取消，
+         * 恢复由"继续扫描"清除标记后经 wake() 重建。
+         */
+        fun cancelByUser(context: Context) {
+            CoreScanPausePrefs.setRequested(context, true)
             WorkManager.getInstance(context.applicationContext)
                 .cancelUniqueWork(UNIQUE_WORK_NAME)
         }

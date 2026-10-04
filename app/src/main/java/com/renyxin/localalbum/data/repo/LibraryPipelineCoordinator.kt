@@ -481,6 +481,10 @@ class LibraryPipelineCoordinator(
     }
 
     private suspend fun startQueuedWorkIfIdleLocked(): Boolean {
+        // 用户暂停请求在阶段边界兑现：不再准入任何新工作（扫描/缩略图/分析/修复）。
+        if (com.renyxin.localalbum.data.worker.CoreScanPausePrefs.isRequested(context)) {
+            return false
+        }
         var state = requireNotNull(dao.get())
         var stage = LibraryPipelineStage.fromPersisted(state.stage)
         if (stage !in IDLE_ADMISSION_STAGES) return false
@@ -626,6 +630,20 @@ class LibraryPipelineCoordinator(
         if (LibraryPipelineStage.fromPersisted(state.stage).isScan && state.activeRunId == scanId) {
             dao.markActiveScanFailed(scanId = scanId, error = error.take(160))
         }
+    }
+
+    /**
+     * 用户暂停核心扫描：把活动运行标记为 PAUSED（状态文案与 UI 判定都读它）。
+     * 已取消的在途扫描由 journal/租约幂等性保证恢复时安全重跑；已发布快照继续展示。
+     * 返回是否成功标记（无活动扫描运行时为 false，暂停意图仍由 CoreScanPausePrefs 持有）。
+     */
+    suspend fun markActiveScanPausedByUser(): Boolean = withLockAndDispatch {
+        val state = requireNotNull(dao.get())
+        val scanId = state.activeRunId
+        if (scanId == null || !LibraryPipelineStage.fromPersisted(state.stage).isScan) {
+            return@withLockAndDispatch false
+        }
+        database.scanRunDao().markCoreState(scanId, CoreScanState.PAUSED.name) == 1
     }
 
     private fun scanTypeFor(stage: LibraryPipelineStage): String = when (stage) {

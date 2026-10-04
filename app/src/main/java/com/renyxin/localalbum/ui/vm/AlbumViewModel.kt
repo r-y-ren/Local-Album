@@ -204,7 +204,12 @@ class AlbumViewModel(
         // Persist the user pause before cancelling workers so a process restart cannot interpret
         // this action as core preemption and silently resume it.
         viewModelScope.launch {
-            repository.pauseEnhancementsByUser()
+            // 核心扫描同样可暂停：运行标记 PAUSED + 持久标记 + 取消扫描与泵链，
+            // 消除"停止本次分析"对核心车道是空操作的不一致。
+            repository.pausePipelineByUser()
+            com.renyxin.localalbum.data.worker.ScanWorker.cancelByUser(application)
+            com.renyxin.localalbum.data.worker.LibraryPipelineWorker
+                .resetPoisonedChain(application)
             AnalysisWorker.cancel(application)
             com.renyxin.localalbum.data.worker.ThumbnailWorker.cancelBackground(application)
             com.renyxin.localalbum.data.worker.EnhancementHandoffWorker.cancel(application)
@@ -212,6 +217,19 @@ class AlbumViewModel(
         }
         progressManager?.reset()
         _taskProgress.value = emptyMap()
+    }
+
+    /** 用户恢复被暂停的流水线（核心扫描 + 后台分析）。 */
+    fun resumePipeline() {
+        viewModelScope.launch { repository.resumePipelineByUser() }
+    }
+
+    private val _corePauseRequested = MutableStateFlow(false)
+    val corePauseRequested: StateFlow<Boolean> = _corePauseRequested.asStateFlow()
+
+    /** 进入设置页时刷新持久暂停标记（无活动运行行时"继续扫描"按钮的唯一依据）。 */
+    fun refreshCorePauseRequested() {
+        viewModelScope.launch { _corePauseRequested.value = repository.isCorePauseRequested() }
     }
 
     /**

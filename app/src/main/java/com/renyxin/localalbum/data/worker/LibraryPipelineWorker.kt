@@ -32,11 +32,13 @@ class LibraryPipelineWorker(
             // convergence. The current pump consumes its library continuation, while any admitted
             // thumbnail/analysis lane is dispatched only after the coordinator lock has been released.
             val state = coordinator.prepareLibraryWorkerPass()
+            // 用户暂停请求：不再向核心扫描车道派发新工作（增强车道由各自的取消路径处理）
+            val scanPaused = CoreScanPausePrefs.isRequested(applicationContext)
             when (val stage = LibraryPipelineStage.fromPersisted(state.stage)) {
                 LibraryPipelineStage.INITIAL_SCAN,
                 LibraryPipelineStage.INCREMENTAL_SCAN,
                 LibraryPipelineStage.REBUILD_SCAN,
-                -> if (isScanProgressVisible(stage, state.activeRunId, state.rebuildRequested)) {
+                -> if (!scanPaused && isScanProgressVisible(stage, state.activeRunId, state.rebuildRequested)) {
                     ScanWorker.schedule(applicationContext)
                 }
 
