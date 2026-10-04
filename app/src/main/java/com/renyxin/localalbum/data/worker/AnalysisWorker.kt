@@ -97,7 +97,15 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         if (includeUserTasks && activeUserTasksAtStart > 0) {
             AnalysisResumePrefs.setPending(applicationContext, true)
         }
-        if (admittedScanId == null && !includeUserTasks) return Result.success()
+        if (admittedScanId == null && !includeUserTasks) {
+            // 流水线忙碌（增量扫描/缩略图/发布等阶段）期间用户任务让路——但绝不能
+            // 裸结束：这是链式续排的断头路，会让重跑队列在流水线回到空闲后无人唤醒，
+            // 表现为"跑一段时间就停、重启才继续"。排队等流水线空闲后自动恢复。
+            if (activeUserTasksAtStart > 0 && !AnalysisResumePrefs.isUserPaused(applicationContext)) {
+                scheduleDeferred(applicationContext, PIPELINE_BUSY_RESCHEDULE_SECONDS)
+            }
+            return Result.success()
+        }
         try {
             if (container.albumRepository.isCoreScanActive() || EnhancementResourceGate.isCoreRequested) {
                 // 核心扫描优先时让路，但绝不能走 Result.retry()：WM 指数退避会翻倍累积
@@ -474,6 +482,8 @@ class AnalysisWorker(context: Context, params: WorkerParameters) : CoroutineWork
         private const val RETRY_WAIT_RESCHEDULE_SECONDS = 60L
         /** 核心扫描让路后的回来间隔；核心完成时有级联唤醒，此值仅兜底。 */
         private const val CORE_PREEMPTION_RESCHEDULE_SECONDS = 60L
+        /** 流水线忙碌期用户任务的等待轮询间隔。 */
+        private const val PIPELINE_BUSY_RESCHEDULE_SECONDS = 60L
         private const val MAX_ATTEMPTS = 3
         private const val RETIRED_POLICY_REASON = "retired_automatic_policy"
         private const val LEASE_MS = 30 * 60 * 1000L
