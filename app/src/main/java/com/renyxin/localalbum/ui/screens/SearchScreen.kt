@@ -61,6 +61,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -98,18 +99,19 @@ fun SearchScreen(
     onBack: () -> Unit,
     onMediaClick: (MediaItem, MediaSearchQuery?, List<String>?) -> Unit,
 ) {
-    var query by remember { mutableStateOf("") }
-    var showFilters by remember { mutableStateOf(false) }
-    var typeFilter by remember { mutableStateOf(SearchFilterType.ALL) }
+    // rememberSaveable：查看器返回后恢复搜索状态（离开组合时 remember 全部丢失）
+    var query by rememberSaveable { mutableStateOf("") }
+    var showFilters by rememberSaveable { mutableStateOf(false) }
+    var typeFilter by rememberSaveable { mutableStateOf(SearchFilterType.ALL) }
     val optionalModeActive = optionalSearchMode.enabled &&
         optionalSearchMode.active &&
         optionalSearchMode.copy != null
-    var showDateFromPicker by remember { mutableStateOf(false) }
-    var showDateToPicker by remember { mutableStateOf(false) }
-    var dateFrom by remember { mutableStateOf<LocalDate?>(null) }
-    var dateTo by remember { mutableStateOf<LocalDate?>(null) }
+    var showDateFromPicker by rememberSaveable { mutableStateOf(false) }
+    var showDateToPicker by rememberSaveable { mutableStateOf(false) }
+    var dateFrom by rememberSaveable { mutableStateOf<LocalDate?>(null) }
+    var dateTo by rememberSaveable { mutableStateOf<LocalDate?>(null) }
 
-    var cameraFilter by remember { mutableStateOf<String?>(null) }
+    var cameraFilter by rememberSaveable { mutableStateOf<String?>(null) }
 
     // 关键词结果由 Paging 查询直接响应；可选模式仅在被当前 edition 启用且选中时执行回调。
     LaunchedEffect(query, optionalModeActive) {

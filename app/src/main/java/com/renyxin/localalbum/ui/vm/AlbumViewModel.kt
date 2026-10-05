@@ -83,8 +83,15 @@ class AlbumViewModel(
     fun pagedMediaForFaceCluster(clusterId: String): Flow<PagingData<MediaItem>> =
         repository.pagedMediaForFaceCluster(clusterId).cachedIn(viewModelScope)
 
+    /** 搜索 Paging 流按查询缓存：查看器返回后缓存重放保持结果与滚动位置。 */
+    private val searchFlows =
+        android.util.LruCache<com.renyxin.localalbum.data.repo.MediaSearchQuery, Flow<PagingData<MediaItem>>>(8)
+
     fun pagedSearch(query: com.renyxin.localalbum.data.repo.MediaSearchQuery): Flow<PagingData<MediaItem>> =
-        repository.pagedSearch(query).cachedIn(viewModelScope)
+        searchFlows.get(query)
+            ?: repository.pagedSearch(query)
+                .cachedIn(viewModelScope)
+                .also { flow -> searchFlows.put(query, flow) }
 
     fun viewerMedia(context: MediaQueryContext, initialPath: String): Flow<PagingData<MediaItem>> =
         repository.viewerMedia(context, initialPath).cachedIn(viewModelScope)

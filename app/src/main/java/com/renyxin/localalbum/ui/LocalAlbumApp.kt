@@ -653,35 +653,14 @@ fun LocalAlbumApp(
 
             Scaffold(
                 topBar = {
-                    // 紧凑头部：替代 64dp 的 M3 TopAppBar，标题与扫描入口保持不变，
-                    // 视觉高度约减三分之一；surface 背景顺带覆盖状态栏区域（edge-to-edge）。
+                    // 无标题头部：内容直接顶到状态栏下方，仅保留 4dp 扫描进度条。
+                    // 当前 Tab 由底部导航标识，不需要页顶大标题；已有全局进度浮层。
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(MaterialTheme.colorScheme.surface)
                             .statusBarsPadding(),
                     ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 44.dp)
-                                .padding(horizontal = 16.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = navDestinations[currentTab].title,
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.weight(1f),
-                            )
-                            // 扫描状态快捷入口（仅在非设置页显示，避免冗余）
-                            if (currentTab != MainTabIndex.SETTINGS && coreScanActive) {
-                                IconButton(onClick = { currentTab = MainTabIndex.SETTINGS }) {
-                                    Icon(Icons.Default.Refresh, contentDescription = "扫描中")
-                                }
-                            }
-                        }
-                        // 预留固定高度避免扫描开始/结束时布局跳动
                         Box(modifier = Modifier.fillMaxWidth().height(4.dp)) {
                             if (coreScanActive) {
                                 LinearProgressIndicator(
