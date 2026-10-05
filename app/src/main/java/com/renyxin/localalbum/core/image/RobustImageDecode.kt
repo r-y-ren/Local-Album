@@ -32,6 +32,47 @@ object RobustImageDecode {
     }
 
     /**
+     * 精确缩放解码（OCR 等分辨率敏感链路）：最长边精确缩放到 maxDim。
+     *
+     * [decodeFile] 的 BitmapFactory 主链只能按 2 的幂采样，结果最长边落在
+     * maxDim/2 ~ maxDim 之间（1080×2400 截图在 maxDim=1280 下只得 540×1200，
+     * 平白丢掉近一倍线性分辨率，小字直接变糊）。本函数首选 ImageDecoder
+     * setTargetSize（单次解码内完成采样+缩放），失败回退 2 的幂采样 +
+     * createScaledBitmap 两步缩放。最长边本就不超过 maxDim 的图走 [decodeFile] 原样返回。
+     */
+    fun decodeFileScaled(file: File, maxDim: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val maxSide = maxOf(bounds.outWidth, bounds.outHeight)
+        if (maxSide <= maxDim) return decodeFile(file, maxDim)
+
+        val scale = maxDim.toFloat() / maxSide
+        val targetW = (bounds.outWidth * scale).toInt().coerceAtLeast(1)
+        val targetH = (bounds.outHeight * scale).toInt().coerceAtLeast(1)
+
+        val viaImageDecoder = runCatching {
+            ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, _, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                decoder.setTargetSize(targetW, targetH)
+            }.asArgb8888()
+        }.getOrNull()
+        if (viaImageDecoder != null) return viaImageDecoder
+
+        // 兜底链：2 的幂采样留 2 倍余量解码，再精确缩到目标尺寸（解码含 16-bit PNG 回退）
+        val sampled = decodeFile(file, maxDim * 2) ?: return null
+        val sampledMax = maxOf(sampled.width, sampled.height)
+        if (sampledMax <= maxDim) return sampled
+        val s = maxDim.toFloat() / sampledMax
+        return Bitmap.createScaledBitmap(
+            sampled,
+            (sampled.width * s).toInt().coerceAtLeast(1),
+            (sampled.height * s).toInt().coerceAtLeast(1),
+            true,
+        )
+    }
+
+    /**
      * 已校验 fd 解码（缩略图生成）：BitmapFactory 主链沿用单 fd 语义（每次解码前 seek(0)）。
      * ImageDecoder 没有 FileDescriptor 重载，兜底改按 [canonicalPath] 打开；
      * 调用方（generateThumbnailSync）在解码后仍做 before/after/path 三重签名校验，

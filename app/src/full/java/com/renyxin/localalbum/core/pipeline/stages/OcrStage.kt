@@ -36,7 +36,10 @@ class OcrStage(
     override val fileConcurrency = 1
     // 字典从 ppocr_keys_v1.txt (6623) 升级到 ppocrv5_dict.txt (18383)，bump 版本号强制重跑
     // v3: 检测/识别预处理重构（等比缩放+填充替代硬拉伸），错字率显著变化，强制全量重跑
-    override val modelVersion: Int = 3
+    // v4: OCR 召回修复——检测输入 960 动态尺寸、后处理重写为旋转框管线（连通域+行分裂
+    //     +minAreaRect+unclip+均分过滤，见 DbBoxGeometry）、源图精确缩放解码 2048、
+    //     识别窗动态宽度、区域上限 32→64、落库文本上限 500→2000
+    override val modelVersion: Int = 4
 
     override suspend fun execute(
         filePaths: List<String>,
@@ -87,7 +90,9 @@ class OcrStage(
                 .effectiveStageConcurrency(stageId, fileConcurrency),
         ) { path ->
             val result = ocrProvider.recognize(File(path))
-            val ocrText = if (result.fullText.isNotBlank()) result.fullText.take(500) else null
+            // 文字密集图（文档/长截图/海报）64 区域 × 每行 20+ 字轻松超过 500 字，
+            // 上限放大到 2000 保证 FTS 索引覆盖绝大部分画面文本
+            val ocrText = if (result.fullText.isNotBlank()) result.fullText.take(2000) else null
             mediaDao.setOcrText(path, ocrText)
             ocrText != null
         }
