@@ -653,6 +653,9 @@ class AppContainer(context: Context) {
                 null
             },
         ),
+        recommendationSnapshotStore = com.renyxin.localalbum.core.recommendation.RecommendationSnapshotStore(
+            file = java.io.File(appContext.filesDir, "recommendations_snapshot.json"),
+        ),
         hybridIndexer = hybridIndexer,
         libraryPipelineCoordinator = libraryPipelineCoordinator,
         thumbnailScheduler = thumbnailScheduler,

@@ -47,6 +47,8 @@ class DatabaseExporterTest {
             store.toSortedMap().values
                 .filter { !it.isTrashed && (afterPath == null || it.filePath > afterPath) }
                 .take(limit)
+        override suspend fun getMediaByPaths(paths: List<String>): List<MediaEntity> =
+            store.values.filter { !it.isTrashed && it.filePath in paths }
         override suspend fun getRecommendationCandidatesForDirectories(
             parentPaths: List<String>,
             limit: Int,

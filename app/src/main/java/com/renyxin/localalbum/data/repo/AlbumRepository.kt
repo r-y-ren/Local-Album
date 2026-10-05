@@ -21,6 +21,7 @@ import com.renyxin.localalbum.core.recommendation.Recommendation
 import com.renyxin.localalbum.core.recommendation.RecommendationDiversifier
 import com.renyxin.localalbum.core.recommendation.RecommendationEngine
 import com.renyxin.localalbum.core.recommendation.RecommendationFileRotator
+import com.renyxin.localalbum.core.recommendation.RecommendationSnapshotStore
 import com.renyxin.localalbum.core.search.FtsQueryBuilder
 import com.renyxin.localalbum.core.search.KeywordSearchProfile
 import com.renyxin.localalbum.core.search.SemanticSearcher
@@ -222,6 +223,8 @@ class AlbumRepository(
     ),
     private val recommendationDiversifier: RecommendationDiversifier = RecommendationDiversifier(),
     private val recommendationFileRotator: RecommendationFileRotator = RecommendationFileRotator(),
+    /** 推荐批次快照持久化（null 时退化为纯内存行为，测试用） */
+    private val recommendationSnapshotStore: RecommendationSnapshotStore? = null,
     private val hybridIndexer: HybridIndexer? = null,
     private val libraryPipelineCoordinator: LibraryPipelineCoordinator? = null,
     private val thumbnailScheduler: ThumbnailScheduler? = null,
@@ -241,6 +244,9 @@ class AlbumRepository(
         /** 全量推荐池只保留给显式用户刷新；自动增强使用受影响目录窗口。 */
         private const val RECOMMENDATION_PAGE_SIZE = 1_000
         private const val RECOMMENDATION_DIRECTORY_LIMIT = 1_000
+
+        /** 快照恢复回查的 IN 查询批大小（SQLite 宿主变量上限 999）。 */
+        private const val SNAPSHOT_PATH_QUERY_BATCH = 500
 
         /** 失败任务页每条车道（分析/缩略图）的最大展示行数。 */
         private const val FAILURE_LIST_LIMIT = 200
@@ -296,6 +302,18 @@ class AlbumRepository(
 
     /** 推荐刷新互斥锁，保护共享的推荐池与游标 */
     private val recommendationMutex = Mutex()
+
+    /**
+     * 快照恢复出的轮换游标，等待池重建时消费一次。
+     * 非空表示"进程重启后的首次刷新应从上次断点继续轮换，而不是重放第一批"。
+     */
+    private var pendingRestoredCursor: Int? = null
+
+    init {
+        // 冷启动恢复上次展示的推荐批次（含轮换游标）；无快照时在目录树就绪后
+        // 自动建池一次，消除"每次打开都要手动刷新才有内容"。
+        scope.launch { restoreRecommendationSnapshot() }
+    }
 
     /** 扫描/重分析互斥锁，串行化 rescan/forceReanalyzeAll/restoreFromDbIfNeeded，
      *  防止 ContentObserver 触发的增量扫描与用户手动扫描并发执行导致数据/FTS/状态竞态。 */
@@ -1783,8 +1801,10 @@ class AlbumRepository(
             val diversified = recommendationDiversifier.selectAll(allRecs)
             diversifiedRecommendationPool = recommendationFileRotator.build(diversified, allMedia)
             recommendationCursor = 0
+            pendingRestoredCursor = null
             _recommendations.value = diversifiedRecommendationPool.take(recommendationBatchSize)
             recommendationCursor = _recommendations.value.size
+            persistRecommendationSnapshot()
         }
     }
 
@@ -1826,12 +1846,20 @@ class AlbumRepository(
     private suspend fun refreshRecommendations(leafs: List<Album>) {
         // P3-1: 加锁保护共享的推荐池/游标，避免并发刷新导致状态错乱
         recommendationMutex.withLock {
-            // 仅在首次加载或全部文件完成一轮后重建。每个文件在一轮中只属于一个推荐。
-            if (diversifiedRecommendationPool.isEmpty() || recommendationCursor >= diversifiedRecommendationPool.size) {
-                val allMedia = leafs.flatMap { it.mediaItems }
-                val allRecs = recommendationEngine.generateAll(leafs)
-                val diversified = recommendationDiversifier.selectAll(allRecs)
-                diversifiedRecommendationPool = recommendationFileRotator.build(diversified, allMedia)
+            if (diversifiedRecommendationPool.isEmpty()) {
+                rebuildRecommendationPoolLocked(leafs)
+                // 进程重启后的首次刷新：沿用快照恢复的游标继续轮换，而不是从
+                // 确定性排序的首批重放——否则用户感知为"重启后刷新永远同样内容"。
+                recommendationCursor = (pendingRestoredCursor ?: 0)
+                    .coerceIn(0, diversifiedRecommendationPool.size)
+                if (recommendationCursor >= diversifiedRecommendationPool.size) {
+                    // 快照时恰好轮完一整轮：从头开始新一轮
+                    recommendationCursor = 0
+                }
+                pendingRestoredCursor = null
+            } else if (recommendationCursor >= diversifiedRecommendationPool.size) {
+                // 仅在全部文件完成一轮后重建。每个文件在一轮中只属于一个推荐。
+                rebuildRecommendationPoolLocked(leafs)
                 recommendationCursor = 0
             }
 
@@ -1841,7 +1869,81 @@ class AlbumRepository(
 
             recommendationCursor += nextBatch.size
             _recommendations.value = nextBatch
+            persistRecommendationSnapshot()
         }
+    }
+
+    /** 池重建（调用方必须已持有 [recommendationMutex]）。 */
+    private suspend fun rebuildRecommendationPoolLocked(leafs: List<Album>) {
+        val allMedia = leafs.flatMap { it.mediaItems }
+        val allRecs = recommendationEngine.generateAll(leafs)
+        val diversified = recommendationDiversifier.selectAll(allRecs)
+        diversifiedRecommendationPool = recommendationFileRotator.build(diversified, allMedia)
+    }
+
+    /** 把当前批次与游标写入快照（调用方必须已持有 [recommendationMutex]）。 */
+    private fun persistRecommendationSnapshot() {
+        val store = recommendationSnapshotStore ?: return
+        store.save(cursor = recommendationCursor, batch = _recommendations.value)
+    }
+
+    /**
+     * 冷启动恢复：快照批次按路径回查数据库重建 MediaItem 后直接上屏；
+     * 游标暂存 [pendingRestoredCursor] 供首次刷新续轮。无快照（首次安装/快照
+     * 失效）时等目录树就绪且不在核心扫描期，自动建池一次。
+     */
+    private suspend fun restoreRecommendationSnapshot() {
+        val store = recommendationSnapshotStore ?: return
+        val snapshot = store.load()
+        if (snapshot == null || snapshot.entries.isEmpty()) {
+            if (snapshot == null && mediaDao.getCount() > 0) {
+                _leafAlbums.first { it.isNotEmpty() }
+                if (!isCoreScanActive()) {
+                    runCatching { refreshRecommendations() }
+                        .onFailure { Log.w(TAG, "启动自动建池失败", it) }
+                }
+            }
+            return
+        }
+        val itemsByPath = lookupMediaByPaths(snapshot.entries.flatMap { it.paths }.distinct())
+        val restored = snapshot.entries.mapNotNull { entry ->
+            val items = entry.paths.mapNotNull { itemsByPath[it] }
+            if (items.isEmpty()) {
+                null
+            } else {
+                Recommendation(
+                    albumId = entry.albumId,
+                    albumName = entry.albumName,
+                    directoryPath = entry.directoryPath,
+                    windowStart = Instant.ofEpochMilli(entry.windowStartMs),
+                    windowEnd = Instant.ofEpochMilli(entry.windowEndMs),
+                    mediaItems = items,
+                    reason = entry.reason,
+                    score = entry.score,
+                    category = entry.category,
+                )
+            }
+        }
+        if (restored.isEmpty()) return
+        recommendationMutex.withLock {
+            // 恢复期间若已有更新鲜的批次发布（如增量扫描触发的目录级刷新），不覆盖
+            if (_recommendations.value.isEmpty()) {
+                pendingRestoredCursor = snapshot.cursor
+                _recommendations.value = restored
+            }
+        }
+    }
+
+    /** 按路径批量回查媒体行；IN 查询按 SQLite 宿主变量上限分批。 */
+    private suspend fun lookupMediaByPaths(paths: List<String>): Map<String, MediaItem> {
+        if (paths.isEmpty()) return emptyMap()
+        val result = HashMap<String, MediaItem>(paths.size)
+        paths.chunked(SNAPSHOT_PATH_QUERY_BATCH).forEach { batch ->
+            mediaDao.getMediaByPaths(batch).forEach { entity ->
+                result[entity.filePath] = entity.toMediaItem()
+            }
+        }
+        return result
     }
 
     private fun buildDirectoryNodes(

@@ -164,6 +164,13 @@ interface MediaDao {
     @Query("SELECT COUNT(*) FROM media_items WHERE isTrashed = 0")
     suspend fun getCount(): Int
 
+    /**
+     * 推荐快照恢复：按路径批量回查媒体行（快照只持久化路径，MediaItem 恢复时重建）。
+     * 调用方需按 SQLite 宿主变量上限自行分批。
+     */
+    @Query("SELECT * FROM media_items WHERE isTrashed = 0 AND filePath IN (:paths)")
+    suspend fun getMediaByPaths(paths: List<String>): List<MediaEntity>
+
     // ---- 全文搜索 ----
     @Query(
         """SELECT * FROM media_items WHERE isTrashed = 0 AND (
