@@ -71,18 +71,7 @@ class SceneClassifier {
         ClassificationResult(label = best.key, confidence = best.value, allScores = scores)
     }
 
-    /**
-     * 批量分类，返回路径到标签的映射。
-     */
-    suspend fun classifyBatch(files: List<File>): Map<String, SceneLabel> = withContext(Dispatchers.IO) {
-        val results = mutableMapOf<String, SceneLabel>()
-        for (file in files) {
-            val classification = classify(file)
-            results[file.absolutePath] = classification.label
-        }
-        results
-    }
-
+    
     // ---- 特征提取 ----
 
     private data class ImageFeatures(

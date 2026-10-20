@@ -132,9 +132,6 @@ class AlbumViewModel(
 
     // ---- 任务进度追踪 (Phase 5.4) ----
 
-    /** 全局任务进度状态，供 UI 观察所有活跃任务 */
-    private val _taskProgress = MutableStateFlow<Map<String, TaskProgress>>(emptyMap())
-    val taskProgress: StateFlow<Map<String, TaskProgress>> = _taskProgress.asStateFlow()
 
     /** 活跃的扫描任务 Job，用于取消操作 */
     private var scanJob: Job? = null
@@ -184,20 +181,6 @@ class AlbumViewModel(
         ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StageFileProgress.EMPTY)
         ?: MutableStateFlow(StageFileProgress.EMPTY).asStateFlow()
 
-    /** 场景识别阶段的 per-file 进度（修复：使用与 SceneStage 一致的 stageId 常量） */
-    val sceneFileProgress: StateFlow<StageFileProgress> = progressManager?.progress
-        ?.debounce(80L)
-        ?.map { it.perStageFiles[AnalysisStage.STAGE_SCENE] ?: StageFileProgress.EMPTY }
-        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StageFileProgress.EMPTY)
-        ?: MutableStateFlow(StageFileProgress.EMPTY).asStateFlow()
-
-    /**
-     * 更新全局任务进度状态。
-     * 由管道层通过此方法推送进度更新。
-     */
-    fun updateTaskProgress(progress: Map<String, TaskProgress>) {
-        _taskProgress.value = progress
-    }
 
     /**
      * 取消当前正在执行的扫描任务。
@@ -223,7 +206,6 @@ class AlbumViewModel(
             com.renyxin.localalbum.data.worker.RecommendationRefreshWorker.cancel(application)
         }
         progressManager?.reset()
-        _taskProgress.value = emptyMap()
     }
 
     /** 用户恢复被暂停的流水线（核心扫描 + 后台分析）。 */
@@ -247,10 +229,6 @@ class AlbumViewModel(
      *
      * @param taskId 要取消的任务 ID（当前管道模型下，取消任一任务等同于取消整个扫描 Job）
      */
-    fun cancelTaskById(@Suppress("UNUSED_PARAMETER") taskId: String) {
-        // 当只有一个扫描 Job 时，取消 Job 等同于取消所有子任务
-        cancelTask()
-    }
 
     fun rescan() {
         android.util.Log.i("AlbumViewModel", "rescan: 用户触发扫描检查")
@@ -489,9 +467,6 @@ class AlbumViewModel(
     /** 语义搜索状态（区分无匹配与模型/索引问题） */
     val semanticSearchState: StateFlow<SemanticSearchState> = repository.semanticSearchState
 
-    private val _semanticStats = MutableStateFlow(SemanticStats())
-    val semanticStats: StateFlow<SemanticStats> = _semanticStats.asStateFlow()
-
     /** 是否处于语义搜索模式 */
     private val _isSemanticMode = MutableStateFlow(false)
     val isSemanticMode: StateFlow<Boolean> = _isSemanticMode.asStateFlow()
@@ -514,11 +489,6 @@ class AlbumViewModel(
     }
 
     /** 加载语义搜索索引统计 */
-    fun loadSemanticStats() {
-        viewModelScope.launch {
-            _semanticStats.value = repository.getSemanticStats()
-        }
-    }
 
     fun toggleFavorite(path: String) {
         viewModelScope.launch { repository.toggleFavorite(path) }
@@ -550,53 +520,10 @@ class AlbumViewModel(
         .map { it?.status == MaintenanceRunEntity.STATUS_RUNNING || it?.status == MaintenanceRunEntity.STATUS_FINALIZING }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
-    private val _duplicateGroupPhotos = MutableStateFlow<List<MediaItem>>(emptyList())
-    val duplicateGroupPhotos: StateFlow<List<MediaItem>> = _duplicateGroupPhotos.asStateFlow()
-
     /** 调度唯一离线维护任务；调用立即返回。 */
     fun loadDuplicateGroups() = repository.startDuplicateMaintenance()
 
     /** 加载某个重复组内的完整媒体项 */
-    fun loadPhotosInDuplicateGroup(groupId: String) {
-        viewModelScope.launch {
-            val group = duplicateGroups.value.find { it.groupId == groupId } ?: return@launch
-            val dao = repository.getMediaDao()
-            val items = group.filePaths.mapNotNull { path ->
-                dao.getByFilePathLight(path)?.let {
-                    MediaItem(
-                        id = java.util.UUID.nameUUIDFromBytes(path.toByteArray()).toString(),
-                        filePath = it.filePath,
-                        fileName = it.fileName,
-                        type = it.mediaType,
-                        capturedAt = java.time.Instant.ofEpochMilli(it.capturedAtMs),
-                        modifiedAt = java.time.Instant.ofEpochMilli(it.modifiedAtMs),
-                        fileSize = it.fileSize,
-                        isFavorite = it.isFavorite,
-                        isTrashed = it.isTrashed,
-                        deletedAtMs = it.deletedAtMs,
-                        width = it.width,
-                        height = it.height,
-                        mimeType = it.mimeType,
-                        durationMs = it.durationMs,
-                        latitude = it.latitude,
-                        longitude = it.longitude,
-                        make = it.make,
-                        model = it.model,
-                        aperture = it.aperture,
-                        focalLength = it.focalLength,
-                        iso = it.iso,
-                        exposureTime = it.exposureTime,
-                        orientation = it.orientation,
-                        sceneType = it.sceneType,
-                        thumbnailPath = it.thumbnailPath,
-                        isCorrupted = it.isCorrupted,
-                        faceClusterId = it.faceClusterId,
-                    )
-                }
-            }
-            _duplicateGroupPhotos.value = items
-        }
-    }
 
     /** "保留一项删除其余" */
     fun keepOneDeleteRest(groupId: String, keepPath: String? = null) {
@@ -604,11 +531,6 @@ class AlbumViewModel(
     }
 
     /** 所有重复文件总大小（浪费的存储空间） */
-    fun getTotalWastedBytes(): Long {
-        return duplicateGroups.value.sumOf { group ->
-            group.filePaths.drop(1).sumOf { group.fileSizes[it] ?: 0L }
-        }
-    }
 
     // ---- 人脸聚类管理 (Phase 3.3) ----
 
@@ -623,6 +545,9 @@ class AlbumViewModel(
     fun setPersonName(clusterId: String, name: String?) {
         viewModelScope.launch { repository.setPersonName(clusterId, name) }
     }
+
+    /** 仅启动显式人物原型维护，不触发图片全量重分析。 */
+    fun maintainFaceClusters() = repository.startFaceClusterMaintenance()
 
     // ---- 按阶段重建（分析维护页） ----
 
@@ -677,11 +602,6 @@ class AlbumViewModel(
         }
     }
 
-    /** 仅启动显式人物原型维护，不触发图片全量重分析。 */
-    fun maintainFaceClusters() = repository.startFaceClusterMaintenance()
-
-    // ---- 数据库导入导出 (Phase 4.2) ----
-
     /** 导出/导入操作状态 */
     sealed interface BackupState {
         data object Idle : BackupState
@@ -698,20 +618,6 @@ class AlbumViewModel(
      *
      * @param outputFile 目标文件路径
      */
-    fun exportDatabase(outputFile: java.io.File) {
-        viewModelScope.launch {
-            _backupState.value = BackupState.InProgress("正在导出数据库…")
-            val result = repository.exportDatabase(outputFile)
-            _backupState.value = if (result.success) {
-                BackupState.Success(
-                    "导出成功：${result.mediaCount} 条媒体, ${result.faceCount} 张人脸, " +
-                        "${result.embeddingCount} 条嵌入 (${result.fileSizeBytes / 1024}KB)",
-                )
-            } else {
-                BackupState.Error(result.errorMessage ?: "导出失败")
-            }
-        }
-    }
 
     /**
      * 导入数据库 JSON 文件（Phase 4.2）。
@@ -719,30 +625,10 @@ class AlbumViewModel(
      *
      * @param inputFile 导出的 JSON 文件
      */
-    fun importDatabase(inputFile: java.io.File) {
-        viewModelScope.launch {
-            _backupState.value = BackupState.InProgress("正在导入数据库…")
-            val result = repository.importDatabase(inputFile)
-            _backupState.value = if (result.success) {
-                BackupState.Success(
-                    "导入成功：${result.mediaCount} 条媒体, ${result.faceCount} 张人脸, " +
-                        "${result.embeddingCount} 条嵌入",
-                )
-            } else {
-                BackupState.Error(result.errorMessage ?: "导入失败")
-            }
-        }
-    }
 
     /** 校验导入文件格式（不执行实际导入） */
-    fun validateImportFile(inputFile: java.io.File): Pair<org.json.JSONObject?, String?> {
-        return repository.validateImportFile(inputFile)
-    }
 
     /** 重置备份状态为空闲 */
-    fun resetBackupState() {
-        _backupState.value = BackupState.Idle
-    }
 
     // ---- SAF 自定义路径导入/导出（Phase 改进） ----
 

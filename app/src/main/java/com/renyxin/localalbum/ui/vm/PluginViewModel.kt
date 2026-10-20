@@ -72,7 +72,6 @@ class PluginViewModel(
 
     /** 选择模型文件 (SAF Uri) */
     private val _selectedModelUri = MutableStateFlow<Uri?>(null)
-    val selectedModelUri: StateFlow<Uri?> = _selectedModelUri.asStateFlow()
 
     /** 从模型文件解析出的张量元数据 */
     private val _parsedTensors = MutableStateFlow<TensorParseState>(TensorParseState.Idle)
@@ -136,10 +135,6 @@ class PluginViewModel(
 
     // --- Plugin List ---
 
-    /** 所有插件清单的 Flow */
-    val pluginList: StateFlow<List<PluginManifestEntity>> = pluginDao.getAllFlow()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
     /** 保存/导入操作状态 */
     private val _saveState = MutableStateFlow<SaveState>(SaveState.Idle)
     val saveState: StateFlow<SaveState> = _saveState.asStateFlow()
@@ -167,9 +162,6 @@ class PluginViewModel(
     }
 
     /** 跳转到指定步骤 */
-    fun goToStep(step: Int) {
-        _wizardStep.value = step.coerceIn(0, 3)
-    }
 
     /** 重置向导 */
     fun resetWizard() {
@@ -447,49 +439,8 @@ class PluginViewModel(
     }
 
     /** 删除插件 */
-    fun deletePlugin(pluginId: String) {
-        viewModelScope.launch {
-            try {
-                val entity = pluginDao.getByPluginId(pluginId)
-                if (entity != null) {
-                    val manifest = try {
-                        PluginJsonCodec.manifestFromJson(entity.manifestJson)
-                    } catch (_: Exception) { null }
-
-                    pluginDao.delete(entity)
-
-                    if (manifest != null && manifest.modelFilePath.isNotBlank()) {
-                        val modelFileName = manifest.modelFilePath.substringAfterLast("/")
-                        if (modelFileName.isNotBlank()) {
-                            modelStorageManager?.deleteModel(modelFileName)
-                        }
-                    }
-
-                    try { extensionRegistry.unload(pluginId) } catch (_: Exception) {}
-
-                    modelStorageManager?.refresh()
-                    reloadPluginRegistry()
-
-                    val modelInfo = if (manifest != null) "「${manifest.name}」" else pluginId
-                    _message.value = "插件 $modelInfo 已删除"
-                }
-            } catch (e: Exception) {
-                _message.value = "删除失败: ${e.message}"
-            }
-        }
-    }
 
     /** 切换插件启用状态 */
-    fun togglePluginEnabled(pluginId: String, enabled: Boolean) {
-        viewModelScope.launch {
-            try {
-                pluginDao.setEnabled(pluginId, enabled)
-                reloadPluginRegistry()
-            } catch (e: Exception) {
-                _message.value = "操作失败: ${e.message}"
-            }
-        }
-    }
 
     /** 重新加载扩展插件注册表 */
     private fun reloadPluginRegistry() {
@@ -513,33 +464,6 @@ class PluginViewModel(
     /**
      * 重新排序插件。
      */
-    fun reorderPlugins(plugins: List<PluginManifestEntity>, fromIndex: Int, toIndex: Int) {
-        if (fromIndex == toIndex || fromIndex !in plugins.indices || toIndex !in plugins.indices) return
-
-        viewModelScope.launch {
-            try {
-                val mutableList = plugins.toMutableList()
-                val moved = mutableList.removeAt(fromIndex)
-                mutableList.add(toIndex, moved)
-
-                var failed = false
-                val now = System.currentTimeMillis()
-                for ((index, entity) in mutableList.withIndex()) {
-                    try {
-                        pluginDao.updateOrder(entity.pluginId, index, now)
-                    } catch (e: Exception) {
-                        android.util.Log.w("PluginViewModel", "更新排序失败: ${entity.pluginId}", e)
-                        failed = true
-                    }
-                }
-                if (failed) {
-                    _message.value = "部分排序更新失败，请重试"
-                }
-            } catch (e: Exception) {
-                _message.value = "排序更新失败: ${e.message}"
-            }
-        }
-    }
 
     /** 清除消息 */
     fun clearMessage() {
@@ -558,7 +482,6 @@ class PluginViewModel(
     fun updatePluginVersion(value: String) { _pluginVersion.value = value }
     fun updatePluginAuthor(value: String) { _pluginAuthor.value = value }
     fun updateEntryClass(value: String) { _entryClass.value = value }
-    fun updateTaskType(value: PluginManifest.TaskType) { _taskType.value = value }
     fun updatePipelineStage(value: String) { _pipelineStage.value = value }
     fun updateEditorJsonText(value: String) { _editorJsonText.value = value }
     fun updateFeatureSchemaJson(value: String) { _featureSchemaJson.value = value }
@@ -671,10 +594,6 @@ class PluginViewModel(
     /**
      * 语义模型是否为内置 EVA02-CLIP（随包打包，无需外部推送）。
      */
-    fun isSemanticBundled(): Boolean {
-        val provider = capabilityRegistry.getActiveProvider<SemanticEmbedProvider>("semantic")
-        return provider is Eva02ClipProvider
-    }
 
     // ---- 换脸执行 ----
 
@@ -743,24 +662,11 @@ class PluginViewModel(
         }
     }
 
-    /** 重置换脸状态 */
-    fun resetFaceSwapState() {
-        _faceSwapState.value = FaceSwapUiState.Idle
-    }
-
     // ---- 存储管理 (Phase 4) ----
 
     val storageStats: StateFlow<ModelStorageManager.StorageStats> =
         modelStorageManager?.storageStats
             ?: MutableStateFlow(ModelStorageManager.StorageStats()).asStateFlow()
-
-    val modelStorageDetails: StateFlow<List<ModelStorageManager.ModelStorageInfo>> =
-        modelStorageManager?.modelDetails
-            ?: MutableStateFlow<List<ModelStorageManager.ModelStorageInfo>>(emptyList()).asStateFlow()
-
-    fun refreshStorageStats() {
-        modelStorageManager?.refresh()
-    }
 
     // ---- 下载进度 (Phase 5b) ----
 
@@ -783,7 +689,6 @@ class PluginViewModel(
     }
 
     private val _downloadStates = MutableStateFlow<Map<String, DownloadProgress>>(emptyMap())
-    val downloadStates: StateFlow<Map<String, DownloadProgress>> = _downloadStates.asStateFlow()
 
     /** 活跃下载 Job 映射（key 与 _downloadStates 一致），用于真正取消底层下载协程 */
     private val downloadJobs = mutableMapOf<String, Job>()
@@ -795,39 +700,12 @@ class PluginViewModel(
     // ---- 模型目录浏览 (Phase 5a+) ----
 
     private val _modelCatalogList = MutableStateFlow<List<ModelInfo>>(emptyList())
-    val modelCatalogList: StateFlow<List<ModelInfo>> = _modelCatalogList.asStateFlow()
 
     private val _catalogLoading = MutableStateFlow(false)
-    val catalogLoading: StateFlow<Boolean> = _catalogLoading.asStateFlow()
 
     /** 加载模型目录（本地 + 远程） */
-    fun loadModelCatalog(query: String? = null) {
-        viewModelScope.launch {
-            _catalogLoading.value = true
-            try {
-                val catalog = modelCatalog ?: return@launch
-                val models = if (query.isNullOrBlank()) catalog.listModels()
-                else catalog.search(query)
-                _modelCatalogList.value = models
-            } catch (e: Exception) {
-                _message.value = "加载模型目录失败: ${e.message}"
-            } finally {
-                _catalogLoading.value = false
-            }
-        }
-    }
 
     /** 取消正在进行的下载 */
-    fun cancelDownload(modelId: String) {
-        // 真正取消底层下载协程，避免「取消」后下载仍在继续
-        downloadJobs.remove(modelId)?.cancel()
-        val current = _downloadStates.value.toMutableMap()
-        current[modelId] = (current[modelId] ?: DownloadProgress(modelId)).copy(
-            status = DownloadStatus.ERROR,
-            errorMessage = "用户取消",
-        )
-        _downloadStates.value = current
-    }
 
     private fun updateDownloadState(modelId: String, status: DownloadStatus, downloaded: Long = 0, total: Long = 0, error: String? = null) {
         val current = _downloadStates.value.toMutableMap()
@@ -836,10 +714,6 @@ class PluginViewModel(
     }
 
     /** 清理模型缓存 */
-    fun clearModelCache() {
-        modelStorageManager?.clearCache()
-        _message.value = "模型缓存已清理"
-    }
 
     /**
      * 从模型目录下载模型（Phase 5a+ 增强）。
@@ -847,168 +721,10 @@ class PluginViewModel(
      * 使用 [ModelInfo] 中的元数据自动填充下载参数，
      * 并通过 ProgressCallback 实时更新 [downloadStates]。
      */
-    fun downloadModel(model: ModelInfo) {
-        val modelId = model.modelId
-        val pluginId = "model:$modelId"
-        val fileName = model.localFilePath?.substringAfterLast("/")
-            ?: "${model.modelId}.${model.format.name.lowercase()}"
-        val url = model.downloadUrl ?: run {
-            _message.value = "模型无下载地址: ${model.displayName}"
-            return
-        }
-
-        downloadJobs[modelId] = viewModelScope.launch {
-            // 下载状态统一以 model.modelId 为键，与 ModelMarketTab 的查询/取消键一致
-            updateDownloadState(modelId, DownloadStatus.DOWNLOADING, 0, model.fileSizeBytes)
-            _message.value = "正在下载: ${model.displayName}..."
-
-            try {
-                val dm = modelDownloadManager
-                if (dm == null) {
-                    updateDownloadState(modelId, DownloadStatus.ERROR, error = "下载管理器未初始化")
-                    return@launch
-                }
-
-                val modelFile = dm.ensureModel(
-                    modelFileName = fileName,
-                    url = url,
-                    expectedSha256 = model.sha256,
-                    progress = { downloaded, total ->
-                        updateDownloadState(modelId, DownloadStatus.DOWNLOADING, downloaded, total)
-                    },
-                )
-
-                if (modelFile == null) {
-                    updateDownloadState(modelId, DownloadStatus.ERROR, error = "下载失败")
-                    _message.value = "模型下载失败: ${model.displayName}"
-                    return@launch
-                }
-
-                // 验证阶段
-                updateDownloadState(modelId, DownloadStatus.VERIFYING,
-                    model.fileSizeBytes.coerceAtLeast(0), model.fileSizeBytes)
-
-                // 安装阶段
-                updateDownloadState(modelId, DownloadStatus.INSTALLING)
-                val manifestJson = PluginJsonCodec.manifestToJson(
-                    PluginManifest(
-                        pluginId = pluginId,
-                        name = model.displayName,
-                        version = model.version,
-                        author = model.author,
-                        taskType = PluginManifest.TaskType.FEATURE_EXTRACTION,
-                        modelFormat = model.format,
-                        modelFilePath = fileName,
-                        entryClass = "",
-                        inputTensors = emptyList(),
-                        outputTensors = emptyList(),
-                        description = model.description.ifBlank { null },
-                    )
-                )
-
-                val existing = pluginDao.getByPluginId(pluginId)
-                pluginDao.insert(
-                    PluginManifestEntity(
-                        id = existing?.id ?: 0,
-                        pluginId = pluginId,
-                        manifestJson = manifestJson,
-                        isEnabled = true,
-                        pipelineStage = "analysis",
-                        createdAtMs = existing?.createdAtMs ?: System.currentTimeMillis(),
-                        updatedAtMs = System.currentTimeMillis(),
-                    )
-                )
-
-                modelStorageManager?.refresh()
-                reloadPluginRegistry()
-                updateDownloadState(modelId, DownloadStatus.DONE)
-                _message.value = "模型安装成功: ${model.displayName}"
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                updateDownloadState(modelId, DownloadStatus.ERROR, error = e.message)
-                _message.value = "安装失败: ${e.message}"
-                try { modelStorageManager?.deleteModel(fileName) } catch (_: Exception) {}
-            }
-        }
-    }
 
     /**
      * 从 URL 下载并安装模型（Phase 4 增强 + 进度回调）。
      */
-    fun installModelFromUrl(
-        pluginId: String,
-        displayName: String,
-        downloadUrl: String,
-        expectedSha256: String? = null,
-        modelFileName: String = "$pluginId.tflite",
-    ) {
-        downloadJobs[pluginId] = viewModelScope.launch {
-            _message.value = "正在下载模型: $displayName..."
-            updateDownloadState(pluginId, DownloadStatus.DOWNLOADING, 0, -1)
-            try {
-                val dm = modelDownloadManager
-                if (dm == null) {
-                    _message.value = "下载管理器未初始化"
-                    updateDownloadState(pluginId, DownloadStatus.ERROR, error = "下载管理器未初始化")
-                    return@launch
-                }
-
-                val modelFile = dm.ensureModel(
-                    modelFileName = modelFileName,
-                    url = downloadUrl,
-                    expectedSha256 = expectedSha256,
-                    progress = { downloaded, total ->
-                        updateDownloadState(pluginId, DownloadStatus.DOWNLOADING, downloaded, total)
-                    },
-                )
-
-                if (modelFile == null) {
-                    _message.value = "模型下载失败: $displayName"
-                    updateDownloadState(pluginId, DownloadStatus.ERROR, error = "下载失败")
-                    return@launch
-                }
-
-                updateDownloadState(pluginId, DownloadStatus.INSTALLING)
-
-                val manifestJson = PluginJsonCodec.manifestToJson(
-                    PluginManifest(
-                        pluginId = pluginId,
-                        name = displayName,
-                        taskType = PluginManifest.TaskType.FEATURE_EXTRACTION,
-                        modelFormat = PluginManifest.ModelFormat.TFLITE,
-                        modelFilePath = modelFileName,
-                        entryClass = "",
-                        inputTensors = emptyList(),
-                        outputTensors = emptyList(),
-                        description = "从 $downloadUrl 下载",
-                    )
-                )
-
-                val existing = pluginDao.getByPluginId(pluginId)
-                pluginDao.insert(
-                    PluginManifestEntity(
-                        id = existing?.id ?: 0,
-                        pluginId = pluginId,
-                        manifestJson = manifestJson,
-                        isEnabled = true,
-                        pipelineStage = "analysis",
-                        createdAtMs = existing?.createdAtMs ?: System.currentTimeMillis(),
-                        updatedAtMs = System.currentTimeMillis(),
-                    )
-                )
-
-                modelStorageManager?.refresh()
-                reloadPluginRegistry()
-                updateDownloadState(pluginId, DownloadStatus.DONE)
-                _message.value = "模型安装成功: $displayName"
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                _message.value = "安装失败: ${e.message}"
-                updateDownloadState(pluginId, DownloadStatus.ERROR, error = e.message)
-                try { modelStorageManager?.deleteModel(modelFileName) } catch (_: Exception) {}
-            }
-        }
-    }
 
     /** 通用的槽位 Provider 激活方法（增强版：自动触发模型下载）。
      *
@@ -1067,42 +783,14 @@ class PluginViewModel(
      * @param slotId 槽位 ID
      * @param providerId Provider ID（即 modelId）
      */
-    fun downloadModelForProvider(slotId: String, providerId: String) {
-        triggerModelDownload(slotId, providerId)
-    }
 
     /**
      * 重试下载失败的模型。
      */
-    fun retryModelDownload(slotId: String, providerId: String) {
-        triggerModelDownload(slotId, providerId)
-    }
 
     /**
      * 一键下载所有核心模型（跨所有槽位中 MODEL 类型且未下载的 Provider）。
      */
-    fun downloadAllCoreModels() {
-        viewModelScope.launch {
-            val slotList = capabilityRegistry.slotMetadataList.value
-            var started = 0
-            for (meta in slotList) {
-                for (provider in meta.availableProviders) {
-                    if (provider.providerType == com.renyxin.localalbum.core.plugin.capability.ProviderType.MODEL &&
-                        (provider.modelStatus == com.renyxin.localalbum.core.plugin.capability.ModelReadiness.NOT_DOWNLOADED ||
-                            provider.modelStatus == com.renyxin.localalbum.core.plugin.capability.ModelReadiness.ERROR)
-                    ) {
-                        triggerModelDownload(meta.slotId, provider.providerId)
-                        started++
-                    }
-                }
-            }
-            if (started == 0) {
-                _message.value = "所有模型已就绪，无需下载"
-            } else {
-                _message.value = "已开始下载 $started 个模型，请在列表查看进度"
-            }
-        }
-    }
 
     /**
      * 内部实现：通过 ModelManager 确保模型就绪，并同步状态。

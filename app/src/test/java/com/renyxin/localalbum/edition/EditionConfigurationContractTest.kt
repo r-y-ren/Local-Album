@@ -73,11 +73,7 @@ class EditionConfigurationContractTest {
     fun `compiled edition enforces navigation boundaries while keeping face swap reachable`() {
         assertSame(Screen.FaceSwap, resolveEditionScreen(Screen.FaceSwap, features))
 
-        val pluginDestinations = listOf(
-            Screen.PluginManager,
-            Screen.ModelImportWizard,
-            Screen.ModelJsonEditor("test.plugin"),
-        )
+        val pluginDestinations = listOf(Screen.PluginManager)
         pluginDestinations.forEach { target ->
             val resolved = resolveEditionScreen(target, features)
             if (features.editionId == "lite") {

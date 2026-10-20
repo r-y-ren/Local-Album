@@ -650,15 +650,6 @@ class HybridIndexer(
 
     private suspend fun finalizeCoreRun(result: ScanCommitResult) = publishCoreComplete(result)
 
-    suspend fun acknowledgePublishedReconciliation(observedThroughMs: Long) {
-        requireMediaChangeDao().acknowledgeEventsThrough(profileId, observedThroughMs)
-    }
-
-    /** Empty configured roots explicitly define an empty reconciliation domain. */
-    suspend fun acknowledgeEmptyReconciliationDomain() {
-        requireMediaChangeDao().clearReconciliationHint(profileId)
-    }
-
     private suspend fun drainChangedSet(
         scanId: String,
         generation: Long,
@@ -1376,13 +1367,6 @@ class HybridIndexer(
             },
         )
     }
-
-    /** import switch 白名单之外，扫描孤儿必须走统一 coordinator。 */
-    private suspend fun purgeOrphanPaths(paths: List<String>) {
-        if (paths.isEmpty()) return
-        requireNotNull(mediaDeletionCoordinator) { "MediaDeletionCoordinator 未注入" }.purge(paths)
-    }
-
 
     /**
      * 从 MediaStore 查询所有图片和视频。

@@ -123,16 +123,7 @@ class FaceDetector(
         }
     }
 
-    /**
-     * 批量检测多张图片中的人脸。
-     *
-     * @param files 图片文件列表
-     * @return 每张图片的检测结果列表
-     */
-    suspend fun detectBatch(files: List<File>): List<DetectionResult> = withContext(Dispatchers.IO) {
-        files.map { detect(it) }
-    }
-
+    
     /**
      * 从 ML Kit [Face] 对象提取特征向量。
      */

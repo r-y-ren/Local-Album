@@ -64,50 +64,7 @@ class DuplicateAnalyzer {
 
     // ---- 公共 API ----
 
-    /**
-     * 对所有媒体文件执行完全重复检测（SHA-256）。
-     *
-     * @param files 所有媒体文件
-     * @param mediaDao 媒体 DAO（用于获取质量评分和时间）
-     * @return 重复组列表（仅包含至少有 2 个成员的组）
-     */
-    suspend fun findDuplicates(
-        files: List<File>,
-        mediaDao: MediaDao,
-    ): List<DuplicateGroup> = withContext(Dispatchers.IO) {
-        if (files.size < 2) return@withContext emptyList()
-
-        // 1. 并行计算 SHA-256
-        val hashInfos = coroutineScope {
-            files.map { file ->
-                async {
-                    FileHashInfo(
-                        path = file.absolutePath,
-                        sha256 = computeSha256(file),
-                        fileSize = file.length(),
-                    )
-                }
-            }.awaitAll()
-        }
-
-        // 2. SHA-256 精确分组
-        val groups = hashInfos
-            .filter { it.sha256 != null }
-            .groupBy { it.sha256 }
-            .filter { it.value.size >= 2 }
-            .map { (_, group) -> createDuplicateGroup(group) }
-            .toMutableList()
-
-        // 3. 填充质量评分和修改时间
-        groups.map { group ->
-            val entities = group.filePaths.mapNotNull { mediaDao.getByFilePathLight(it) }
-            group.copy(
-                qualityScores = entities.associate { it.filePath to (it.qualityScore) },
-                modifiedTimes = entities.associate { it.filePath to it.modifiedAtMs },
-            )
-        }
-    }
-
+    
     // ---- 内部方法 ----
 
     private fun createDuplicateGroup(

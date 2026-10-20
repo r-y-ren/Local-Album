@@ -136,11 +136,6 @@ class EnhancementHandoffWorker(
         }
     }
 
-    private suspend fun finalizeEmptyScans(
-        database: com.renyxin.localalbum.data.db.AppDatabase,
-        scanIds: Set<String>,
-    ) = settleEnhancementScans(database, scanIds)
-
     internal enum class ContinuationDecision {
         ENQUEUE_SUCCESSOR,
         RETRY_BACKOFF,
@@ -266,9 +261,6 @@ class EnhancementHandoffWorker(
         private const val LEASE_DURATION_MS = 10 * 60 * 1000L
         private const val BASE_RETRY_DELAY_MS = 60_000L
         private const val MAX_ERROR_LENGTH = 80
-
-        /** Coordinator admission is level-triggered; one active or pending handoff is sufficient. */
-        fun enqueue(context: Context) = enqueue(context, ExistingWorkPolicy.KEEP)
 
         /** A bounded handoff or newly admitted analysis stage appends one ordered successor. */
         internal fun appendSuccessor(context: Context) =

@@ -157,16 +157,7 @@ class SemanticEmbedder {
             vector
         }
 
-    /**
-     * 批量生成图片嵌入（纯特征计算，不重复解码图片）。
-     * 当已有 [ImageFeatures] 时可直接调用，避免重复 IO。
-     */
-    fun embedFromFeatures(features: ImageFeatures): FloatArray {
-        val vector = computeConceptVector(features)
-        normalize(vector)
-        return vector
-    }
-
+    
     /**
      * 从文件 + 数据库实体提取图像特征。
      * 优先使用数据库中已存储的 sceneType/ocrText，避免重复计算。

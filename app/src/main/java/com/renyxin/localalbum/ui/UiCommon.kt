@@ -132,36 +132,3 @@ internal fun formatInstant(instant: Instant): String {
     return formatter.format(instant)
 }
 
-/* ---- MediaEntity → MediaItem 转换扩展 ---- */
-
-internal fun com.renyxin.localalbum.data.db.entity.MediaEntity.toMediaItem(): MediaItem {
-    return MediaItem(
-        id = java.util.UUID.nameUUIDFromBytes(filePath.toByteArray()).toString(),
-        filePath = filePath,
-        fileName = fileName,
-        type = mediaType,
-        capturedAt = java.time.Instant.ofEpochMilli(capturedAtMs),
-        modifiedAt = java.time.Instant.ofEpochMilli(modifiedAtMs),
-        fileSize = fileSize,
-        isFavorite = isFavorite,
-        width = width,
-        height = height,
-        mimeType = mimeType,
-        durationMs = durationMs,
-        isTrashed = isTrashed,
-        latitude = latitude,
-        longitude = longitude,
-        make = make,
-        model = model,
-        aperture = aperture,
-        focalLength = focalLength,
-        iso = iso,
-        exposureTime = exposureTime,
-        orientation = orientation,
-        sceneType = sceneType,
-        thumbnailPath = thumbnailPath,
-        faceClusterId = faceClusterId,
-        ocrText = ocrText,
-        qualityScore = qualityScore,
-    )
-}

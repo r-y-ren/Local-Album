@@ -109,23 +109,7 @@ class OcrProvider(private val context: Context) {
             }
         }
 
-    /**
-     * 批量 OCR 识别。
-     */
-    suspend fun recognizeBatch(
-        files: List<File>,
-        preferChinese: Boolean = false,
-    ): Map<String, OcrResult> = withContext(Dispatchers.IO) {
-        val results = mutableMapOf<String, OcrResult>()
-        for (file in files) {
-            val result = recognize(file, preferChinese)
-            if (result != null) {
-                results[file.absolutePath] = result
-            }
-        }
-        results
-    }
-
+    
     private fun decodeBitmap(file: File): Bitmap? {
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.absolutePath, options)

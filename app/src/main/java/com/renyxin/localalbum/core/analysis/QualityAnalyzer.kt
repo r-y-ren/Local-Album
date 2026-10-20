@@ -97,26 +97,7 @@ class QualityAnalyzer {
         )
     }
 
-    /**
-     * 快速模糊检测：仅检查模糊度，不解码完整像素。
-     * 用于大规模筛选场景，速度优先。
-     */
-    suspend fun quickBlurCheck(file: File): Boolean = withContext(Dispatchers.IO) {
-        val opts = BitmapFactory.Options().apply {
-            inSampleSize = 8 // 极速采样
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-        val bitmap = BitmapFactory.decodeFile(file.absolutePath, opts) ?: return@withContext false
-        val width = bitmap.width
-        val height = bitmap.height
-        val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-        val gray = extractLuminance(pixels, width, height)
-        val blur = evaluateBlur(gray, width, height)
-        bitmap.recycle()
-        blur >= BLUR_THRESHOLD
-    }
-
+    
     // ---- 内部评分方法 ----
 
     /**
