@@ -180,14 +180,18 @@ fun MediaViewerScreen(
 
     // EXIF info dialog
     if (showExifDialog && currentItem != null) {
-        val exifInfo = remember(currentItem.filePath, showExifDialog) {
-            if (currentItem.type == MediaType.IMAGE) {
-                ExifExtractor.extract(currentItem.filePath)
+        val item = currentItem
+        // 磁盘 I/O 不得在组合期主线程执行（审计 F-P2-5）：移入 LaunchedEffect + IO 调度器。
+        var exifInfo by remember(item.filePath) { mutableStateOf<ExifExtractor.ExifInfo?>(null) }
+        LaunchedEffect(item.filePath) {
+            exifInfo = if (item.type == MediaType.IMAGE) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    ExifExtractor.extract(item.filePath)
+                }
             } else {
                 null
             }
         }
-        val item = currentItem
         AlertDialog(
             onDismissRequest = { showExifDialog = false },
             title = { Text("媒体信息") },
@@ -206,10 +210,11 @@ fun MediaViewerScreen(
                     }
 
                     // ---- EXIF 相机参数 ----
-                    if (exifInfo != null) {
+                    val parsedExif = exifInfo
+                    if (parsedExif != null) {
                         Spacer(Modifier.height(4.dp))
                         Text("相机参数", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                        ExifExtractor.formatExifInfo(exifInfo).filterNot { (label, _) ->
+                        ExifExtractor.formatExifInfo(parsedExif).filterNot { (label, _) ->
                             label in listOf("文件名", "文件大小", "分辨率")
                         }.forEach { (label, value) ->
                             Text("$label: $value", style = MaterialTheme.typography.bodySmall)

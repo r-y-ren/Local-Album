@@ -125,21 +125,22 @@ class MainActivity : ComponentActivity() {
 
     /**
      * 权限检查策略：
-     * - Android 13+ (API 33+): 优先检查 READ_MEDIA_IMAGES + READ_MEDIA_VIDEO
-     * - Android 11-12 (API 30-32): 需要 MANAGE_EXTERNAL_STORAGE
-     * - Android 10 (API 29): 需要 MANAGE_EXTERNAL_STORAGE 或 READ_EXTERNAL_STORAGE
+     * - Android 13+ (API 33+): 同时持有 READ_MEDIA_IMAGES + READ_MEDIA_VIDEO
+     * - Android 11-12 (API 30-32): MANAGE_EXTERNAL_STORAGE（isExternalStorageManager 为 API 30+ 方法，不得下探到 29）
+     * - Android 10 (API 29): READ_EXTERNAL_STORAGE 运行时权限
      */
     private fun checkPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // P0-1: 必须同时拥有图片和视频权限，否则扫描结果不完整
-            // 使用 AND 替代 OR，确保两个权限都已授予
             checkSelfPermission(android.Manifest.permission.READ_MEDIA_IMAGES) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED &&
                 checkSelfPermission(android.Manifest.permission.READ_MEDIA_VIDEO) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
-        } else {
-            // Android 10-12: 检查 MANAGE_EXTERNAL_STORAGE
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             Environment.isExternalStorageManager()
+        } else {
+            checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
         }
     }
 
@@ -161,8 +162,13 @@ class MainActivity : ComponentActivity() {
                 data = Uri.parse("package:$packageName")
             }
             startActivity(intent)
+        } else {
+            // Android 10: READ_EXTERNAL_STORAGE 是运行时权限
+            requestPermissions(
+                arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE),
+                REQUEST_CODE_MEDIA_PERMISSIONS,
+            )
         }
-        // Android 10 及以下不需要运行时权限 (minSdk = 29)
     }
 
     @Deprecated("使用 Activity Result API；保留此回调用于兼容当前权限请求流程")

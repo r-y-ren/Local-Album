@@ -113,19 +113,22 @@ class FaceClusterer(
 
             while (queue.isNotEmpty()) {
                 val q = queue.removeFirst()
+                if (clusterLabels[q] >= 0) continue
                 if (clusterLabels[q] == -2) {
-                    // 之前标记为噪声，现在归入当前簇（边界点）
+                    // 之前被标为噪声的点实为当前簇的边界点：并入当前簇。它邻域不足
+                    // minPts（否则当初就不会被判为噪声），无需再从它扩展。
                     clusterLabels[q] = currentCluster
+                    continue
                 }
-                if (visited[q]) continue
                 visited[q] = true
                 clusterLabels[q] = currentCluster
 
                 val qNeighbors = neighborsCache[q]
                 if (qNeighbors.size >= minPts) {
-                    // 核心点：扩展邻域
+                    // 核心点：未分类(-1)与噪声(-2)都入队——噪声点在 pop 时作为边界点
+                    // 吸收，否则先于簇起点被判为噪声的边界点会永久留在噪声里（审计 F-P1-4）。
                     for (nb in qNeighbors) {
-                        if (!visited[nb] && clusterLabels[nb] == -1) {
+                        if (clusterLabels[nb] == -1 || clusterLabels[nb] == -2) {
                             queue.add(nb)
                         }
                     }

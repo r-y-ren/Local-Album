@@ -60,18 +60,21 @@ class ArcFaceProvider(
     }
 
     override suspend fun embed(faceCrop: Bitmap): FloatArray? {
-        val modelResult = modelManager.ensureModelReady(MODEL_ID)
-        if (modelResult.isFailure) {
-            Log.w(TAG, "模型未就绪: ${modelResult.exceptionOrNull()?.message}")
-            return null
-        }
+        // 登记消费者：并行阶段收尾的 evictUnusedModels 不得驱逐正在使用的 session（审计 F-P1-3）。
+        val consumerId = "ArcFace:${System.nanoTime()}"
+        modelManager.registerConsumer(MODEL_ID, consumerId)
+        try {
+            val modelResult = modelManager.ensureModelReady(MODEL_ID)
+            if (modelResult.isFailure) {
+                Log.w(TAG, "模型未就绪: ${modelResult.exceptionOrNull()?.message}")
+                return null
+            }
 
-        return try {
             val resized = Bitmap.createScaledBitmap(faceCrop, INPUT_SIZE, INPUT_SIZE, true)
             val buf = preprocess(resized)
 
             // 通过 session 池获取独立 session（独立 intra-op 线程池），实现多核并行
-            modelManager.withOnnxSession(MODEL_ID) { session ->
+            return modelManager.withOnnxSession(MODEL_ID) { session ->
                 val env = NativeAiRuntime.getOrtEnvironment()
                 val tensor = OnnxTensor.createTensor(
                     env, buf, longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong())
@@ -89,7 +92,9 @@ class ArcFaceProvider(
             }
         } catch (e: Exception) {
             Log.w(TAG, "ArcFace 嵌入提取失败", e)
-            null
+            return null
+        } finally {
+            modelManager.unregisterConsumer(MODEL_ID, consumerId)
         }
     }
 

@@ -319,26 +319,8 @@ class AlbumRepository(
      *  防止 ContentObserver 触发的增量扫描与用户手动扫描并发执行导致数据/FTS/状态竞态。 */
     private val scanMutex = Mutex()
 
-    /** Observer-only wake-up; the persisted pipeline decides when the journal may be consumed. */
-    suspend fun incrementalRescanIfIdle(): Boolean = withContext(Dispatchers.IO) {
-        libraryPipelineCoordinator?.wake()
-        true
-    }
-
-    /** Foreground recovery never creates a full reconciliation request. */
-    suspend fun reconcileIfIdle(): Boolean = withContext(Dispatchers.IO) {
-        libraryPipelineCoordinator?.wake()
-        true
-    }
-
-    suspend fun rescanIfIdle(): Boolean = reconcileIfIdle()
-
-    private suspend fun runAutomaticScanIfIdle(): Boolean =
-        withContext(Dispatchers.IO) {
-            libraryPipelineCoordinator?.wake()
-            true
-        }
-
+    
+    
     /**
      * WorkManager recovery entry: drains only requests already persisted in the journal.
      *
@@ -605,7 +587,8 @@ class AlbumRepository(
 
     /**
      * 冷启动只读取最后完整发布的目录快照，不等待扫描锁，也不执行推荐和统计查询。
-     * 迁移后的数据库会预填首份快照；快照意外缺失时才从媒体表聚合一次并立即持久化。
+     * 迁移后的数据库会预填首份快照；快照缺失或与媒体表计数不一致（旧版本增量未发布快照、
+     * 回收站移动等漂移）时才从媒体表聚合一次并立即持久化。
      */
     suspend fun restoreFromDbIfNeeded() = withContext(Dispatchers.IO) {
         if (albumCacheRestored) return@withContext
@@ -613,9 +596,12 @@ class AlbumRepository(
         val snapshotDao = database?.albumSnapshotDao()
         var meta = snapshotDao?.getMeta()
         var summaries = snapshotDao?.getDirectories().orEmpty().map { it.toDirectorySummary() }
-        if (summaries.isEmpty()) {
+        // Drift heal: 目录摘要按非回收媒体聚合计数，快照行合计应与媒体表总数一致。
+        // 不一致说明快照落后于 canonical（旧版本增量未发布快照、回收站移动等），
+        // 用一次有界重聚合替代直接信任陈旧目录。
+        if (summaries.isEmpty() || summaries.sumOf { it.mediaCount } != mediaDao.getCount()) {
             summaries = mediaDao.getDirectorySummaries()
-            if (summaries.isNotEmpty() && snapshotDao != null) {
+            if (snapshotDao != null) {
                 val version = System.currentTimeMillis()
                 snapshotDao.replaceSnapshot(
                     entries = summaries.map { it.toSnapshotEntity(version) },
@@ -624,6 +610,7 @@ class AlbumRepository(
                 )
                 meta = snapshotDao.getMeta()
             }
+            Log.i(TAG, "restoreFromDbIfNeeded: 快照与媒体表不一致，已重新聚合 ${summaries.size} 个目录")
         }
         if (summaries.isNotEmpty()) {
             rebuildTreeFromDirectorySummaries(summaries, rebuildRecommendations = false)
@@ -804,8 +791,14 @@ class AlbumRepository(
 
             var publishedCoreResult: com.renyxin.localalbum.core.index.ScanCommitResult? = null
             suspend fun publishCore(result: com.renyxin.localalbum.core.index.ScanCommitResult) {
-                // Canonical data is committed, but the home projection remains unchanged until all
-                // grid thumbnails reach READY/permanent-placeholder terminal state.
+                // The album directory projection flips with the canonical commit (bounded patch for
+                // incremental runs, full replace otherwise). Only the home grid projection keeps
+                // waiting for thumbnail convergence inside the serialized pipeline's publish stage.
+                if (result.scanType == com.renyxin.localalbum.data.db.entity.ScanRunEntity.TYPE_INCREMENTAL) {
+                    publishIncrementalAlbumSnapshot(result.affectedDirectoryPaths)
+                } else {
+                    publishCommittedAlbumSnapshot()
+                }
                 indexer.publishCoreComplete(result)
                 coordinator?.onCoreScanCompleted(
                     scanId = result.scanId,
@@ -1211,18 +1204,7 @@ class AlbumRepository(
         TrashOperationResult(requested, completed)
     }
 
-    /**
-     * 删除物理文件（与 TrashCleanupWorker 一致使用 File.delete，失败仅告警不阻塞）。
-     */
-    private suspend fun deletePhysicalFiles(paths: List<String>): List<String> = withContext(Dispatchers.IO) {
-        val result = PhysicalFileDeletion.delete(paths)
-        result.failed.forEach { path ->
-            // 日志保留行为类别但不打印完整隐私路径。
-            Log.w(TAG, "物理文件删除失败（可能无权限）: ${path.substringAfterLast('/')}")
-        }
-        result.deletedOrMissing
-    }
-
+    
     /** 过期回收站批次结果；[lastPath] 用于 Worker 继续扫描，避免失败项阻塞后续记录。 */
     data class ExpiredTrashBatchResult(val scanned: Int, val deleted: Int, val lastPath: String?)
 
@@ -1245,16 +1227,7 @@ class AlbumRepository(
         ExpiredTrashBatchResult(paths.size, physicallyDeleted.size, paths.last())
     }
 
-    /**
-     * 彻底清理媒体及全部关联数据。真实应用注入 AppDatabase 时，每一块在同一事务内提交，
-     * 防止进程中断留下部分孤儿；database 为 null 仅用于轻量测试替身。
-     */
-    private suspend fun purgeMediaData(paths: List<String>) {
-        if (paths.isEmpty()) return
-        requireNotNull(mediaDeletionCoordinator) { "MediaDeletionCoordinator 未注入，禁止手工逐 DAO purge" }
-            .purge(paths)
-    }
-
+    
     /** 用户词只在 edition 允许的 FTS 列中匹配；Lite 即使导入 OCR 数据也不会命中它。 */
     private fun toFtsQuery(input: String): String = FtsQueryBuilder.build(input, keywordSearchProfile)
 
@@ -1333,17 +1306,7 @@ class AlbumRepository(
         _semanticSearchState.value = SemanticSearchState.IDLE
     }
 
-    /** 获取语义搜索索引统计信息 */
-    suspend fun getSemanticStats(): SemanticStats = withContext(Dispatchers.IO) {
-        val searcher = buildSemanticSearcher() ?: return@withContext SemanticStats()
-        val s = searcher.getStats()
-        SemanticStats(
-            totalEmbeddings = s.totalEmbeddings,
-            modelVersion = s.modelVersion,
-            embeddingDim = s.embeddingDim,
-        )
-    }
-
+    
     // ---- 数据库导入导出 (Phase 4.2) ----
 
     /** 数据库导出器（Phase 4.2） */
@@ -1415,6 +1378,9 @@ class AlbumRepository(
                 r
             }
             if (result.success) {
+                // 导入覆盖了整个图库，旧推荐池全部路径失效：先清池再从新库全量重建并
+                // 持久化，避免精选页继续展示旧库照片（点击进入空白，审计 F-P1-6）。
+                resetRecommendationsAfterImport()
                 // Import is not authority to traverse every configured root. The seeder persists a
                 // reconciliation advisory and WAITING_FOR_CORE work; only explicit user confirmation
                 // may turn that advisory into a complete rebuild. This also keeps the imported home
@@ -1425,6 +1391,18 @@ class AlbumRepository(
             }
             result
         }
+
+    /** 清空推荐池/游标后从当前图库全量重建（导入覆盖后唯一正确的恢复路径）。 */
+    private suspend fun resetRecommendationsAfterImport() {
+        recommendationMutex.withLock {
+            diversifiedRecommendationPool = emptyList()
+            recommendationCursor = 0
+            pendingRestoredCursor = null
+        }
+        // 池为空时 refreshRecommendations 走重建分支并立即持久化快照。
+        runCatching { rebuildRecommendationPool(_leafAlbums.value) }
+            .onFailure { Log.w(TAG, "导入后推荐池重建失败", it) }
+    }
 
     /**
      * 校验导入文件格式（Phase 4.2），不执行实际导入。
@@ -1472,19 +1450,10 @@ class AlbumRepository(
     }
 
     // ---- 按场景类型查询 ----
-    suspend fun getBySceneType(sceneType: String) = withContext(Dispatchers.IO) {
-        mediaDao.getBySceneType(sceneType).map { it.toMediaItem() }
-    }
 
     // ---- 按日期范围查询 ----
-    suspend fun getByDateRange(startMs: Long, endMs: Long) = withContext(Dispatchers.IO) {
-        mediaDao.searchByDateRange(startMs, endMs).map { it.toMediaItem() }
-    }
 
     // ---- 地理位置 ----
-    suspend fun getWithLocation() = withContext(Dispatchers.IO) {
-        mediaDao.getWithLocation().map { it.toMediaItem() }
-    }
 
     // ---- 重复照片离线维护 ----
 
@@ -1578,16 +1547,8 @@ class AlbumRepository(
         }
         ?: flowOf(FaceStats())
 
-    /** 兼容非响应式调用方；新 UI 应直接观察 [faceClusters]。 */
-    suspend fun getFaceClusters(): List<FaceCluster> = withContext(Dispatchers.IO) {
-        faceDao?.getClusterSummaries()?.map { it.toFaceCluster() }.orEmpty()
-    }
-
-    /** 获取某个聚类内的人脸记录 */
-    suspend fun getFacesInCluster(clusterId: String): List<FaceEntity> = withContext(Dispatchers.IO) {
-        faceDao?.getByCluster(clusterId) ?: emptyList()
-    }
-
+    
+    
     /** 为聚类命名；metadata 为权威映射，同时保留 faces.personName 兼容双写。 */
     suspend fun setPersonName(clusterId: String, name: String?) = withContext(Dispatchers.IO) {
         database?.faceClusterDao()?.setPersonName(clusterId, name) ?: faceDao?.setPersonName(clusterId, name)
@@ -1599,16 +1560,8 @@ class AlbumRepository(
         appContext?.let(EditionConfiguration::enqueueFaceClusterMaintenance)
     }
 
-    /** 获取人脸统计信息 */
-    suspend fun getFaceStats(): FaceStats = withContext(Dispatchers.IO) {
-        val dao = faceDao ?: return@withContext FaceStats()
-        FaceStats(
-            totalFaces = dao.getCount(),
-            clusteredFaces = dao.getClusteredCount(),
-            clusterCount = dao.getClusterCount(),
-        )
-    }
-
+    
+    
     // ---- 统计 ----
     private suspend fun refreshStats() = withContext(Dispatchers.IO) {
         val sceneStats = mediaDao.getSceneTypeStats().associate { it.sceneType to it.cnt }
@@ -1721,33 +1674,7 @@ class AlbumRepository(
         rebuildTreeFromDirectorySummaries(summaries, rebuildRecommendations = false)
     }
 
-    /**
-     * 从内存中的 [MediaItem] 列表重建相册树。
-     * 使用 suspend + flow first() 替代 runBlocking，避免阻塞主线程。
-     */
-    private suspend fun rebuildTreeFromMediaItems(items: List<MediaItem>) = withContext(Dispatchers.IO) {
-        // 诊断+防护：settingsRepository.state.first() 可能因 combine(vararg) Flow 不发射而永久阻塞
-        val settings = withTimeoutOrNull(5000L) {
-            settingsRepository.state.first()
-        }
-        if (settings == null) {
-            Log.e(TAG, "rebuildTreeFromMediaItems: settingsRepository.state.first() 超时(5s)，使用默认设置")
-        }
-        val rootTree = buildDirectoryNodes(items, settings?.scanRoots ?: emptyList())
-        rebuildTreeFromDirectoryNodes(rootTree, settings?.albumSortMode ?: 0)
-    }
-
-    private suspend fun rebuildTreeFromDirectoryNodes(
-        rootTree: List<DirectoryNode>,
-        sortMode: Int = 0,
-    ) = withContext(Dispatchers.IO) {
-        val albums = albumBuilder.buildAlbumTree(rootTree, sortMode)
-        val leafs = albumBuilder.buildFromDirectoryTree(rootTree, sortMode)
-        _albumTree.value = albums
-        _leafAlbums.value = leafs
-        // 初始加载时生成首批推荐；后续用户刷新会沿用推荐池游标继续取下一批。
-        refreshRecommendations(leafs)
-    }
+    
 
     fun isCoreScanActive(): Boolean = when (coreScanState.value) {
         CoreScanState.DISCOVERING,
@@ -1944,77 +1871,6 @@ class AlbumRepository(
             }
         }
         return result
-    }
-
-    private fun buildDirectoryNodes(
-        items: List<MediaItem>,
-        roots: List<String>,
-    ): List<DirectoryNode> {
-        val byParent: Map<String, List<MediaItem>> = items.groupBy { it.filePath.substringBeforeLast('/', "") }
-        val dirNodes = mutableMapOf<String, DirectoryNode>()
-
-        // 1) 创建直接包含媒体文件的目录节点
-        byParent.forEach { (parentPath, mediaList) ->
-            val name = parentPath.substringAfterLast('/').ifEmpty { parentPath }
-            val parentDir = parentPath.substringBeforeLast('/', "").ifEmpty { null }
-            dirNodes[parentPath] = DirectoryNode(
-                path = parentPath,
-                name = name,
-                parentPath = parentDir,
-                children = emptyList(),
-                mediaItems = mediaList,
-            )
-        }
-
-        // P1-D: 补全中间目录节点（仅含子文件夹、不含直接媒体文件的目录）
-        // 仅创建在任一扫描根目录下的中间节点，保证嵌套文件夹层级结构完整。
-        val intermediatePaths = mutableSetOf<String>()
-        byParent.keys.forEach { path ->
-            var p = path.substringBeforeLast('/', "")
-            while (p.isNotEmpty()) {
-                if (p !in dirNodes.keys && roots.any { p.startsWith(it) }) {
-                    intermediatePaths.add(p)
-                }
-                p = p.substringBeforeLast('/', "")
-            }
-        }
-        intermediatePaths.forEach { path ->
-            val name = path.substringAfterLast('/').ifEmpty { path }
-            val parentDir = path.substringBeforeLast('/', "").ifEmpty { null }
-            dirNodes[path] = DirectoryNode(
-                path = path,
-                name = name,
-                parentPath = parentDir,
-                children = emptyList(),
-                mediaItems = emptyList(),
-            )
-        }
-
-        // 2) 计算父子映射关系 (仅使用路径字符串，不存储节点引用)
-        val childPathMap = mutableMapOf<String, MutableList<String>>()
-        dirNodes.forEach { (path, _) ->
-            val parent = path.substringBeforeLast('/', "")
-            if (parent.isNotEmpty() && dirNodes.containsKey(parent)) {
-                childPathMap.getOrPut(parent) { mutableListOf() }.add(path)
-            }
-        }
-
-        // 3) 自底向上重建节点树：按路径深度降序排列，深层节点先更新，
-        //    保证父节点的 children 引用到的是已更新的子节点副本。
-        val sortedByDepth = dirNodes.keys.sortedByDescending { it.count { c -> c == '/' } }
-        for (path in sortedByDepth) {
-            val node = dirNodes[path]!!
-            val childPaths = childPathMap[path] ?: emptyList()
-            val children = childPaths.map { childPath -> dirNodes[childPath]!! }
-            dirNodes[path] = node.copy(children = children)
-        }
-
-        // 4) 过滤根节点：仅保留扫描根目录下、且父目录不在 dirNodes 中的顶层节点（避免重复）。
-        val allChildPaths = childPathMap.values.flatten().toSet()
-        return dirNodes.values.filter { node ->
-            roots.any { root -> node.path.startsWith(root) } &&
-                node.path !in allChildPaths
-        }
     }
 
     private fun clearAll() {

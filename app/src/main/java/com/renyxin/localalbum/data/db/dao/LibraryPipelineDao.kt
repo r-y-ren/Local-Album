@@ -170,7 +170,7 @@ abstract class LibraryPipelineDao {
                progressCompleted = 0, progressTotal = 0, failureCount = 0,
                lastError = NULL, updatedAt = :now
            WHERE pipelineId = :pipelineId
-             AND stage IN ('UNINITIALIZED', 'READY', 'NEEDS_REBUILD')
+             AND stage IN ('UNINITIALIZED', 'READY', 'NEEDS_REBUILD', 'FAILED')
              AND rebuildRequested = 1""",
     )
     abstract suspend fun startRequestedRebuild(

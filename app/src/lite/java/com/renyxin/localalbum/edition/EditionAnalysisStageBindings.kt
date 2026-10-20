@@ -20,6 +20,7 @@ internal object EditionAnalysisStageBindings {
         embeddingDao: EmbeddingDao,
         semanticDao: SemanticDao?,
         capabilityRegistry: CapabilityRegistryV2,
+        database: com.renyxin.localalbum.data.db.AppDatabase? = null,
     ): AnalysisStageBinding? {
         check(
             stageId != AnalysisStage.STAGE_FACE &&

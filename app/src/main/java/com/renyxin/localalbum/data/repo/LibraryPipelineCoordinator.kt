@@ -512,6 +512,7 @@ class LibraryPipelineCoordinator(
                 from = setOf(
                     LibraryPipelineStage.READY,
                     LibraryPipelineStage.NEEDS_REBUILD,
+                    LibraryPipelineStage.FAILED,
                 ),
                 to = LibraryPipelineStage.INCREMENTAL_SCAN,
             )
@@ -1267,10 +1268,13 @@ class LibraryPipelineCoordinator(
 
     companion object {
         private const val TAG = "LibraryPipeline"
+        // FAILED 与 NEEDS_REBUILD 同为可再启动的空闲终态：扫描重试耗尽后，用户手动扫描/
+        // 显式重建/journal 事件仍能重新准入，避免流水线永久卡死（审计 F-P1-1）。
         private val IDLE_ADMISSION_STAGES = setOf(
             LibraryPipelineStage.UNINITIALIZED,
             LibraryPipelineStage.READY,
             LibraryPipelineStage.NEEDS_REBUILD,
+            LibraryPipelineStage.FAILED,
         )
         private const val OUTBOX_USER_RETRY_BATCH_SIZE = 100
         private val USER_ANALYSIS_ADMISSION_STAGES = setOf(

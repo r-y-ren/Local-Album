@@ -67,6 +67,7 @@ internal fun PhotosTab(
     viewModel: AlbumViewModel,
     onMediaClick: (MediaItem) -> Unit,
     onNavigateToSearch: () -> Unit,
+    onNavigateToSettings: () -> Unit,
     onNavigateToFavorites: () -> Unit,
     onNavigateToDuplicate: () -> Unit,
     onNavigateToEditionDestination: (String) -> Unit,
@@ -117,7 +118,7 @@ internal fun PhotosTab(
                 title = "暂无媒体文件",
                 description = "请在设置中添加扫描目录并开始扫描。",
                 buttonText = "前往设置",
-                onButtonClick = { /* handled by tab switch */ },
+                onButtonClick = onNavigateToSettings,
                 modifier = modifier,
             )
             return

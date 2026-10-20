@@ -103,6 +103,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -126,9 +127,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import androidx.paging.compose.collectAsLazyPagingItems
 import com.renyxin.localalbum.core.model.Album
+import com.renyxin.localalbum.core.model.DirectoryMediaQuery
+import com.renyxin.localalbum.core.model.DirectoryMediaSort
 import com.renyxin.localalbum.core.model.MediaItem
 import com.renyxin.localalbum.core.model.MediaQueryContext
+import com.renyxin.localalbum.core.model.MediaType
 import com.renyxin.localalbum.core.recommendation.Recommendation
+import com.renyxin.localalbum.data.repo.MediaSearchQuery
 import com.renyxin.localalbum.edition.EditionFeatures
 import com.renyxin.localalbum.edition.EditionSearchContribution
 import com.renyxin.localalbum.edition.EditionUiContribution
@@ -154,8 +159,6 @@ import com.renyxin.localalbum.ui.screens.DuplicatePhotosScreen
 import com.renyxin.localalbum.ui.screens.AnalysisMaintenanceScreen
 import com.renyxin.localalbum.ui.screens.FailedTasksScreen
 import com.renyxin.localalbum.ui.screens.TrashScreen
-import com.renyxin.localalbum.ui.screens.ModelImportWizardScreen
-import com.renyxin.localalbum.ui.screens.ModelJsonEditorScreen
 import com.renyxin.localalbum.ui.screens.PluginManagerScreen
 import com.renyxin.localalbum.ui.screens.settings.SettingsTab
 import com.renyxin.localalbum.ui.screens.FaceSwapScreen
@@ -205,8 +208,6 @@ sealed interface Screen {
     data object AnalysisPerformance : Screen
     data object FaceSwap : Screen
     data class Edition(val destinationId: String) : Screen
-    data object ModelImportWizard : Screen
-    data class ModelJsonEditor(val pluginId: String) : Screen
     data class RecommendationDetail(val recommendation: Recommendation) : Screen
 }
 
@@ -219,13 +220,162 @@ sealed interface Screen {
  * 导航宿主在入栈与渲染两处都经本函数过滤，确保降级后的返回栈行为一致。
  */
 internal fun resolveEditionScreen(screen: Screen, features: EditionFeatures): Screen = when (screen) {
-    Screen.PluginManager,
-    Screen.ModelImportWizard,
-    is Screen.ModelJsonEditor -> if (features.showPluginManager) screen else Screen.Main
+    Screen.PluginManager -> if (features.showPluginManager) screen else Screen.Main
     Screen.FaceSwap -> if (features.showFaceSwap) screen else Screen.Main
     is Screen.Edition -> if (EditionUiContribution.acceptsDestination(screen.destinationId)) screen else Screen.Main
     else -> screen
 }
+
+/* ---- 导航状态持久化编解码（审计 F-P1-5：旋转/进程重建后恢复返回栈） ---- */
+
+/**
+ * Screen ↔ 字符串 token 的可逆编码。无法无损重建的瞬态载荷（如 [Screen.RecommendationDetail]
+ * 的推荐对象）返回 null，恢复时静默丢弃该层——比整栈重置回 Main 的损失小得多。
+ */
+internal fun encodeScreen(screen: Screen): List<String>? = when (screen) {
+    Screen.Main -> listOf("main")
+    is Screen.AlbumDetail -> listOf(
+        "album",
+        screen.album.id,
+        screen.album.name,
+        screen.album.directoryPath,
+        screen.album.parentPath.orEmpty(),
+    )
+    is Screen.MediaViewer -> buildList {
+        add("viewer")
+        add(screen.initialPath)
+        val contextTokens = encodeQueryContext(screen.queryContext) ?: return null
+        addAll(contextTokens)
+        // returnTo 编码直接拼接在尾部；解码端按上下文 token 数定长消费后再递归解码。
+        addAll(encodeScreen(screen.returnTo) ?: return null)
+    }
+    Screen.Search -> listOf("search")
+    Screen.Timeline -> listOf("timeline")
+    Screen.Trash -> listOf("trash")
+    Screen.FailedTasks -> listOf("failed-tasks")
+    Screen.AnalysisMaintenance -> listOf("analysis-maintenance")
+    Screen.DuplicatePhotos -> listOf("duplicates")
+    Screen.Favorites -> listOf("favorites")
+    Screen.Recommendations -> listOf("recommendations")
+    Screen.PluginManager -> listOf("plugins")
+    Screen.AnalysisPerformance -> listOf("analysis-performance")
+    Screen.FaceSwap -> listOf("face-swap")
+    is Screen.Edition -> listOf("edition", screen.destinationId)
+    is Screen.RecommendationDetail -> null
+}
+
+internal fun decodeScreen(tokens: List<String>): Screen? {
+    val tag = tokens.firstOrNull() ?: return null
+    return when (tag) {
+        "main" -> Screen.Main
+        "album" -> {
+            if (tokens.size < 5) return null
+            Screen.AlbumDetail(
+                // 相册树是轻量摘要节点：id/名称/路径/父路径足以重建导航层，其余字段走默认值。
+                Album(
+                    id = tokens[1],
+                    name = tokens[2],
+                    directoryPath = tokens[3],
+                    parentPath = tokens[4].ifBlank { null },
+                ),
+            )
+        }
+        "viewer" -> {
+            if (tokens.size < 3) return null
+            val (context, next) = decodeQueryContext(tokens, from = 2) ?: return null
+            val returnTo = decodeScreen(tokens.subList(next, tokens.size)) ?: Screen.Main
+            Screen.MediaViewer(initialPath = tokens[1], queryContext = context, returnTo = returnTo)
+        }
+        "search" -> Screen.Search
+        "timeline" -> Screen.Timeline
+        "trash" -> Screen.Trash
+        "failed-tasks" -> Screen.FailedTasks
+        "analysis-maintenance" -> Screen.AnalysisMaintenance
+        "duplicates" -> Screen.DuplicatePhotos
+        "favorites" -> Screen.Favorites
+        "recommendations" -> Screen.Recommendations
+        "plugins" -> Screen.PluginManager
+        "analysis-performance" -> Screen.AnalysisPerformance
+        "face-swap" -> Screen.FaceSwap
+        "edition" -> tokens.getOrNull(1)?.let { Screen.Edition(it) }
+        else -> null
+    }
+}
+
+/** 查询上下文编码；每个标签的 token 数是定长的，供 MediaViewer 尾部拼接 returnTo 时定界。 */
+private fun encodeQueryContext(context: MediaQueryContext): List<String>? = when (context) {
+    MediaQueryContext.Single -> listOf("ctx-single")
+    MediaQueryContext.Timeline -> listOf("ctx-timeline")
+    MediaQueryContext.Favorites -> listOf("ctx-favorites")
+    is MediaQueryContext.Directory -> listOf(
+        "ctx-dir",
+        context.query.directoryPath,
+        context.query.mediaType?.name.orEmpty(),
+        context.query.sort.name,
+    )
+    is MediaQueryContext.Search -> listOf(
+        "ctx-search",
+        context.query.text,
+        context.query.mediaType?.name.orEmpty(),
+        context.query.startMs?.toString().orEmpty(),
+        context.query.endMs?.toString().orEmpty(),
+        context.query.model.orEmpty(),
+    )
+    is MediaQueryContext.Face -> listOf("ctx-face", context.clusterId)
+    is MediaQueryContext.StablePaths -> listOf("ctx-stable", context.paths.size.toString()) + context.paths
+}
+
+/** 返回解码结果与下一个 token 的下标。 */
+private fun decodeQueryContext(tokens: List<String>, from: Int): Pair<MediaQueryContext, Int>? {
+    val tag = tokens.getOrNull(from) ?: return null
+    return when (tag) {
+        "ctx-single" -> MediaQueryContext.Single to from + 1
+        "ctx-timeline" -> MediaQueryContext.Timeline to from + 1
+        "ctx-favorites" -> MediaQueryContext.Favorites to from + 1
+        "ctx-dir" -> {
+            val path = tokens.getOrNull(from + 1)?.takeUnless(String::isBlank) ?: return null
+            val mediaType = tokens.getOrNull(from + 2)?.takeIf(String::isNotBlank)
+                ?.let { runCatching { MediaType.valueOf(it) }.getOrNull() }
+            val sort = tokens.getOrNull(from + 3)
+                ?.let { runCatching { DirectoryMediaSort.valueOf(it) }.getOrNull() }
+                ?: DirectoryMediaSort.DATE_DESC
+            MediaQueryContext.Directory(
+                DirectoryMediaQuery(directoryPath = path, mediaType = mediaType, sort = sort),
+            ) to from + 4
+        }
+        "ctx-search" -> {
+            val text = tokens.getOrNull(from + 1) ?: return null
+            val mediaType = tokens.getOrNull(from + 2)?.takeIf(String::isNotBlank)
+                ?.let { runCatching { MediaType.valueOf(it) }.getOrNull() }
+            MediaQueryContext.Search(
+                MediaSearchQuery(
+                    text = text,
+                    mediaType = mediaType,
+                    startMs = tokens.getOrNull(from + 3)?.takeIf(String::isNotBlank)?.toLongOrNull(),
+                    endMs = tokens.getOrNull(from + 4)?.takeIf(String::isNotBlank)?.toLongOrNull(),
+                    model = tokens.getOrNull(from + 5)?.takeIf(String::isNotBlank),
+                ),
+            ) to from + 6
+        }
+        "ctx-face" -> tokens.getOrNull(from + 1)?.let { MediaQueryContext.Face(it) to from + 2 }
+        "ctx-stable" -> {
+            val count = tokens.getOrNull(from + 1)?.toIntOrNull() ?: return null
+            if (count < 0 || from + 2 + count > tokens.size) return null
+            val paths = tokens.subList(from + 2, from + 2 + count)
+            MediaQueryContext.StablePaths.of(paths) to from + 2 + count
+        }
+        else -> null
+    }
+}
+
+/** 返回栈的 Saver：不可编码的层在保存/恢复两侧都可能被丢弃，栈空时兜底 Main。 */
+private val screenListSaver = androidx.compose.runtime.saveable.Saver(
+    save = { stack: List<Screen> -> stack.mapNotNull { encodeScreen(it) } },
+    restore = { tokens: List<List<String>> ->
+        val restored = tokens.mapNotNull { decodeScreen(it) }
+        restored.ifEmpty { listOf(Screen.Main) }
+    },
+)
 
 /* ---- 主要应用入口 ---- */
 
@@ -263,13 +413,14 @@ fun LocalAlbumApp(
         )
     }
 
-    var currentTab by remember { mutableIntStateOf(0) }
+    // 审计 F-P1-5：导航状态必须抗配置变更（旋转/深色切换/进程重建），普通 remember 会整栈重置。
+    var currentTab by rememberSaveable { mutableIntStateOf(0) }
     // 相册详情页会在进入查看器时离开组合树；将显示偏好提升到导航宿主，返回时才能恢复。
     val albumSortModes = remember { mutableStateMapOf<String, SortMode>() }
     val albumFilters = remember { mutableStateMapOf<String, MediaFilter>() }
     val albumViewModes = remember { mutableStateMapOf<String, ViewMode>() }
     // 使用 back stack 管理导航历史，支持正确的返回行为
-    var backStack by remember { mutableStateOf(listOf<Screen>(Screen.Main)) }
+    var backStack by rememberSaveable(stateSaver = screenListSaver) { mutableStateOf(listOf<Screen>(Screen.Main)) }
     val screen by remember(editionFeatures) {
         derivedStateOf {
             resolveEditionScreen(backStack.lastOrNull() ?: Screen.Main, editionFeatures)
@@ -626,20 +777,6 @@ fun LocalAlbumApp(
             )
         }
 
-        is Screen.ModelImportWizard -> {
-            ModelImportWizardScreen(
-                viewModel = requireNotNull(pluginViewModel) { "Plugin manager is disabled for this edition" },
-                onNavigateBack = { goBack() },
-            )
-        }
-
-        is Screen.ModelJsonEditor -> {
-            ModelJsonEditorScreen(
-                viewModel = requireNotNull(pluginViewModel) { "Plugin manager is disabled for this edition" },
-                onNavigateBack = { goBack() },
-            )
-        }
-
         is Screen.Main -> {
             // Attempt to restore from DB on first idle display
             RememberRestoreEffect(albumViewModel)
@@ -808,8 +945,6 @@ internal fun navigationStateKey(screen: Screen): String = when (screen) {
     Screen.PluginManager -> "plugins"
     Screen.AnalysisPerformance -> "analysis-performance"
     Screen.FaceSwap -> "face-swap"
-    Screen.ModelImportWizard -> "model-import"
-    is Screen.ModelJsonEditor -> "model-editor:${screen.pluginId}"
     is Screen.Edition -> "edition:${screen.destinationId}"
     is Screen.RecommendationDetail ->
         "recommendation:${screen.recommendation.albumId}:${screen.recommendation.windowStart}"
@@ -850,6 +985,7 @@ private fun currentTabContent(
                 )
             },
             onNavigateToSearch = { onSwitchTab(MainTabIndex.SEARCH) },
+            onNavigateToSettings = { onSwitchTab(MainTabIndex.SETTINGS) },
             onNavigateToFavorites = {
                 navigateTo(Screen.Favorites)
             },

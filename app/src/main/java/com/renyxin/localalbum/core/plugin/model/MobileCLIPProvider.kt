@@ -93,49 +93,61 @@ class MobileCLIPProvider(
         file: File,
         context: SemanticEmbedProvider.ImageContext?,
     ): FloatArray? = withContext(Dispatchers.IO) {
-        val modelResult = modelManager.ensureModelReady(IMAGE_MODEL_ID)
-        if (modelResult.isFailure) {
-            Log.w(TAG, "图像编码器未就绪: ${modelResult.exceptionOrNull()?.message}")
-            return@withContext null
-        }
-
-        val bitmap = decodeBitmap(file) ?: return@withContext null
+        // 登记消费者：后台扫描阶段收尾的 evictUnusedModels 不得驱逐正在使用的 interpreter（审计 F-P1-3）。
+        val consumerId = "MobileCLIP:${System.nanoTime()}"
+        modelManager.registerConsumer(IMAGE_MODEL_ID, consumerId)
         try {
-            // CLIP 家族官方预处理：短边等比缩放 + 中心裁剪，与 Eva02 默认 Provider 一致
-            val resized = com.renyxin.localalbum.core.image.centerCropSquare(bitmap, IMAGE_SIZE)
-            val inputBuffer = preprocessImage(resized)
-
-            val outputArray = Array(1) { FloatArray(EMBEDDING_DIM) }
-            // 通过 Interpreter 池获取线程安全实例，支持文件级并发推理
-            modelManager.withInterpreter(IMAGE_MODEL_ID) { interpreter ->
-                interpreter.run(inputBuffer, outputArray)
+            val modelResult = modelManager.ensureModelReady(IMAGE_MODEL_ID)
+            if (modelResult.isFailure) {
+                Log.w(TAG, "图像编码器未就绪: ${modelResult.exceptionOrNull()?.message}")
+                return@withContext null
             }
 
-            l2Normalize(outputArray[0])
-        } catch (e: Exception) {
-            Log.w(TAG, "MobileCLIP 图像嵌入失败: ${file.name}", e)
-            null
+            val bitmap = decodeBitmap(file) ?: return@withContext null
+            try {
+                // CLIP 家族官方预处理：短边等比缩放 + 中心裁剪，与 Eva02 默认 Provider 一致
+                val resized = com.renyxin.localalbum.core.image.centerCropSquare(bitmap, IMAGE_SIZE)
+                val inputBuffer = preprocessImage(resized)
+
+                val outputArray = Array(1) { FloatArray(EMBEDDING_DIM) }
+                // 通过 Interpreter 池获取线程安全实例，支持文件级并发推理
+                modelManager.withInterpreter(IMAGE_MODEL_ID) { interpreter ->
+                    interpreter.run(inputBuffer, outputArray)
+                }
+
+                l2Normalize(outputArray[0])
+            } catch (e: Exception) {
+                Log.w(TAG, "MobileCLIP 图像嵌入失败: ${file.name}", e)
+                null
+            }
+        } finally {
+            modelManager.unregisterConsumer(IMAGE_MODEL_ID, consumerId)
         }
     }
 
     override suspend fun embedText(query: String): FloatArray {
-        val modelResult = modelManager.ensureModelReady(TEXT_MODEL_ID)
-        if (modelResult.isFailure) {
-            Log.w(TAG, "文本编码器未就绪: ${modelResult.exceptionOrNull()?.message}")
-            return FloatArray(EMBEDDING_DIM)
-        }
+        // 登记消费者：交互式语义搜索与后台阶段收尾驱逐并发时的保护（审计 F-P1-3）。
+        val consumerId = "MobileCLIP:${System.nanoTime()}"
+        modelManager.registerConsumer(TEXT_MODEL_ID, consumerId)
+        try {
+            val modelResult = modelManager.ensureModelReady(TEXT_MODEL_ID)
+            if (modelResult.isFailure) {
+                Log.w(TAG, "文本编码器未就绪: ${modelResult.exceptionOrNull()?.message}")
+                return FloatArray(EMBEDDING_DIM)
+            }
 
-        return try {
             val tokenIds = tokenize(query)
             val inputArray = Array(1) { IntArray(MAX_TEXT_LENGTH) { tokenIds.getOrElse(it) { 0 } } }
             val outputArray = Array(1) { FloatArray(EMBEDDING_DIM) }
             modelManager.withInterpreter(TEXT_MODEL_ID) { interpreter ->
                 interpreter.run(inputArray, outputArray)
             }
-            l2Normalize(outputArray[0])
+            return l2Normalize(outputArray[0])
         } catch (e: Exception) {
             Log.w(TAG, "MobileCLIP 文本嵌入失败: $query", e)
-            FloatArray(EMBEDDING_DIM)
+            return FloatArray(EMBEDDING_DIM)
+        } finally {
+            modelManager.unregisterConsumer(TEXT_MODEL_ID, consumerId)
         }
     }
 

@@ -397,15 +397,14 @@ class DatabaseImporter(
      */
     private suspend fun switchFromStaging(generation: String) = requireNotNull(database).withTransaction {
         val db = database.openHelper.writableDatabase
-        db.execSQL("DELETE FROM media_items_fts")
-        db.execSQL("DELETE FROM faces")
-        db.execSQL("DELETE FROM media_embeddings")
-        db.execSQL("DELETE FROM media_items")
-        listOf(
-            "thumbnail_cache_entries", "thumbnail_tasks", "analysis_tasks", "enhancement_outbox",
-            "scan_staging", "scan_runs", "media_change_events", "media_store_references",
-        ).forEach { table -> db.execSQL("DELETE FROM $table") }
-        resetThumbnailWakeHandshake(db)
+        // 清表集合与 v3 ZIP 路径（switchGenericStaging）完全对齐：删除意图、分析检查点、
+        // 聚类/重复结果同样不可跨备份继承。遗漏会导致本机 tombstone 把导入文件重新标记
+        // 回收，甚至按旧 deletedAtMs 被回收站清理物理删除（审计 F-P1-2）。
+        listOf("media_items_fts", "faces", "media_embeddings", "analysis_state", "feature_store",
+            "face_cluster_prototypes", "face_cluster_meta", "semantic_cluster_members", "semantic_cluster_meta",
+            "semantic_cluster_generations", "semantic_index_meta", "plugin_manifest", "deletion_tombstones",
+            "maintenance_runs", "media_items",
+        ).forEach { db.execSQL("DELETE FROM $it") }
         db.execSQL("""INSERT INTO media_items SELECT filePath,fileName,mediaType,capturedAtMs,modifiedAtMs,indexedAtMs,parentPath,fileSize,isFavorite,isTrashed,width,height,mimeType,durationMs,latitude,longitude,make,model,aperture,focalLength,iso,exposureTime,orientation,sceneType,thumbnailPath,fingerprintHead,perceptualHash,ocrText,qualityScore,deletedAtMs,isCorrupted,faceClusterId,scanGeneration FROM import_media_staging WHERE generation = ?""", arrayOf(generation))
         db.execSQL("""INSERT INTO faces(faceId,filePath,clusterId,personName,embedding,boxLeft,boxTop,boxRight,boxBottom,thumbnailPath,detectedAtMs) SELECT faceId,filePath,clusterId,personName,embedding,boxLeft,boxTop,boxRight,boxBottom,thumbnailPath,detectedAtMs FROM import_face_staging WHERE generation = ?""", arrayOf(generation))
         db.execSQL("""INSERT INTO media_embeddings(filePath,embedding,modelVersion,generatedAtMs,source,embeddingBlob,providerId,modelId,dimension,spaceId,generation,codecId,formatVersion) SELECT filePath,embedding,modelVersion,generatedAtMs,source,embeddingBlob,providerId,modelId,dimension,spaceId,vectorGeneration,codecId,formatVersion FROM import_embedding_staging WHERE generation = ?""", arrayOf(generation))
@@ -413,6 +412,13 @@ class DatabaseImporter(
         db.execSQL("UPDATE semantic_index_meta SET isActive = 0")
         db.execSQL("UPDATE semantic_cluster_generations SET isActive = 0")
         db.execSQL("""INSERT INTO media_items_fts(filePath,fileName,parentPath,ocrText,make,model) SELECT filePath,fileName,parentPath,ocrText,make,model FROM import_fts_staging WHERE generation = ?""", arrayOf(generation))
+        // 瞬态与可再生表明确不恢复；租约、设备身份映射、半成品和重复结果不可跨设备继承。
+        listOf(
+            "thumbnail_cache_entries", "thumbnail_tasks", "analysis_tasks", "enhancement_outbox",
+            "scan_staging", "scan_runs", "media_change_events", "media_store_references",
+            "semantic_maintenance_runs", "duplicate_hash_staging", "duplicate_members", "duplicate_groups",
+        ).forEach { table -> db.execSQL("DELETE FROM $table") }
+        resetThumbnailWakeHandshake(db)
         publishImportedBaselineAndRequireValidation(db)
     }
 

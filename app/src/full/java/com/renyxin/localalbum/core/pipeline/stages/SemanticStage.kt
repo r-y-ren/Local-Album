@@ -14,6 +14,7 @@ import com.renyxin.localalbum.core.pipeline.StageResult
 import com.renyxin.localalbum.core.pipeline.StageType
 import com.renyxin.localalbum.data.db.dao.EmbeddingDao
 import com.renyxin.localalbum.data.db.dao.FeatureStoreDao
+import androidx.room.withTransaction
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.dao.SemanticDao
 import com.renyxin.localalbum.data.db.entity.FeatureStoreEntity
@@ -34,6 +35,7 @@ class SemanticStage(
     private val embeddingDao: EmbeddingDao,
     private val featureStoreDao: FeatureStoreDao? = null, // Phase 5: 可选注入
     private val semanticDao: SemanticDao? = null,
+    private val database: com.renyxin.localalbum.data.db.AppDatabase? = null,
 ) : AnalysisStage {
 
     override val stageId = "core:semantic"
@@ -75,11 +77,6 @@ class SemanticStage(
         var failed = 0
 
         try {
-            // 清除旧嵌入
-            embeddingDao.deleteByFilePaths(filePaths)
-
-            // 分批推理并立即写入：此前会将整个扫描的向量保留到最后才 insert，
-            // 所以即使首批图片已完成，搜索侧仍只能看到“尚未建立语义索引”。
             var completedBeforeBatch = 0
             for (pathsInBatch in filePaths.chunked(INDEX_WRITE_BATCH_SIZE)) {
                 val batchOffset = completedBeforeBatch
@@ -125,7 +122,17 @@ class SemanticStage(
                 success += batchEmbeddings.size
                 failed += results.count { !it.success }
                 if (batchEmbeddings.isNotEmpty()) {
-                    embeddingDao.insertEmbeddings(batchEmbeddings)
+                    // 批内原子替换（删旧+插新同事务），取代整窗预删：批次间中断时已完成
+                    // 批次保持可搜，未处理批次保留旧向量而不是被清空（审计 F-P2-4）。
+                    if (database != null) {
+                        database.withTransaction {
+                            embeddingDao.deleteByFilePaths(pathsInBatch)
+                            embeddingDao.insertEmbeddings(batchEmbeddings)
+                        }
+                    } else {
+                        embeddingDao.deleteByFilePaths(pathsInBatch)
+                        embeddingDao.insertEmbeddings(batchEmbeddings)
+                    }
                     embeddings.addAll(batchEmbeddings)
                 }
                 completedBeforeBatch += pathsInBatch.size

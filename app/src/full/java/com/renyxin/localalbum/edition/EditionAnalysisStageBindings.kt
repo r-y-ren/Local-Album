@@ -26,20 +26,21 @@ internal object EditionAnalysisStageBindings {
         embeddingDao: EmbeddingDao,
         semanticDao: SemanticDao?,
         capabilityRegistry: CapabilityRegistryV2,
+        database: com.renyxin.localalbum.data.db.AppDatabase? = null,
     ): AnalysisStageBinding? = when (stageId) {
         AnalysisStage.STAGE_FACE -> bind<FaceProvider>(
             stageId = stageId,
             slotId = SLOT_FACE,
             capabilityRegistry = capabilityRegistry,
         ) { provider ->
-            FaceStage(provider, mediaDao, faceDao, faceClusterDao)
+            FaceStage(provider, mediaDao, faceDao, faceClusterDao, database = database)
         }
         AnalysisStage.STAGE_SEMANTIC -> bind<SemanticEmbedProvider>(
             stageId = stageId,
             slotId = SLOT_SEMANTIC,
             capabilityRegistry = capabilityRegistry,
         ) { provider ->
-            SemanticStage(provider, mediaDao, embeddingDao, semanticDao = semanticDao)
+            SemanticStage(provider, mediaDao, embeddingDao, semanticDao = semanticDao, database = database)
         }
         AnalysisStage.STAGE_OCR -> bind<OcrProvider>(
             stageId = stageId,

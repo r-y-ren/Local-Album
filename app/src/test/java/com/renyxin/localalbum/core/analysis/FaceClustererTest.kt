@@ -90,6 +90,27 @@ class FaceClustererTest {
     }
 
     @Test
+    fun `先被判为噪声的边界点应被后续簇吸收`() {
+        // 审计 F-P1-4 回归：v0 只与 v3 相邻（邻域 {v0,v3} < minPts=3），按外层顺序先被标为
+        // 噪声；v1/v2/v3 构成核心链且 v3 的邻域包含 v0——标准 DBSCAN 中 v0 是该簇的边界点，
+        // 必须在核心点扩展时被吸收，而不是永久留在噪声里。
+        val chainClusterer = FaceClusterer(eps = 0.3f, minPts = 3)
+        val samples = listOf(
+            // d(v0,v3)≈0.08 ≤ eps；d(v0,v1)=0.5、d(v0,v2)≈0.42 > eps
+            FaceClusterer.FaceSample(id = 0, embedding = floatArrayOf(0.5f, 0.866f, 0f)),
+            FaceClusterer.FaceSample(id = 1, embedding = floatArrayOf(1f, 0f, 0f)),
+            FaceClusterer.FaceSample(id = 2, embedding = floatArrayOf(0.995f, 0.0995f, 0f)),
+            FaceClusterer.FaceSample(id = 3, embedding = floatArrayOf(0.8f, 0.6f, 0f)),
+        )
+
+        val result = chainClusterer.cluster(samples)
+
+        assertEquals(1, result.clusterCount)
+        assertEquals(0, result.noiseCount)
+        assertEquals(4, result.clusters[0].sampleIds.size)
+    }
+
+    @Test
     fun `余弦距离计算正确`() {
         val a = floatArrayOf(1f, 0f, 0f)
         val b = floatArrayOf(0f, 1f, 0f)

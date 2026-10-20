@@ -34,6 +34,7 @@ class FaceStage(
     private val faceDao: FaceDao,
     faceClusterDao: FaceClusterDao,
     private val featureStoreDao: FeatureStoreDao? = null, // Phase 5: 可选注入
+    private val database: com.renyxin.localalbum.data.db.AppDatabase? = null,
 ) : AnalysisStage {
 
     override val stageId = "core:face"
@@ -167,6 +168,7 @@ class FaceStage(
                 modelScope = "dim:${faceProvider.embeddingDim}",
                 faceClusterer = FaceClusterer(grouping.clusterEps, facePreferences.faceMinimumGroupSize),
                 matchEps = grouping.matchEps,
+                database = database,
             )
             val assignment = if (allFaceEntities.isNotEmpty()) {
                 clusterAssigner.assign(filePaths)

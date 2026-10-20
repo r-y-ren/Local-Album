@@ -137,6 +137,11 @@ class PaddleOCRProvider(
 
     override suspend fun recognize(file: File): OcrProvider.OcrResult = withContext(Dispatchers.IO) {
         val bitmap = decodeBitmap(file) ?: return@withContext OcrProvider.OcrResult("")
+        // 登记消费者：并行阶段收尾的 evictUnusedModels 不得驱逐 OCR 正在使用的 session
+        // （镜像 InsightFace 的逐次调用注册模式，审计 F-P1-3）。
+        val consumerId = "PaddleOCR:${System.nanoTime()}"
+        modelManager.registerConsumer(DET_MODEL_ID, consumerId)
+        modelManager.registerConsumer(REC_MODEL_ID, consumerId)
         try {
             val detResult = modelManager.ensureModelReady(DET_MODEL_ID)
             if (detResult.isFailure) return@withContext OcrProvider.OcrResult("OCR检测模型未就绪", averageConfidence = 0f)
@@ -173,6 +178,9 @@ class PaddleOCRProvider(
         } catch (e: Exception) {
             Log.w(TAG, "OCR 失败", e)
             OcrProvider.OcrResult("")
+        } finally {
+            modelManager.unregisterConsumer(DET_MODEL_ID, consumerId)
+            modelManager.unregisterConsumer(REC_MODEL_ID, consumerId)
         }
     }
 

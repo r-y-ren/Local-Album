@@ -282,6 +282,7 @@ class AppContainer(context: Context) {
             embeddingDao = database.embeddingDao(),
             capabilityRegistry = capabilityRegistry,
             semanticDao = database.semanticDao(),
+            database = database,
         )
     }
 
@@ -568,13 +569,6 @@ class AppContainer(context: Context) {
      */
     @Volatile
     private var isDisposed = false
-
-    /** 获取共享的协程作用域（若已释放则抛出异常） */
-    val sharedScope: CoroutineScope
-        get() {
-            if (isDisposed) throw IllegalStateException("AppContainer 已释放")
-            return appScope
-        }
 
     /** 释放 AppContainer 持有的后台协程资源 */
     fun dispose() {

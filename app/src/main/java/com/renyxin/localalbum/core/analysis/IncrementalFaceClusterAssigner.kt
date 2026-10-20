@@ -5,6 +5,7 @@ import com.renyxin.localalbum.data.db.dao.FaceDao
 import com.renyxin.localalbum.data.db.dao.MediaDao
 import com.renyxin.localalbum.data.db.entity.FaceClusterPrototypeEntity
 import com.renyxin.localalbum.data.db.entity.FaceEntity
+import androidx.room.withTransaction
 import java.util.UUID
 
 /**
@@ -22,6 +23,7 @@ class IncrementalFaceClusterAssigner(
     private val modelScope: String,
     private val faceClusterer: FaceClusterer = FaceClusterer(),
     private val matchEps: Float = FacePrototypePolicy.MATCH_EPS,
+    private val database: com.renyxin.localalbum.data.db.AppDatabase? = null,
 ) {
     data class AssignmentResult(
         val matchedClusterCount: Int,
@@ -120,8 +122,19 @@ class IncrementalFaceClusterAssigner(
     }
 
     private suspend fun assignFileToCluster(item: ParsedFace, clusterId: String) {
-        faceDao.updateClusterIdsByFilePaths(listOf(item.face.filePath), clusterId)
-        mediaDao.setFaceClusterId(item.face.filePath, clusterId)
+        val path = item.face.filePath
+        val db = database
+        if (db != null) {
+            // faces.clusterId 与 media_items.faceClusterId 必须同事务提交：中途进程被杀
+            // 会留下人物页与网格归属错位（审计 F-P2-3）。
+            db.withTransaction {
+                faceDao.updateClusterIdsByFilePaths(listOf(path), clusterId)
+                mediaDao.setFaceClusterId(path, clusterId)
+            }        } else {
+            // 测试专用窄构造（无 AppDatabase）保持旧行为。
+            faceDao.updateClusterIdsByFilePaths(listOf(path), clusterId)
+            mediaDao.setFaceClusterId(path, clusterId)
+        }
     }
 
     private fun faceArea(item: ParsedFace): Float =

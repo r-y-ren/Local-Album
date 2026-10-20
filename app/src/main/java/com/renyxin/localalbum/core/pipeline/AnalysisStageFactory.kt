@@ -37,6 +37,7 @@ class AnalysisStageFactory(
     private val embeddingDao: EmbeddingDao,
     private val capabilityRegistry: CapabilityRegistryV2,
     private val semanticDao: SemanticDao? = null,
+    private val database: com.renyxin.localalbum.data.db.AppDatabase? = null,
 ) {
     fun createPlan(
         inclusionPolicy: StageInclusionPolicy,
@@ -71,6 +72,7 @@ class AnalysisStageFactory(
             embeddingDao = embeddingDao,
             semanticDao = semanticDao,
             capabilityRegistry = capabilityRegistry,
+            database = database,
         )
         else -> error("Unsupported analysis stage: $stageId")
     }

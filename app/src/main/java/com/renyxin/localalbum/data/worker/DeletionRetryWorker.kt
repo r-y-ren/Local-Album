@@ -20,7 +20,9 @@ class DeletionRetryWorker(context: Context, params: WorkerParameters) : Coroutin
         val claimed = dao.claimDue(System.currentTimeMillis(), BATCH_SIZE, LEASE_MS, token)
         if (claimed.isEmpty()) return Result.success()
         container.deletionService.retryClaimed(claimed)
-        if (claimed.size == BATCH_SIZE) enqueue(applicationContext)
+        // 自续排必须 APPEND：当前 WorkSpec 尚处 RUNNING，KEEP 会把新请求当作
+        // "存在未完成同名工作"丢弃，剩余到期 tombstone 被无谓延迟（审计 F-P2-1）。
+        if (claimed.size == BATCH_SIZE) enqueueMore(applicationContext)
         return Result.success()
     }
 
@@ -30,10 +32,24 @@ class DeletionRetryWorker(context: Context, params: WorkerParameters) : Coroutin
         internal val LEASE_MS = TimeUnit.MINUTES.toMillis(10)
 
         fun enqueue(context: Context) {
-            val request = OneTimeWorkRequestBuilder<DeletionRetryWorker>()
-                .setConstraints(Constraints.Builder().setRequiresBatteryNotLow(true).build())
-                .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request)
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                WORK_NAME,
+                ExistingWorkPolicy.KEEP,
+                buildRequest(),
+            )
         }
+
+        /** 批次满时的窗口推进续排，追加在当前运行之后。 */
+        private fun enqueueMore(context: Context) {
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                WORK_NAME,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                buildRequest(),
+            )
+        }
+
+        private fun buildRequest() = OneTimeWorkRequestBuilder<DeletionRetryWorker>()
+            .setConstraints(Constraints.Builder().setRequiresBatteryNotLow(true).build())
+            .build()
     }
 }

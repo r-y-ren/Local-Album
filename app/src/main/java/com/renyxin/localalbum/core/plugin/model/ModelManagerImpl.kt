@@ -63,10 +63,8 @@ class ModelManagerImpl(
     }
 
     /** Phase 6: 推理调度器（优先级队列 + 并发控制） */
-    val inferenceScheduler = InferenceScheduler(maxConcurrentModels = 2)
 
     /** Phase 6: 模型版本追踪器（持久化版本号，检测升级触发重建） */
-    val versionTracker = ModelVersionTracker(context)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -425,9 +423,12 @@ class ModelManagerImpl(
                 ?: throw IllegalStateException("ONNX 模型未加载: $modelId")
             return inferenceLockFor(modelId).withLock { block(single) }
         }
-        val freePool = onnxFreePools[modelId]!!
 
         return semaphore.withPermit {
+            // 池引用在取得 permit 后重读：permit 等待期间的 evictModel 会移除 map 条目并
+            // close 池内 session，沿用旧引用会向已脱离的 deque 取出/归还实例（审计 F-P1-3）。
+            val freePool = onnxFreePools[modelId]
+                ?: throw IllegalStateException("ONNX 模型已在推理等待期间被卸载: $modelId")
             // 优先取空闲 session；无则创建新 session（独立 intra-op 线程池）
             val session = freePool.poll() ?: onnxPoolMutex.withLock {
                 freePool.poll() ?: createOnnxSession(path, modelId)
@@ -461,7 +462,9 @@ class ModelManagerImpl(
                     block(reusableSession)
                 }
             } finally {
-                freePool.add(reusableSession)
+                // 归还前重读：池已被驱逐移除时直接关闭实例，避免悬挂在脱离 map 的 deque 上泄漏。
+                val returnPool = onnxFreePools[modelId]
+                if (returnPool != null) returnPool.add(reusableSession) else runCatching { reusableSession.close() }
             }
         }
     }
@@ -475,9 +478,11 @@ class ModelManagerImpl(
                 ?: throw IllegalStateException("TFLite 模型未加载: $modelId")
             return inferenceLockFor(modelId).withLock { block(single) }
         }
-        val freePool = tfliteFreePools[modelId]!!
 
         return semaphore.withPermit {
+            // 池引用在取得 permit 后重读，理由同 withOnnxSession（审计 F-P1-3）。
+            val freePool = tfliteFreePools[modelId]
+                ?: throw IllegalStateException("TFLite 模型已在推理等待期间被卸载: $modelId")
             // 优先取空闲实例；无则从共享 buffer 创建新实例（池未满时）
             val interpreter = freePool.poll() ?: tflitePoolMutex.withLock {
                 freePool.poll() ?: createTfliteInterpreter(buffer, modelId)
@@ -510,7 +515,9 @@ class ModelManagerImpl(
                     block(reusableInterpreter)
                 }
             } finally {
-                freePool.add(reusableInterpreter)
+                // 归还前重读：池已被驱逐移除时直接关闭实例，避免泄漏。
+                val returnPool = tfliteFreePools[modelId]
+                if (returnPool != null) returnPool.add(reusableInterpreter) else runCatching { reusableInterpreter.close() }
             }
         }
     }
