@@ -68,12 +68,13 @@ abstract class AnalysisTaskDao {
         "UPDATE analysis_tasks SET status = 'SUPERSEDED', leaseUntil = 0, " +
             "leaseToken = NULL, updatedAt = :now " +
             "WHERE filePath IN (:paths) AND status IN ('PENDING', 'RUNNING', 'FAILED') AND EXISTS (" +
-            "SELECT 1 FROM analysis_tasks current " +
-            "WHERE current.scanId = :scanId " +
-            "AND current.filePath = analysis_tasks.filePath " +
-            "AND current.pipelineScope = analysis_tasks.pipelineScope " +
-            "AND current.sourceVersion != analysis_tasks.sourceVersion " +
-            "AND current.status != 'SUPERSEDED')",
+            // 别名 current 是 Room 2.8 解析器的保留字；改名 cur（SQL 语义不变）
+            "SELECT 1 FROM analysis_tasks cur " +
+            "WHERE cur.scanId = :scanId " +
+            "AND cur.filePath = analysis_tasks.filePath " +
+            "AND cur.pipelineScope = analysis_tasks.pipelineScope " +
+            "AND cur.sourceVersion != analysis_tasks.sourceVersion " +
+            "AND cur.status != 'SUPERSEDED')",
     )
     protected abstract suspend fun supersedeOldVersionsForScanPaths(
         scanId: String,

@@ -1,10 +1,10 @@
 import com.android.build.api.dsl.ApplicationExtension
-import com.android.build.gradle.AppExtension
 import com.google.devtools.ksp.gradle.KspExtension
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 apply(plugin = "com.android.application")
-apply(plugin = "org.jetbrains.kotlin.android")
+// AGP 9 内置 Kotlin 管理 Kotlin 编译；Compose 编译器插件仍需显式应用
+apply(plugin = "org.jetbrains.kotlin.plugin.compose")
 apply(plugin = "com.google.devtools.ksp")
 
 // ── 签名配置 ──
@@ -19,7 +19,7 @@ if (keystorePropertiesFile.exists()) {
 
 extensions.configure<ApplicationExtension>("android") {
     namespace = "com.renyxin.localalbum"
-    compileSdk = 35
+    compileSdk = 37
     ndkVersion = "27.0.12077973"
 
     defaultConfig {
@@ -81,7 +81,7 @@ extensions.configure<ApplicationExtension>("android") {
             dimension = "edition"
             applicationIdSuffix = ".lite"
             versionNameSuffix = "-lite"
-            resValue("string", "app_name", "LocalAlbum Lite")
+            // app_name 覆盖迁移到 src/lite/res/values/strings.xml（AGP 9 禁用 flavor 内 resValue）
         }
     }
 
@@ -114,10 +114,6 @@ extensions.configure<ApplicationExtension>("android") {
     buildFeatures {
         compose = true
         buildConfig = true
-    }
-
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"
     }
 
     packaging {
@@ -161,21 +157,23 @@ extensions.configure<KspExtension>("ksp") {
 }
 
 // ── APK 输出命名 ──
-// 正式包：LocalAlbum-v0.1.0-c1-release.apk
-// 调试包：LocalAlbum-v0.1.0-debug-debug.apk
-// applicationVariants 在 AppExtension（内部 API）上，不在 ApplicationExtension（公共 DSL）上
-the<AppExtension>().applicationVariants.all {
-    val variant = this
-    outputs.all {
-        (this as com.android.build.gradle.internal.api.ApkVariantOutputImpl).outputFileName =
-            "LocalAlbum-v${variant.versionName}-c${variant.versionCode}-${variant.name}.apk"
+// 正式包：LocalAlbum-v0.2.2-c4-fullRelease.apk
+// AGP 9：旧 Variant API（AppExtension.applicationVariants + ApkVariantOutputImpl）需
+// android.enableLegacyVariantApi=true 才可用；迁移到 new API（VariantOutput.outputFileName）。
+extensions.configure<com.android.build.api.variant.ApplicationAndroidComponentsExtension>("androidComponents") {
+    onVariants { variant ->
+        variant.outputs.forEach { output ->
+            output.outputFileName.set(
+                "LocalAlbum-v${output.versionName.get()}-c${output.versionCode.get()}-${variant.name}.apk"
+            )
+        }
     }
 }
 
-// kotlinOptions 通过 KotlinCompile 任务配置（apply 方式下无 kotlinOptions 访问器）
+// Kotlin 2.2：kotlinOptions DSL 已移除，统一走 compilerOptions
 tasks.withType<KotlinCompile>().configureEach {
-    kotlinOptions {
-        jvmTarget = "17"
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
@@ -213,6 +211,9 @@ dependencies {
     // Coil for image loading (含视频帧解码，使视频预览图可直接从视频文件提取)
     add("implementation", libs.coil.compose)
     add("implementation", libs.coil.video)
+
+    // telephoto：成熟的缩放/平移手势（质心锚定捏合、定点双击、边界回弹），查看器移植
+    add("implementation", libs.telephoto.zoomable)
 
     // Media3 for video playback
     add("implementation", libs.androidx.media3.exoplayer)

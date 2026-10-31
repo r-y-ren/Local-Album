@@ -131,3 +131,9 @@
     public static int v(...);
     public static int d(...);
 }
+
+# 2026-10-31 临时绕行：最新稳定 R8（9.5.28）误编译 Kotlin 2.2 suspend 函数
+# （HybridIndexer，release 启动即 VerifyError copy-cat type=Undefined；debug 无 R8 正常）。
+# 已验证无效的绕行：desugar 2.1.5、R8 full mode 关闭。
+# 关闭优化阶段止血；R8 上游修复后（或锁定罪魁优化项后）移除并恢复。
+-dontoptimize

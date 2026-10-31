@@ -28,17 +28,22 @@
 
 | 组件        | 版本 / 配置                              |
 | ----------- | ---------------------------------------- |
-| Gradle      | 8.13（wrapper）                          |
-| AGP         | 8.13.2                                   |
-| Kotlin      | 1.9.24（JVM target 17）                  |
-| KSP         | 1.9.24-1.0.20（Room 编译）               |
-| NDK / CMake | 27.0.12077973 / 3.22.1                   |
-| SDK         | compileSdk 35 · targetSdk 35 · minSdk 29 |
+| Gradle      | 9.8.2（wrapper）                         |
+| AGP         | 9.5.0（**内置 Kotlin**，`android.builtInKotlin` 默认开启） |
+| Kotlin      | 2.2.21（AGP 内置管理；Compose 编译器插件 2.2.21 显式应用；JVM target 17） |
+| KSP         | 2.3.12（**独立版本线**，不再与 Kotlin 版本配对，为内置 Kotlin 设计） |
+| NDK / CMake | 27.0.12077973 / 3.22.1（显式钉住）        |
+| SDK         | compileSdk 37 · targetSdk 35 · minSdk 29 |
 | ABI         | `arm64-v8a`（真机）+ `x86_64`（模拟器）  |
 
-> 注意：根 `build.gradle.kts` 使用 `buildscript classpath` 而非 `plugins {}` DSL 声明插件。
-> 这是为规避该环境下 Gradle 8.12/8.13 的 kotlin-stdlib 严格约束被过滤导致 stage2 脚本编译失败的
-> 已知问题（原因记录在根脚本注释中），属**环境性 workaround**，Phase 2 评估是否可回归标准 DSL。
+> 2026-10 工具链大版本升级：Gradle 8.13→9.8.2、AGP 8.13.2→9.5.0、Kotlin 1.9.24→2.2（AGP 9
+> 内置 Kotlin，模块脚本不再 apply `org.jetbrains.kotlin.android`；Kotlin 编译由 AGP 管理，
+> Compose 编译器插件仍需显式应用）。历史遗留的 `buildscript classpath` 绕行（Gradle 8.1x +
+> KGP 1.9 的 stdlib 约束过滤 bug）已随 KGP 2.2 消除，根脚本回归标准 `plugins {}` DSL。迁移中
+> 的连带变更：APK 产物命名迁移到新 Variant API（旧 API 需 `android.enableLegacyVariantApi`）、
+> flavor `resValue` 改走 source-set 资源覆盖（AGP 9 默认禁用）、Room SQL 别名 `current` 撞新解析器
+> 保留字改名 `cur`、TFLite 2.14→2.17（修复双 AAR namespace 重复，AGP 9 强制唯一 namespace）、
+> kotlinOptions DSL 迁移 compilerOptions。
 
 ### 2.2 UI 与架构
 

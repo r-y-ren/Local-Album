@@ -1,23 +1,27 @@
-// 使用 buildscript classpath 方式声明插件，而非 plugins DSL。
-// 原因：在此环境（Gradle 8.12/8.13 + Arch Linux）下，plugins DSL 会让 Kotlin Gradle Plugin
-// 注入的 kotlin-stdlib:{strictly ...} 依赖约束被 Gradle 依赖解析引擎过滤掉，
-// 导致子项目 build.gradle.kts 的 stage2（residual program）脚本编译 classpath
-// 同时缺失 kotlin-stdlib 与 JDK 平台类，出现 "Unresolved reference: util/text/it"。
-// 改用 buildscript classpath 可绕过该约束过滤问题。
+// 2026-10 工具链大版本升级：Gradle 8.13 → 9.8.2，AGP 8.13.2 → 9.5.0（内置 Kotlin），Kotlin 1.9.24 → 2.2+。
+//
+// AGP 9 内置 Kotlin（android.builtInKotlin 默认 true）：模块脚本不再 apply
+// org.jetbrains.kotlin.android——Kotlin 编译由 AGP 内置管理；Compose 编译器插件仍需
+// 显式应用（compose 开启时的硬性要求）；KSP 使用内置 Kotlin 兼容的独立版本线（2.3.x）。
+//
+// 历史：Kotlin 1.9 + Gradle 8.12/8.13 时代曾因 KGP 的 kotlin-stdlib 约束被过滤导致
+// stage2 脚本编译失败而长期使用 buildscript classpath 绕行；Gradle 9.8 + AGP 9 下
+// plugins DSL 实测正常。回退方案见 git 历史与 ARCHITECTURE §2.1。
+plugins {
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.android.library) apply false
+    alias(libs.plugins.kotlin.compose) apply false
+    alias(libs.plugins.ksp) apply false
+}
+
 buildscript {
     repositories {
         google()
-        mavenCentral()
-        gradlePluginPortal()
     }
     dependencies {
-        classpath("com.android.tools.build:gradle:8.13.2")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24")
-        classpath("com.google.devtools.ksp:symbol-processing-gradle-plugin:1.9.24-1.0.20")
-        // 显式声明 kotlin-stdlib，防止 KGP 的 strictly 约束被过滤后
-        // stage2 脚本编译 classpath 缺失 Kotlin 标准库与 JDK 平台类
-        classpath("org.jetbrains.kotlin:kotlin-stdlib:1.9.24")
-        classpath("org.jetbrains.kotlin:kotlin-reflect:1.9.24")
-        classpath("org.jetbrains.kotlin:kotlin-script-runtime:1.9.24")
+        // R8 显式钉版：AGP 9.5.0 自带 R8 对 Kotlin 2.2 suspend 函数（HybridIndexer）
+        // 误编译，release 启动即 VerifyError（copy-cat type=Undefined）。classpath
+        // 钉版是官方推荐的 R8 覆盖方式；升级 AGP 时若其自带队列已修复可移除。
+        classpath("com.android.tools:r8:9.5.28")
     }
 }

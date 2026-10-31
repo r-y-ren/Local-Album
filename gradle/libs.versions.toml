@@ -1,46 +1,49 @@
 # Version Catalog — Phase 2 依赖审计迁移（plans/phase2-dependency-audit.md §4/§5）
 # 版本策略：与迁移前 build.gradle.kts 中的现状完全一致，不夹带任何升级。
 # 已删除的无用依赖（runtime-livedata/espresso-core/ui-test-junit4/ui-test-manifest）不收录。
-# 注意：plugins DSL 迁移不在本次范围，[plugins] 节仅作声明备用，根 buildscript classpath 保持原样。
+# 2026-10 起根脚本回归 plugins DSL（KGP 2.2 下不再需要 buildscript classpath 绕行）。
 
 [versions]
 # ── 构建插件（与 Kotlin 严格配对，升级必须联动）──
-agp = "8.13.2"
-kotlin = "1.9.24"
-ksp = "1.9.24-1.0.20"
-composeCompiler = "1.5.14"          # ↔ kotlin 1.9.24（composeOptions.kotlinCompilerExtensionVersion）
+# 2026-10 工具链升级：Kotlin 1.9.24 → 2.2.21（K2 + Compose Compiler Gradle 插件），
+# KSP 走 2.0.x（KSP2）；composeCompiler 独立版本随 Kotlin 1.9 时代终结一并移除。
+agp = "9.5.0"
+kotlin = "2.2.21"
+# AGP 9 内置 Kotlin 下 KSP 走独立版本线（不再与 Kotlin 版本配对）；旧线 2.2.21-2.0.5 显式不兼容内置 Kotlin
+ksp = "2.3.12"
 foojayResolver = "1.0.0"
 
 # ── AndroidX / Compose ──
-composeBom = "2024.09.02"
-material3 = "1.3.0"                 # 现状为显式 1.3.0（BOM 2024.09.02 内含同版本）；保留显式以完全复刻现状
-coreKtx = "1.13.1"
-lifecycle = "2.8.5"
-activityCompose = "1.9.2"
+composeBom = "2026.09.00"          # ui 1.12.x，要求 compileSdk 37
+# material3 随 BOM（升级后显式固定版本与 BOM 内版本漂移风险大，回归 BOM 接管）
+coreKtx = "1.19.1"
+lifecycle = "2.11.0"
+activityCompose = "1.13.0"
 googleMaterial = "1.14.0"           # com.google.android.material（XML 主题 Theme.Material3 依赖，必须保留）
 datastore = "1.1.1"
 exifinterface = "1.3.7"
 media3 = "1.4.1"
-room = "2.6.1"
+room = "2.8.5"                # 2.7+ 全面支持 KSP2/Kotlin 2.x
 work = "2.9.1"
 paging = "3.3.2"
 annotation = "1.8.0"                # opencv 模块用
 
 # ── Kotlin 生态 ──
-coroutines = "1.8.1"
+coroutines = "1.11.0"
 
 # ── 第三方 ──
-coil = "2.6.0"
+coil = "2.7.0"
+telephoto = "0.19.0"           # 需 Kotlin≥2.1 消费；0.14 为 Kotlin 1.9 上限
 
 # ── ML Kit / ML 运行时（三运行时并存是设计使然，均已证实使用）──
 mlkitTextRecognition = "16.0.1"
 mlkitFaceDetection = "16.1.7"
-tensorflowLite = "2.14.0"
+tensorflowLite = "2.17.0"           # 2.16+ 修复与 -api AAR 的 namespace 重复（AGP 9 强制唯一）
 onnxRuntime = "1.19.2"
 pytorchMobile = "1.13.1"
 
 # ── 其他 / 测试 ──
-desugarJdkLibs = "2.0.4"
+desugarJdkLibs = "2.1.5"             # AGP 9 工具链配套（2.0.4 曾致 release 启动 VerifyError）
 junit = "4.13.2"
 json = "20240303"
 mockito = "5.5.0"
@@ -56,12 +59,12 @@ androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "l
 androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 
-# ── Compose（除 material3 外均无版本，由 BOM 接管）──
+# ── Compose（全部由 BOM 接管）──
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
 androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
-androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 androidx-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
 google-material = { group = "com.google.android.material", name = "material", version.ref = "googleMaterial" }
 
@@ -89,6 +92,7 @@ kotlin-test = { group = "org.jetbrains.kotlin", name = "kotlin-test", version.re
 
 # ── 第三方图像 ──
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
+telephoto-zoomable = { group = "me.saket.telephoto", name = "zoomable", version.ref = "telephoto" }
 coil-video = { group = "io.coil-kt", name = "coil-video", version.ref = "coil" }
 
 # ── ML Kit ──
@@ -140,10 +144,12 @@ coil = [
 ]
 
 [plugins]
-# 本次不做 plugins DSL 迁移（根 buildscript classpath workaround 保持原样，见根 build.gradle.kts 注释），
-# 以下条目仅作声明备用。
+# 2026-10 工具链升级：AGP 9.5（内置 Kotlin，android.builtInKotlin 默认开启）。
+# kotlin-android 别名仅用于把 KGP 放上插件 classpath 供 AGP 识别版本——
+# 模块脚本不再 apply 它（AGP 9 下与 newDsl 不兼容）。
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 foojay-resolver-convention = { id = "org.gradle.toolchains.foojay-resolver-convention", version.ref = "foojayResolver" }
