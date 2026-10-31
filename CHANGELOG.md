@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-10-31
+
+### Added
+
+- Photo viewer gestures rebuilt on [telephoto](https://github.com/saket/telephoto) (`Modifier.zoomable`, 0.19.0): pinch-zoom anchored at the finger centroid, double-tap zooms into the tapped spot, panning while zoomed has edge clamping with spring settling and fling, double-tap-and-hold gives single-finger zoom, haptics fire at zoom limits, and small (upscaled) images can be zoomed too. The previous hand-rolled transform scaled around the screen center regardless of where your fingers were, had no pan bounds, and double-tap always zoomed toward the middle. Swipe-down-to-dismiss and horizontal pager swipes while zoomed out keep their direction-locked behavior, and the instant-preview placeholder chain is unchanged.
+- Video playback follows the Google Photos model with three states: a **poster** state (Coil video-frame thumbnail, centered play button, duration badge — no decoder instantiated until you press play; previously entering a video page started playback immediately with sound, and merely swiping past a video created an ExoPlayer), a **playing** state (player created on demand; custom controls — seek bar, play/pause, 0.5–2× speed), and a **replay** state (player and progress bar both rest at the end with a centered replay button; previously the progress bar reset to zero while the frame stayed on the last picture). The bottom metadata bar and the video control bar are anchored to the same slot and are now mutually exclusive — during playback the metadata bar yields, fixing the two bottom bars stacking on top of each other.
+- Video lifecycle hardening per Media3 guidance: playback pauses when the app stops, when headphones are unplugged (`setHandleAudioBecomingNoisy`), audio focus is requested with proper `AudioAttributes`, and releasing the seek slider no longer snaps back (the old code read `currentPosition` immediately after the async `seekTo`).
+
+### Changed
+
+- Toolchain brought to current stable across the board: Gradle 8.13 → 9.8.2, AGP 8.13.2 → 9.5.0 with built-in Kotlin (Kotlin 1.9.24 → 2.2.21), KSP → the 2.3.x line, Compose BOM 2024.09.02 → 2026.09.00 (Compose 1.12), compileSdk 35 → 37 (targetSdk stays 35 — no runtime behavior change), Room 2.6.1 → 2.8.5 (schema v32 unchanged), plus lifecycle 2.11.0 / activity-compose 1.13.0 / core-ktx 1.19.1 / coroutines 1.11.0 / Coil 2.7.0 / TFLite 2.17.0 / desugar 2.1.5. The long-standing `buildscript classpath` workaround in the root script is retired in favor of the standard `plugins {}` DSL, and APK output naming moved off AGP-internal APIs.
+- Temporary R8 mitigation: the latest stable R8 miscompiles a Kotlin 2.2 suspend function in `HybridIndexer` (release builds crashed at startup with `VerifyError`; pinning R8 9.5.28, disabling full mode, and upgrading desugar did not help). Optimization is disabled via `-dontoptimize` (shrinking and obfuscation remain — R8 is still applied) until an upstream fix lands; debug builds were unaffected.
+
 ## [0.2.2] - 2026-10-20
 
 ### Fixed
