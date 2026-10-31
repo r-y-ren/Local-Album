@@ -50,7 +50,7 @@ jobs:
           [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
           echo "Using $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -103,7 +103,7 @@ jobs:
           [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
           echo "Using $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -149,7 +149,7 @@ jobs:
           [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
           echo "Using $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -203,7 +203,7 @@ jobs:
           [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
           echo "Using $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -251,7 +251,7 @@ jobs:
           [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
           echo "Using $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
