@@ -31,8 +31,11 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
@@ -61,6 +64,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import me.saket.telephoto.zoomable.rememberZoomableState
+import me.saket.telephoto.zoomable.zoomable
 import androidx.compose.ui.layout.ContentScale
 import android.content.Intent
 import android.widget.Toast
@@ -126,6 +131,9 @@ fun MediaViewerScreen(
     }
 
     var showOverlay by remember { mutableStateOf(true) }
+    // 当前页视频是否处于播放态（POSTER/ENDED 均为 false）。底部元数据栏与视频控制栏
+    // 同锚 BottomCenter，必须互斥：播放时元数据栏让位（Google Photos 范式），否则重叠。
+    var videoPlaybackActive by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showExifDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -292,6 +300,11 @@ fun MediaViewerScreen(
             .fillMaxSize()
             .background(Color.Black.copy(alpha = bgAlpha)),
     ) {
+        // 切页复位：新页若是视频会在组合后上报真实播放态
+        LaunchedEffect(pagerState.currentPage) {
+            videoPlaybackActive = false
+        }
+
         // Pager — each page clips to visible area
         HorizontalPager(
             state = pagerState,
@@ -338,9 +351,15 @@ fun MediaViewerScreen(
                 )
                 MediaType.VIDEO -> VideoContent(
                     filePath = item.filePath,
+                    durationMs = item.durationMs,
                     // P1-4: 仅当前可见页播放视频
                     isCurrentPage = (page == pagerState.currentPage),
-                    onTap = { showOverlay = !showOverlay },
+                    // chrome 统一由查看器级 showOverlay 驱动（顶栏与视频控制栏同显同隐），
+                    // 消除此前两套独立状态 3 秒后分叉的问题
+                    chromeVisible = showOverlay,
+                    onToggleChrome = { showOverlay = !showOverlay },
+                    onChromeAutoHide = { showOverlay = false },
+                    onPlaybackActiveChanged = { videoPlaybackActive = it },
                 )
             }
         }
@@ -421,9 +440,9 @@ fun MediaViewerScreen(
             }
         }
 
-        // --- Metadata bar at bottom ---
+        // --- Metadata bar at bottom（视频播放态让位给控制栏，避免同锚重叠） ---
         AnimatedVisibility(
-            visible = showOverlay,
+            visible = showOverlay && !(currentItem?.type == MediaType.VIDEO && videoPlaybackActive),
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.align(Alignment.BottomCenter),
@@ -528,152 +547,58 @@ private fun ZoomableImageContent(
     onVerticalDragEnd: () -> Unit,
     onVerticalDragCancel: () -> Unit,
 ) {
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offsetX by remember { mutableFloatStateOf(0f) }
-    var offsetY by remember { mutableFloatStateOf(0f) }
-
-    // 方向锁定状态：手势开始后根据初始方向锁定，避免中途抖动导致误触
-    var dragDirection by remember { mutableStateOf(DragDirection.None) }
-
-    // 记录竖直拖拽累计量（用于判断是否触发 dismiss）
-    var verticalDragAccum by remember { mutableFloatStateOf(0f) }
-
-    // 仅切换原始媒体时重置状态；预览占位异步到达不能打断用户的缩放手势。
-    LaunchedEffect(sources.originalPath) {
-        scale = 1f
-        offsetX = 0f
-        offsetY = 0f
-        verticalDragAccum = 0f
-        dragDirection = DragDirection.None
-    }
+    // telephoto（me.saket.telephoto:zoomable）接管全部缩放交互：质心锚定的捏合缩放、
+    // 双击按点击位置定点缩放、放大后平移（边界约束+回弹+惯性）、双击后单指缩放、
+    // 到达缩放上限的触感反馈。此前自研实现绕中心缩放导致双击/捏合都不在手指位置，
+    // 且平移无边界（审计后的手势治理，移植成熟方案替代）。
+    val zoomableState = rememberZoomableState()
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .clipToBounds()
-            // 单击 / 双击
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onTap = { onTap() },
-                    onDoubleTap = {
-                        if (scale > 1.5f) {
-                            scale = 1f
-                            offsetX = 0f
-                            offsetY = 0f
-                        } else {
-                            scale = 2f
-                        }
-                    },
-                )
-            }
-            // 统合手势：双指缩放 + 放大后平移 + 1x 时竖向拖拽关闭
-            // 关键修复：使用方向锁定（direction lock），手势开始后根据初始方向
-            // 确定是水平切图还是竖直关闭，锁定后不再改变，避免误触
-            .pointerInput(Unit) {
+            // 仅处理"未放大时的单指手势"：方向锁定——水平透传给 HorizontalPager 切图，
+            // 竖直驱动下滑关闭。放大后（zoomFraction > 0）整段让位，telephoto 独占手势。
+            .pointerInput(zoomableState) {
                 awaitEachGesture {
-                    val firstDown = awaitFirstDown(requireUnconsumed = false)
-                    var previousZoom = 1f
-                    var previousCentroid = firstDown.position
-                    var isMultiTouchActive = false
-
+                    awaitFirstDown(requireUnconsumed = false)
+                    var lockedDirection = DragDirection.None
+                    var verticalAccum = 0f
+                    var verticalEngaged = false
                     do {
                         val event = awaitPointerEvent()
-                        val changes = event.changes
-                        val pressedChanges = changes.filter { it.pressed }
+                        val pressedChanges = event.changes.filter { it.pressed }
+                        val zoomed = (zoomableState.zoomFraction ?: 0f) > 0f
+                        if (!zoomed && pressedChanges.size == 1) {
+                            val change = pressedChanges.first()
+                            val dx = change.position.x - change.previousPosition.x
+                            val dy = change.position.y - change.previousPosition.y
 
-                        when {
-                            // --- 多指：处理缩放 ---
-                            pressedChanges.size >= 2 -> {
-                                isMultiTouchActive = true
-                                val centroid = event.calculateCentroid()
-                                val zoomChange = if (previousZoom != 1f) {
-                                    event.calculateZoom()
-                                } else {
-                                    1f
+                            // 方向尚未锁定时，根据初始位移判断并锁定，避免中途抖动误触
+                            if (lockedDirection == DragDirection.None) {
+                                val absDx = abs(dx)
+                                val absDy = abs(dy)
+                                if (absDx > 8f || absDy > 8f) {
+                                    lockedDirection =
+                                        if (absDx > absDy) DragDirection.Horizontal else DragDirection.Vertical
                                 }
-                                val pan = if (previousZoom != 1f) {
-                                    centroid - previousCentroid
-                                } else {
-                                    androidx.compose.ui.geometry.Offset.Zero
-                                }
-
-                                val newScale = (scale * zoomChange).coerceIn(1f, 5f)
-                                scale = newScale
-                                if (scale > 1f) {
-                                    offsetX += pan.x
-                                    offsetY += pan.y
-                                } else {
-                                    offsetX = 0f
-                                    offsetY = 0f
-                                }
-
-                                previousZoom = zoomChange
-                                previousCentroid = centroid
-
-                                // 消费多指事件，不传递给 pager
-                                pressedChanges.forEach { if (it.pressed) it.consume() }
                             }
 
-                            // --- 已缩放后的单指平移 ---
-                            scale > 1f && pressedChanges.size == 1 -> {
-                                val change = pressedChanges.first()
-                                val pan = change.position - change.previousPosition
-                                offsetX += pan.x
-                                offsetY += pan.y
+                            if (lockedDirection == DragDirection.Vertical) {
+                                // 竖直滑动 → 下滑关闭（Google Photos 风格）
+                                verticalAccum += dy
+                                verticalEngaged = true
+                                onVerticalDrag(dy)
                                 change.consume()
                             }
-
-                            // --- 1x 未缩放的单指拖动：方向锁定 ---
-                            pressedChanges.size == 1 -> {
-                                val change = pressedChanges.first()
-                                val dx = change.position.x - change.previousPosition.x
-                                val dy = change.position.y - change.previousPosition.y
-
-                                // 方向尚未锁定时，根据初始位移判断并锁定方向
-                                if (dragDirection == DragDirection.None) {
-                                    val absDx = abs(dx)
-                                    val absDy = abs(dy)
-                                    if (absDx > 8f || absDy > 8f) {
-                                        dragDirection = if (absDx > absDy) {
-                                            DragDirection.Horizontal
-                                        } else {
-                                            DragDirection.Vertical
-                                        }
-                                    }
-                                }
-
-                                when (dragDirection) {
-                                    DragDirection.Horizontal -> {
-                                        // 水平滑动 → 不消费，透传给 HorizontalPager 处理切图
-                                        if (verticalDragAccum != 0f) {
-                                            onVerticalDragCancel()
-                                            verticalDragAccum = 0f
-                                        }
-                                    }
-                                    DragDirection.Vertical -> {
-                                        // 竖直滑动 → 处理下滑关闭
-                                        onVerticalDrag(dy)
-                                        verticalDragAccum += dy
-                                        change.consume()
-                                    }
-                                    DragDirection.None -> {
-                                        // 方向尚未确定，不消费事件
-                                    }
-                                }
-                            }
+                            // Horizontal → 不消费，透传给 Pager 切图
                         }
                     } while (pressedChanges.isNotEmpty())
 
-                    // 手势结束：根据方向和竖直拖拽量决定 dismiss
-                    if (!isMultiTouchActive && scale <= 1f) {
-                        if (dragDirection == DragDirection.Vertical && abs(verticalDragAccum) > 10f) {
-                            onVerticalDragEnd()
-                        } else if (verticalDragAccum != 0f) {
-                            onVerticalDragCancel()
-                        }
+                    // 手势结束：按竖直累计量决定是否 dismiss
+                    if (verticalEngaged) {
+                        if (abs(verticalAccum) > 10f) onVerticalDragEnd() else onVerticalDragCancel()
                     }
-                    dragDirection = DragDirection.None
-                    verticalDragAccum = 0f
                 }
             },
     ) {
@@ -681,12 +606,16 @@ private fun ZoomableImageContent(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                    translationX = offsetX
-                    // 1x 时应用 dismiss 偏移，使图片跟随手指上下移动（Google Photos 风格）
-                    translationY = offsetY + (if (scale <= 1f) dismissOffset else 0f)
-                },
+                    // 未放大时应用 dismiss 偏移使图片跟随手指；放大后由 telephoto 变换接管
+                    val zoomed = (zoomableState.zoomFraction ?: 0f) > 0f
+                    translationY = if (!zoomed) dismissOffset else 0f
+                }
+                .zoomable(
+                    state = zoomableState,
+                    // 单击切换界面 chrome。telephoto 内部做双击消歧（单击等待超时后才触发），
+                    // 双击由其按点击位置定点缩放，二者互不抢占。
+                    onClick = { onTap() },
+                ),
         ) {
             // 已有预览缓存时先显示为底层占位。原图解码成功后，上层图片自然覆盖它；
             // 原图加载失败时占位仍保留，避免黑屏。
@@ -711,73 +640,110 @@ private fun ZoomableImageContent(
 @Composable
 private fun VideoContent(
     filePath: String,
+    durationMs: Long,
     isCurrentPage: Boolean = true,
-    onTap: () -> Unit,
+    chromeVisible: Boolean,
+    onToggleChrome: () -> Unit,
+    onChromeAutoHide: () -> Unit,
+    onPlaybackActiveChanged: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
-    var showControls by remember { mutableStateOf(true) }
-    var isPlaying by remember { mutableStateOf(true) }
+
+    // ---- 三态模型（Google Photos 范式）----
+    // POSTER：详情态——Coil 视频帧海报 + 播放按钮 + 时长徽标，零播放器实例；
+    // PLAYING：播放态——首次点播才创建 ExoPlayer + 自绘控制栏（跟随查看器 chrome）；
+    // ENDED：重播态——画面停在结尾，进度条停在末尾，居中重播按钮。
+    var playbackState by remember(filePath) { mutableStateOf(VideoPlaybackState.POSTER) }
+    var isPlaying by remember { mutableStateOf(false) }
     var currentPosition by remember { mutableStateOf(0L) }
-    var duration by remember { mutableStateOf(0L) }
+    var duration by remember { mutableStateOf(durationMs) }
     var playbackSpeed by remember { mutableFloatStateOf(1f) }
     // 标记用户是否正在拖拽进度条，避免轮询与手动拖拽冲突导致位置跳变
     var isUserSeeking by remember { mutableStateOf(false) }
 
-    // P1-4: 以 filePath 为 remember key，确保切换视频时重建播放器
-    val player = remember(filePath) {
-        ExoPlayer.Builder(context).build().apply {
+    // 播放态上报父级：仅 PLAYING 为 true（海报/重播均为"详情语义"，元数据栏回归）
+    LaunchedEffect(playbackState) {
+        onPlaybackActiveChanged(playbackState == VideoPlaybackState.PLAYING)
+    }
+
+    // 播放器懒创建：海报态零解码器；进入播放态才 build（remember 键含 playbackState 的"已开始"位）
+    val hasStarted = playbackState != VideoPlaybackState.POSTER
+    val player = remember(filePath, hasStarted) {
+        if (!hasStarted) null else ExoPlayer.Builder(context).build().apply {
+            setAudioAttributes(
+                androidx.media3.common.AudioAttributes.Builder()
+                    .setUsage(androidx.media3.common.C.USAGE_MEDIA)
+                    .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MOVIE)
+                    .build(),
+                /* handleAudioFocus= */ true,
+            )
+            // 拔出耳机自动暂停（Media3 官方推荐）
+            setHandleAudioBecomingNoisy(true)
             setMediaItem(Media3Item.fromUri(filePath))
             prepare()
-            playWhenReady = false // 不自动播放，由当前页可见性控制
+            playWhenReady = true
         }
     }
 
-    // P1-4: 仅当前可见页播放，离屏页暂停，避免多个视频同时播放
-    LaunchedEffect(isCurrentPage) {
-        player.playWhenReady = isCurrentPage
+    // 仅当前可见页播放；离屏页暂停并保留进度（翻页释放由 DisposableEffect 完成）
+    LaunchedEffect(isCurrentPage, hasStarted) {
+        val p = player ?: return@LaunchedEffect
+        if (isCurrentPage && playbackState == VideoPlaybackState.PLAYING) {
+            p.playWhenReady = true
+        } else if (!isCurrentPage) {
+            p.playWhenReady = false
+        }
     }
 
-    // Track playback state
-    DisposableEffect(player) {
-        val listener = object : androidx.media3.common.Player.Listener {
-            override fun onIsPlayingChanged(playing: Boolean) {
-                isPlaying = playing
-            }
-            override fun onPlaybackStateChanged(state: Int) {
-                if (state == androidx.media3.common.Player.STATE_READY) {
-                    duration = player.duration
+    if (player != null) {
+        // 播放状态跟踪 + 生命周期（切后台暂停）
+        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+        DisposableEffect(player, lifecycleOwner) {
+            val listener = object : androidx.media3.common.Player.Listener {
+                override fun onIsPlayingChanged(playing: Boolean) {
+                    isPlaying = playing
                 }
-                // 播放结束时重置进度条到起点
-                if (state == androidx.media3.common.Player.STATE_ENDED) {
-                    currentPosition = 0L
+                override fun onPlaybackStateChanged(state: Int) {
+                    if (state == androidx.media3.common.Player.STATE_READY) {
+                        duration = player.duration.takeIf { it > 0 } ?: durationMs
+                    }
+                    // 播放结束进入重播态：画面与进度条都停在结尾（原实现进度归零与画面不一致）
+                    if (state == androidx.media3.common.Player.STATE_ENDED) {
+                        playbackState = VideoPlaybackState.ENDED
+                        currentPosition = duration
+                    }
+                }
+            }
+            player.addListener(listener)
+            val lifecycleObserver = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                    player.pause()
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+                player.removeListener(listener)
+                player.release()
+            }
+        }
+
+        // 进度轮询：播放中且非拖拽时 200ms 同步（松手后交还轮询，不再立即读 getPosition 避免 seek 异步竞态）
+        LaunchedEffect(isPlaying) {
+            while (isPlaying) {
+                kotlinx.coroutines.delay(200)
+                if (!isUserSeeking) {
+                    currentPosition = player.currentPosition.coerceIn(0L, duration)
                 }
             }
         }
-        player.addListener(listener)
-        onDispose {
-            player.removeListener(listener)
-            player.release()
-        }
     }
 
-    // 修复：周期性轮询播放器当前位置，驱动进度条实时移动。
-    // 原实现缺少此机制，currentPosition 仅在用户手动拖拽时更新，
-    // 导致播放时进度条纹丝不动。仅在播放中且非用户拖拽时更新，
-    // 避免与手动 seek 操作冲突。
-    LaunchedEffect(isPlaying) {
-        while (isPlaying) {
-            kotlinx.coroutines.delay(200)
-            if (!isUserSeeking) {
-                currentPosition = player.currentPosition
-            }
-        }
-    }
-
-    // Auto-hide controls
-    LaunchedEffect(showControls) {
-        if (showControls) {
+    // 自动隐藏 chrome：仅播放中的视频页启动 3s 计时（暂停/海报/重播态常驻；图片页不受影响）
+    LaunchedEffect(chromeVisible, isPlaying, isCurrentPage) {
+        if (chromeVisible && isPlaying && isCurrentPage) {
             kotlinx.coroutines.delay(3000)
-            showControls = false
+            onChromeAutoHide()
         }
     }
 
@@ -786,37 +752,106 @@ private fun VideoContent(
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        // Player view (hidden controller, we use our custom overlay)
-        AndroidView(
-            factory = { ctx ->
-                androidx.media3.ui.PlayerView(ctx).apply {
-                    this.player = player
-                    useController = false
-                }
-            },
-            modifier = Modifier.fillMaxSize(),
-        )
+        // ---- 海报（详情态 / 重播前的底图） ----
+        if (playbackState == VideoPlaybackState.POSTER) {
+            AsyncImage(
+                model = filePath,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+            // 时长徽标
+            if (durationMs > 0) {
+                Text(
+                    text = formatVideoTime(durationMs),
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp)
+                        .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+        }
 
-        // ---- Gesture overlay ----
-        // 手势策略：仅处理点击（显示/隐藏控制栏），所有拖拽事件不消费，
-        // 水平滑动交给 HorizontalPager 翻页（与图片一致），垂直滑动不处理。
-        // 视频进度通过底部 SeekBar 调整。
+        // ---- 播放器 surface（播放态/结束态） ----
+        if (player != null) {
+            AndroidView(
+                factory = { ctx ->
+                    androidx.media3.ui.PlayerView(ctx).apply {
+                        this.player = player
+                        useController = false
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        // ---- 手势层：单击行为按态分流 ----
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
+                .pointerInput(playbackState) {
                     detectTapGestures(
                         onTap = {
-                            showControls = !showControls
-                            onTap()
+                            when (playbackState) {
+                                // 详情态：点击海报开始播放并显示 chrome
+                                VideoPlaybackState.POSTER -> {
+                                    playbackState = VideoPlaybackState.PLAYING
+                                    onToggleChrome()
+                                }
+                                // 播放态：切换整套 chrome（顶栏+控制栏同显同隐）
+                                VideoPlaybackState.PLAYING -> onToggleChrome()
+                                // 重播态：从头播放
+                                VideoPlaybackState.ENDED -> {
+                                    player?.seekTo(0L)
+                                    currentPosition = 0L
+                                    playbackState = VideoPlaybackState.PLAYING
+                                    player?.play()
+                                }
+                            }
                         },
                     )
                 },
         )
 
-        // ---- Custom control overlay (bottom) ----
+        // ---- 居中播放/重播按钮（非播放中显示） ----
+        if (playbackState != VideoPlaybackState.PLAYING) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(72.dp)
+                    .background(Color.Black.copy(alpha = 0.5f), androidx.compose.foundation.shape.CircleShape)
+                    .clickable {
+                        when (playbackState) {
+                            VideoPlaybackState.POSTER -> {
+                                playbackState = VideoPlaybackState.PLAYING
+                                onToggleChrome()
+                            }
+                            VideoPlaybackState.ENDED -> {
+                                player?.seekTo(0L)
+                                currentPosition = 0L
+                                playbackState = VideoPlaybackState.PLAYING
+                                player?.play()
+                            }
+                            VideoPlaybackState.PLAYING -> Unit
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (playbackState == VideoPlaybackState.ENDED) Icons.Filled.Replay else Icons.Filled.PlayArrow,
+                    contentDescription = if (playbackState == VideoPlaybackState.ENDED) "重播" else "播放",
+                    tint = Color.White,
+                    modifier = Modifier.size(40.dp),
+                )
+            }
+        }
+
+        // ---- 自绘控制栏：可见性 = chromeVisible && 播放态（与顶栏同源同步） ----
         AnimatedVisibility(
-            visible = showControls,
+            visible = chromeVisible && playbackState == VideoPlaybackState.PLAYING,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.align(Alignment.BottomCenter),
@@ -830,17 +865,14 @@ private fun VideoContent(
             ) {
                 // Seek bar
                 androidx.compose.material3.Slider(
-                    value = if (duration > 0) currentPosition.toFloat() / duration else 0f,
+                    value = if (duration > 0) (currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f,
                     onValueChange = { fraction ->
-                        // 用户拖拽时暂停轮询，避免位置跳变
                         isUserSeeking = true
                         currentPosition = (fraction * duration).toLong()
                     },
                     onValueChangeFinished = {
-                        player.seekTo(currentPosition)
-                        // 松手后恢复轮询，并立即同步一次真实位置
+                        player?.seekTo(currentPosition)
                         isUserSeeking = false
-                        currentPosition = player.currentPosition
                     },
                     modifier = Modifier.fillMaxWidth(),
                     colors = androidx.compose.material3.SliderDefaults.colors(
@@ -868,7 +900,7 @@ private fun VideoContent(
                 ) {
                     // Play/Pause
                     IconButton(onClick = {
-                        if (isPlaying) player.pause() else player.play()
+                        if (isPlaying) player?.pause() else player?.play()
                     }) {
                         Icon(
                             imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
@@ -883,7 +915,7 @@ private fun VideoContent(
                             TextButton(
                                 onClick = {
                                     playbackSpeed = speed
-                                    player.setPlaybackSpeed(speed)
+                                    player?.setPlaybackSpeed(speed)
                                 },
                                 modifier = Modifier.size(36.dp, 32.dp),
                                 contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
@@ -902,6 +934,9 @@ private fun VideoContent(
         }
     }
 }
+
+/** 视频三态：详情海报 → 播放 → 结束（重播）。 */
+private enum class VideoPlaybackState { POSTER, PLAYING, ENDED }
 
 private fun formatVideoTime(ms: Long): String {
     val totalSeconds = ms / 1000
