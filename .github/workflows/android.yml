@@ -44,7 +44,12 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android build dependencies
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+        # runner 镜像的 cmdline-tools 16 与 setup-android@v3 的许可预接受集合不齐，
+        # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
+        # 2026-10 工具链升级：compileSdk 37 / AGP 9.5 默认 build-tools 36.0.0。
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -91,7 +96,12 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android build dependencies
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+        # runner 镜像的 cmdline-tools 16 与 setup-android@v3 的许可预接受集合不齐，
+        # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
+        # 2026-10 工具链升级：compileSdk 37 / AGP 9.5 默认 build-tools 36.0.0。
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -131,7 +141,12 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android build dependencies
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+        # runner 镜像的 cmdline-tools 16 与 setup-android@v3 的许可预接受集合不齐，
+        # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
+        # 2026-10 工具链升级：compileSdk 37 / AGP 9.5 默认 build-tools 36.0.0。
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -179,7 +194,12 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android build dependencies
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+        # runner 镜像的 cmdline-tools 16 与 setup-android@v3 的许可预接受集合不齐，
+        # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
+        # 2026-10 工具链升级：compileSdk 37 / AGP 9.5 默认 build-tools 36.0.0。
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -221,7 +241,12 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android build dependencies
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+        # runner 镜像的 cmdline-tools 16 与 setup-android@v3 的许可预接受集合不齐，
+        # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
+        # 2026-10 工具链升级：compileSdk 37 / AGP 9.5 默认 build-tools 36.0.0。
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
