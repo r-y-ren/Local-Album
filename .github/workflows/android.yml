@@ -45,8 +45,12 @@ jobs:
         # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
         # 2026-10 工具链升级：compileSdk 37 / AGP 9.5 默认 build-tools 36.0.0。
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER=$(ls -1 "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort | tail -1)
+          [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
+          echo "Using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -94,8 +98,12 @@ jobs:
         # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
         # 2026-10 工具链升级：compileSdk 37 / AGP 9.5 默认 build-tools 36.0.0。
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER=$(ls -1 "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort | tail -1)
+          [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
+          echo "Using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -136,8 +144,12 @@ jobs:
         # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
         # 2026-10 工具链升级：compileSdk 37 / AGP 9.5 默认 build-tools 36.0.0。
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER=$(ls -1 "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort | tail -1)
+          [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
+          echo "Using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -186,8 +198,12 @@ jobs:
         # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
         # 2026-10 工具链升级：compileSdk 37 / AGP 9.5 默认 build-tools 36.0.0。
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER=$(ls -1 "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort | tail -1)
+          [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
+          echo "Using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
@@ -230,8 +246,12 @@ jobs:
         # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
         # 2026-10 工具链升级：compileSdk 37 / AGP 9.5 默认 build-tools 36.0.0。
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER=$(ls -1 "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort | tail -1)
+          [ -n "$SDKMANAGER" ] || SDKMANAGER=$(command -v sdkmanager)
+          echo "Using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
