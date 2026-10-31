@@ -40,9 +40,6 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android build dependencies
         # runner 镜像的 cmdline-tools 16 与 setup-android@v3 的许可预接受集合不齐，
         # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
@@ -92,9 +89,6 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android build dependencies
         # runner 镜像的 cmdline-tools 16 与 setup-android@v3 的许可预接受集合不齐，
         # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
@@ -136,9 +130,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
 
       - name: Install Android build dependencies
         # runner 镜像的 cmdline-tools 16 与 setup-android@v3 的许可预接受集合不齐，
@@ -190,9 +181,6 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android build dependencies
         # runner 镜像的 cmdline-tools 16 与 setup-android@v3 的许可预接受集合不齐，
         # sdkmanager 会因 SDK Preview 条款交互确认而退出 —— 先全量接受许可再安装。
@@ -236,9 +224,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
 
       - name: Install Android build dependencies
         # runner 镜像的 cmdline-tools 16 与 setup-android@v3 的许可预接受集合不齐，
